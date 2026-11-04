@@ -1,0 +1,576 @@
+package com.catfee.rootauto.agent
+
+import android.content.Context
+import android.graphics.Rect
+import android.util.Log
+import com.catfee.rootauto.a11y.UiObserverService
+import com.catfee.rootauto.llm.LlmClient
+import com.catfee.rootauto.llm.LlmSettings
+import com.catfee.rootauto.ocr.OcrEngine
+import com.catfee.rootauto.root.DaemonClient
+import com.catfee.rootauto.root.RootShell
+import com.catfee.rootauto.root.ScreenVision
+import kotlinx.coroutines.delay
+import org.json.JSONArray
+import org.json.JSONObject
+
+/**
+ * ToolRuntime —— Agent 原子工具的实际执行器
+ *
+ * 功能描述:
+ *   把「查找/点击/滑动/输入/等待/截图/OCR/视觉/应用管理/系统命令/文件/LLM」这些
+ *   手机操作封装成纯文本返回的函数, 供 AgentTools 的工具定义统一调度。
+ *   所有函数都尽量返回「人能读懂的一句话 + 关键数据」, 方便直接回灌给模型。
+ *
+ * 设计原则:
+ *   1. 原子化: 一个工具只做一件事, 复杂流程交给 Agent 组合。
+ *   2. 通用: 不绑定任何具体 App, 所有应用都用同一套。
+ *   3. 可降级: 无障碍读不到的 WebView/iframe 用 OCR / 视觉工具补。
+ *
+ * 修改时间: 2026-11-03
+ */
+object ToolRuntime {
+
+    private const val TAG = "ToolRuntime"
+
+    /** 上一次 observe 时的界面指纹, 用于 verify_changed */
+    @Volatile
+    private var lastObservedHash: String = ""
+
+    /** 上一次 OCR 文本的哈希, 用于去重 */
+    @Volatile
+    private var lastOcrHash: String = ""
+
+    // ---------------- 观察 ----------------
+
+    /**
+     * 功能: 计算当前界面指纹 (文字/描述/id/坐标的哈希)
+     * 返回: 16 进制哈希; 无无障碍服务时返回空串
+     * 使用场景: observe 去重、verify_changed
+     */
+    fun currentScreenHash(): String {
+        val tree = UiObserverService.instance?.dumpTree(800).orEmpty()
+        if (tree.isEmpty()) return ""
+        val sb = StringBuilder()
+        tree.forEach { n ->
+            if (n.text.isNotBlank() || n.desc.isNotBlank() || n.resourceId.isNotBlank()) {
+                sb.append(n.text).append('|').append(n.desc).append('|')
+                    .append(n.resourceId).append('|').append(n.bounds).append('\n')
+            }
+        }
+        return Integer.toHexString(sb.toString().hashCode())
+    }
+
+    /** observe 时记录指纹, 供 verify_changed 比较 */
+    fun markObserved(hash: String) {
+        lastObservedHash = hash
+    }
+
+    /**
+     * 功能: 验证界面相对上一次 observe 是否发生变化
+     * 返回: 变化/未变化 + 新指纹
+     * 使用场景: 点击/输入/滑动后确认动作是否真的生效
+     */
+    fun verifyChanged(): String {
+        val now = currentScreenHash()
+        if (now.isEmpty()) return "无法读取界面树, 不能判断变化"
+        val changed = now != lastObservedHash
+        return if (changed) "界面已变化 (hash=$now)" else "界面未变化 (hash=$now), 上一步可能无效"
+    }
+
+    /**
+     * 功能: 验证屏幕上的文字 (无障碍 + OCR 两种独立证据)
+     * 参数: keyword 关键字
+     * 返回: PASS/FAIL + 两种证据
+     * 使用场景: 提交前确认提示、确认弹窗、题目是否完整
+     */
+    suspend fun verifyText(keyword: String): String {
+        if (keyword.isBlank()) return "keyword 为空"
+        val a11y = UiObserverService.instance?.dumpTree(800).orEmpty()
+        val a11yHit = a11y.any { it.text.contains(keyword) || it.desc.contains(keyword) }
+        val (bmp, err) = ScreenVision.captureBitmap()
+        val ocrHit = if (bmp == null) false else try {
+            OcrEngine.rowsOf(bmp).any { it.text.contains(keyword) }
+        } finally {
+            bmp.recycle()
+        }
+        val pass = a11yHit || ocrHit
+        return "${if (pass) "PASS" else "FAIL"} 「$keyword」: 无障碍=$a11yHit, OCR=$ocrHit" +
+            if (bmp == null) " (OCR 截图失败: $err)" else ""
+    }
+
+    /**
+     * 功能: 验证某个坐标上的选项是否被选中 (按像素颜色)
+     * 参数: x,y 选项圆圈/方框中心
+     * 返回: 已选中/未选中 + 蓝色占比
+     * 说明:
+     *   多数 App 的选中态是蓝色实心, 未选中是白底蓝边。
+     *   视觉模型对这种细粒度状态经常看错, 像素颜色比它可靠。
+     * 使用场景: 每题作答后逐项确认
+     */
+    suspend fun verifyOption(x: Int, y: Int): String {
+        val (bmp, err) = ScreenVision.captureBitmap()
+        if (bmp == null) return "截图失败: $err"
+        return try {
+            val ratio = blueRatio(bmp, x, y)
+            "${if (ratio > 40) "已选中" else "未选中"} ($x,$y): 蓝色占比 $ratio%"
+        } finally {
+            bmp.recycle()
+        }
+    }
+
+    /**
+     * 功能: 一次验证一道题所有选项的选中状态
+     * 参数: options JSON 数组, 每项 { letter, x, y }
+     * 返回: 逐项状态 + 汇总 (已选中: A,C / 未选中: B,D)
+     * 使用场景:
+     *   多选题逐项点完后, 一次调用核对整题; 再调一次就是"每题检查两次"的第二遍。
+     *   只截一张图, 比逐个 verify_option 更快、更一致 (避免截图时机不同)。
+     */
+    suspend fun verifyQuestion(options: JSONArray): String {
+        if (options.length() == 0) return "options 为空, 需要 [{letter,x,y}, ...]"
+        if (options.length() > 12) return "选项太多 (${options.length()}), 最多 12 个"
+        val (bmp, err) = ScreenVision.captureBitmap()
+        if (bmp == null) return "截图失败: $err"
+        return try {
+            val selected = ArrayList<String>()
+            val unselected = ArrayList<String>()
+            val lines = StringBuilder()
+            for (i in 0 until options.length()) {
+                val o = options.optJSONObject(i) ?: continue
+                val letter = o.optString("letter").ifBlank { "?" }
+                val x = o.optInt("x", -1)
+                val y = o.optInt("y", -1)
+                if (x < 0 || y < 0) {
+                    lines.append("  $letter: 坐标无效\n")
+                    continue
+                }
+                val ratio = blueRatio(bmp, x, y)
+                // 未选中选项的蓝边也能采到 20%~30%, 阈值必须高于它
+                val on = ratio > 40
+                if (on) selected.add(letter) else unselected.add(letter)
+                lines.append("  $letter (${x},${y}): ")
+                    .append(if (on) "已选中" else "未选中")
+                    .append(", 蓝色 ").append(ratio).append("%\n")
+            }
+            "整题核对:\n$lines" +
+                "汇总: 已选中 [${selected.joinToString(",")}], " +
+                "未选中 [${unselected.joinToString(",")}]"
+        } finally {
+            bmp.recycle()
+        }
+    }
+
+    /** 采样一个选项圆圈的蓝色占比 (0~100) */
+    private fun blueRatio(bmp: android.graphics.Bitmap, x: Int, y: Int, radius: Int = 16): Int {
+        var blue = 0
+        var total = 0
+        var dy = -radius
+        while (dy <= radius) {
+            var dx = -radius
+            while (dx <= radius) {
+                val px = bmp.getPixel(
+                    (x + dx).coerceIn(0, bmp.width - 1),
+                    (y + dy).coerceIn(0, bmp.height - 1)
+                )
+                val rr = (px shr 16) and 0xFF
+                val gg = (px shr 8) and 0xFF
+                val bb = px and 0xFF
+                total++
+                if (bb > 150 && bb > rr + 30 && bb > gg + 10) blue++
+                dx += 4
+            }
+            dy += 4
+        }
+        return if (total == 0) 0 else blue * 100 / total
+    }
+
+    /** 当前前台包名/Activity */
+    suspend fun currentActivity(): String {
+        val line = RootShell.execText("dumpsys window 2>/dev/null | grep -m1 mCurrentFocus")
+        val inner = line.substringAfter('{', "").substringBefore('}')
+        val target = inner.split(' ').lastOrNull { it.contains('/') }.orEmpty()
+        return if (target.isBlank()) "读取失败: $line" else target
+    }
+
+    /** 按文字/描述查找节点, 返回前 20 条 */
+    fun findText(keyword: String, exact: Boolean, byDesc: Boolean): String {
+        val svc = UiObserverService.instance ?: return "无障碍服务未连接"
+        if (keyword.isBlank()) return "keyword 为空"
+        val tree = svc.dumpTree(800)
+        val hits = tree.filter { n ->
+            val v = if (byDesc) n.desc else n.text
+            if (exact) v == keyword else v.contains(keyword)
+        }.take(20)
+        if (hits.isEmpty()) return "未找到「$keyword」"
+        return buildString {
+            append("找到 ${hits.size} 个「$keyword」:\n")
+            hits.forEach { n ->
+                append("  [${n.index}] ")
+                append(n.cls)
+                if (n.text.isNotBlank()) append(" text=\"").append(n.text).append('"')
+                if (n.desc.isNotBlank()) append(" desc=\"").append(n.desc).append('"')
+                if (n.resourceId.isNotBlank()) append(" id=").append(n.resourceId.substringAfterLast('/'))
+                append(" clickable=").append(n.clickable)
+                append(" bounds=(").append(n.bounds.centerX()).append(',').append(n.bounds.centerY()).append(')')
+                append('\n')
+            }
+        }
+    }
+
+    /**
+     * 功能: 列出当前屏幕的选项/单选框/复选框
+     * 参数: keyword 选项文字关键字, 空=匹配「选项」或 RadioButton/CheckBox
+     * 返回: 每个选项的文字、选中状态、中心坐标、是否可点击
+     * 使用场景:
+     *   单选题/多选题优先用这个读状态, 它来自无障碍的 checked/selected/「已选择」,
+     *   比 OCR 坐标猜像素可靠; 滚动后重新调用, 不要复用旧坐标。
+     */
+    fun listOptions(keyword: String): String {
+        val svc = UiObserverService.instance ?: return "无障碍服务未连接"
+        val tree = svc.dumpTree(1000)
+        val kw = keyword.ifBlank { "选项" }
+        // 不强制 visible/bounds: WebView 虚拟节点经常报 visible=false 或负坐标,
+        // 但文字里的「已选择」仍然可靠; 坐标无效时提示需要滚动。
+        val hits = tree.filter { n ->
+            n.text.contains(kw) || n.desc.contains(kw) ||
+                n.cls.contains("RadioButton") || n.cls.contains("CheckBox")
+        }.sortedWith(
+            compareBy(
+                { if (it.bounds.isEmpty) Int.MAX_VALUE else it.bounds.top },
+                { if (it.bounds.isEmpty) Int.MAX_VALUE else it.bounds.left }
+            )
+        ).take(30)
+        if (hits.isEmpty()) return "未找到选项节点。如果页面是纯画布/iframe, 改用 ocr + verify_question"
+        return buildString {
+            append("选项 ${hits.size} 个 (按屏幕位置排序):\n")
+            hits.forEachIndexed { i, n ->
+                val label = n.text.ifBlank { n.desc }.replace("\n", " ").take(80)
+                val on = n.checked || n.selected ||
+                    n.text.contains("已选择") || n.text.contains("已勾选") ||
+                    n.text.contains("选中")
+                append("[").append(i + 1).append("] ").append(label)
+                append(" | ").append(if (on) "已选中" else "未选中")
+                if (!n.bounds.isEmpty) {
+                    append(" | center=(").append(n.bounds.centerX()).append(',').append(n.bounds.centerY()).append(')')
+                } else {
+                    append(" | 坐标无效(需滚动后重读)")
+                }
+                append(" | clickable=").append(n.clickable)
+                if (n.resourceId.isNotBlank()) append(" | id=").append(n.resourceId.substringAfterLast('/'))
+                append('\n')
+            }
+        }
+    }
+
+    /** 截图并返回尺寸/路径 */
+    suspend fun screenshot(): String {
+        val (ok, w, h) = DaemonClient.shot()
+        return if (ok) "截图成功: ${w}x$h -> /data/local/tmp/catfee_shot.raw" else "截图失败"
+    }
+
+    /** 本地 OCR 当前屏幕, 返回前 60 行文字与坐标 */
+    suspend fun ocr(): String {
+        val (bmp, err) = ScreenVision.captureBitmap()
+        if (bmp == null) return "OCR 截图失败: $err"
+        return try {
+            val rows = OcrEngine.rowsOf(bmp)
+            if (rows.isEmpty()) return "OCR 未识别到文字"
+            val full = rows.joinToString("\n") { "${it.text}@${it.box.centerX()},${it.box.centerY()}" }
+            val hash = Integer.toHexString(full.hashCode())
+            if (hash == lastOcrHash) {
+                return "OCR 内容未变化 (hash=$hash), 不要再重复 OCR; 需要定位请用 find_text 或直接操作"
+            }
+            lastOcrHash = hash
+            buildString {
+                append("OCR ${rows.size} 行 (hash=").append(hash).append("):\n")
+                rows.take(60).forEach { r ->
+                    append("  (").append(r.box.centerX()).append(',').append(r.box.centerY()).append(") ")
+                    append(r.text).append('\n')
+                }
+            }
+        } finally {
+            bmp.recycle()
+        }
+    }
+
+    /**
+     * 等待某个文字出现
+     *   无障碍每秒查一次; OCR 每 10 秒补一次 (视频完成提示在 WebView 里, 无障碍可能读不到)。
+     *   单次最长 5 分钟, 等待期间每 15 秒发一条进度, 避免界面长时间无反馈。
+     */
+    suspend fun waitForText(keyword: String, timeoutMs: Long): String {
+        if (keyword.isBlank()) return "keyword 为空"
+        val start = System.currentTimeMillis()
+        val timeout = timeoutMs.coerceIn(500, 300_000)
+        var lastOcr = 0L
+        var lastReport = 0L
+        while (System.currentTimeMillis() - start < timeout) {
+            val tree = UiObserverService.instance?.dumpTree(600).orEmpty()
+            if (tree.any { it.text.contains(keyword) || it.desc.contains(keyword) }) {
+                return "已出现「$keyword」(无障碍), 耗时 ${System.currentTimeMillis() - start}ms"
+            }
+            val now = System.currentTimeMillis()
+            if (now - lastOcr >= 10_000) {
+                lastOcr = now
+                val (bmp, _) = ScreenVision.captureBitmap()
+                if (bmp != null) {
+                    try {
+                        val hit = OcrEngine.rowsOf(bmp).any { it.text.contains(keyword) }
+                        if (hit) {
+                            return "已出现「$keyword」(OCR), 耗时 ${now - start}ms"
+                        }
+                    } finally {
+                        bmp.recycle()
+                    }
+                }
+            }
+            if (now - lastReport >= 15_000) {
+                lastReport = now
+                AgentController.publishStep(
+                    "system",
+                    "等待「$keyword」中 · ${(now - start) / 1000}s / ${timeout / 1000}s",
+                    "wait_for_text"
+                )
+            }
+            delay(1000)
+        }
+        return "等待超时(${timeout}ms), 未出现「$keyword」"
+    }
+
+    // ---------------- 点击 ----------------
+
+    /** 按文字点击; 找不到时返回候选 */
+    suspend fun tapText(keyword: String, exact: Boolean): String {
+        val svc = UiObserverService.instance ?: return "无障碍服务未连接"
+        val tree = svc.dumpTree(800)
+        val node = tree.firstOrNull {
+            val v = if (it.text.isNotBlank()) it.text else it.desc
+            if (exact) v == keyword else v.contains(keyword)
+        } ?: return "未找到「$keyword」, 先用 find_text 看候选"
+        val target = clickableAncestor(tree, node) ?: node
+        val ok = DaemonClient.tap(target.bounds.centerX(), target.bounds.centerY())
+        return if (ok) "已点击「$keyword」(${target.bounds.centerX()},${target.bounds.centerY()})" else "点击失败"
+    }
+
+    /** 按 contentDescription 点击 */
+    suspend fun tapDesc(keyword: String): String {
+        val svc = UiObserverService.instance ?: return "无障碍服务未连接"
+        val tree = svc.dumpTree(800)
+        val node = tree.firstOrNull { it.desc.contains(keyword) }
+            ?: return "未找到描述包含「$keyword」的节点"
+        val target = clickableAncestor(tree, node) ?: node
+        val ok = DaemonClient.tap(target.bounds.centerX(), target.bounds.centerY())
+        return if (ok) "已点击描述「$keyword」" else "点击失败"
+    }
+
+    /** 按 resource-id 后缀点击 */
+    suspend fun tapId(idSuffix: String): String {
+        val svc = UiObserverService.instance ?: return "无障碍服务未连接"
+        val tree = svc.dumpTree(800)
+        val node = tree.firstOrNull { it.resourceId.endsWith(idSuffix) }
+            ?: return "未找到 id 以「$idSuffix」结尾的节点"
+        val target = clickableAncestor(tree, node) ?: node
+        val ok = DaemonClient.tap(target.bounds.centerX(), target.bounds.centerY())
+        return if (ok) "已点击 id=$idSuffix" else "点击失败"
+    }
+
+    suspend fun longPress(x: Int, y: Int, holdMs: Int): String =
+        if (DaemonClient.longPress(x, y, holdMs.coerceIn(100, 10_000))) "已长按 ($x,$y)" else "长按失败"
+
+    suspend fun doubleTap(x: Int, y: Int): String =
+        if (DaemonClient.doubleTap(x, y)) "已双击 ($x,$y)" else "双击失败"
+
+    /** 按方向滑动; distance 为屏幕短边的比例 (0~1) */
+    suspend fun swipeDirection(direction: String, distance: Float, durationMs: Int): String {
+        val (w, h) = DaemonClient.screenSize()
+        val d = (minOf(w, h) * distance.coerceIn(0.1f, 0.9f)).toInt()
+        val cx = w / 2
+        val cy = h / 2
+        val (x1, y1, x2, y2) = when (direction.lowercase()) {
+            "up" -> intArrayOf(cx, cy + d / 2, cx, cy - d / 2)
+            "down" -> intArrayOf(cx, cy - d / 2, cx, cy + d / 2)
+            "left" -> intArrayOf(cx + d / 2, cy, cx - d / 2, cy)
+            "right" -> intArrayOf(cx - d / 2, cy, cx + d / 2, cy)
+            else -> return "不支持的方向: $direction (up/down/left/right)"
+        }
+        val ok = DaemonClient.swipe(x1, y1, x2, y2, durationMs.coerceIn(80, 3000))
+        return if (ok) "已向 $direction 滑动" else "滑动失败"
+    }
+
+    // ---------------- 输入 ----------------
+
+    suspend fun clearText(): String {
+        val svc = UiObserverService.instance ?: return "无障碍服务未连接"
+        return if (svc.setTextOnFocused("")) "已清空当前输入框" else "清空失败: 当前没有可编辑输入框"
+    }
+
+    suspend fun setTextId(idSuffix: String, text: String): String {
+        val svc = UiObserverService.instance ?: return "无障碍服务未连接"
+        return if (svc.setTextById(idSuffix, text)) "已写入 id=$idSuffix" else "写入失败: 未找到可编辑的 id=$idSuffix"
+    }
+
+    // ---------------- 滚动 ----------------
+
+    /** 反复上滑直到文字出现 */
+    suspend fun scrollToText(keyword: String, maxScrolls: Int): String {
+        if (keyword.isBlank()) return "keyword 为空"
+        repeat(maxScrolls.coerceIn(1, 30)) { i ->
+            val tree = UiObserverService.instance?.dumpTree(800).orEmpty()
+            if (tree.any { it.text.contains(keyword) || it.desc.contains(keyword) }) {
+                return "第 ${i + 1} 次滚动前已看到「$keyword」"
+            }
+            DaemonClient.swipe(540, 1900, 540, 750, 420)
+            delay(700)
+        }
+        val tree = UiObserverService.instance?.dumpTree(800).orEmpty()
+        return if (tree.any { it.text.contains(keyword) || it.desc.contains(keyword) }) {
+            "滚动 ${maxScrolls} 次后找到「$keyword」"
+        } else {
+            "滚动 ${maxScrolls} 次仍未找到「$keyword」"
+        }
+    }
+
+    // ---------------- 应用/系统 ----------------
+
+    suspend fun launchActivity(component: String): String {
+        if (component.isBlank() || !component.contains('/')) return "component 格式应为 包名/Activity"
+        val r = RootShell.exec("am start -n $component 2>&1")
+        return if (r.ok && !r.stdout.contains("Error")) "已启动 $component" else "启动失败: ${(r.stdout + r.stderr).take(200)}"
+    }
+
+    suspend fun stopApp(pkg: String): String {
+        if (pkg.isBlank()) return "包名为空"
+        val r = RootShell.exec("am force-stop $pkg")
+        return if (r.ok) "已停止 $pkg" else "停止失败: ${r.stderr.take(160)}"
+    }
+
+    suspend fun listPackages(keyword: String): String {
+        val cmd = if (keyword.isBlank()) "pm list packages" else "pm list packages | grep -i '$keyword'"
+        val r = RootShell.exec(cmd)
+        val lines = r.stdout.lines().filter { it.isNotBlank() }.take(80)
+        return if (lines.isEmpty()) "没有匹配的包" else lines.joinToString("\n")
+    }
+
+    suspend fun appInfo(pkg: String): String {
+        if (pkg.isBlank()) return "包名为空"
+        val r = RootShell.exec("dumpsys package $pkg | head -60")
+        return r.stdout.ifBlank { r.stderr }.take(3000)
+    }
+
+    suspend fun openUrl(url: String): String {
+        if (url.isBlank()) return "URL 为空"
+        val r = RootShell.exec("am start -a android.intent.action.VIEW -d '$url' 2>&1")
+        return if (r.ok && !r.stdout.contains("Error")) "已打开 $url" else "打开失败: ${(r.stdout + r.stderr).take(200)}"
+    }
+
+    suspend fun shell(cmd: String): String {
+        if (cmd.isBlank()) return "命令为空"
+        val r = RootShell.exec(cmd, 20_000)
+        val out = (r.stdout + if (r.stderr.isNotBlank()) "\n[stderr]\n" + r.stderr else "").trim()
+        return out.take(4000).ifBlank { "命令执行完成, 无输出 (code=${r.code})" }
+    }
+
+    suspend fun getProp(key: String): String {
+        if (key.isBlank()) return "key 为空"
+        val v = RootShell.execText("getprop $key")
+        return "$key=$v"
+    }
+
+    suspend fun settingsGet(namespace: String, key: String): String {
+        val v = RootShell.execText("settings get ${namespace.ifBlank { "system" }} $key")
+        return "$namespace/$key=$v"
+    }
+
+    suspend fun settingsPut(namespace: String, key: String, value: String): String {
+        if (key.isBlank()) return "key 为空"
+        val r = RootShell.exec("settings put ${namespace.ifBlank { "system" }} $key '$value'")
+        return if (r.ok) "已写入 $namespace/$key=$value" else "写入失败: ${r.stderr.take(160)}"
+    }
+
+    suspend fun fileRead(path: String): String {
+        if (path.isBlank()) return "path 为空"
+        val r = RootShell.exec("cat '$path'", 10_000)
+        return (r.stdout.ifBlank { r.stderr }).take(5000)
+    }
+
+    suspend fun fileWrite(path: String, content: String): String {
+        if (path.isBlank()) return "path 为空"
+        val b64 = android.util.Base64.encodeToString(content.toByteArray(), android.util.Base64.NO_WRAP)
+        val r = RootShell.exec("echo '$b64' | base64 -d > '$path'", 10_000)
+        return if (r.ok) "已写入 ${content.length} 字符到 $path" else "写入失败: ${r.stderr.take(160)}"
+    }
+
+    suspend fun fileList(path: String): String {
+        val p = path.ifBlank { "/data/local/tmp" }
+        val r = RootShell.exec("ls -la '$p'", 10_000)
+        return (r.stdout.ifBlank { r.stderr }).take(4000)
+    }
+
+    // ---------------- LLM ----------------
+
+    /**
+     * 功能: 让 LLM 回答一个子问题, 可临时指定模型
+     * 参数: provider 当前配置; prompt 问题; model 可选模型名 (空=用当前模型)
+     * 返回: 模型回答
+     * 使用场景: Agent 做题/读题/总结时, 可切换到更强的中文模型
+     */
+    suspend fun askLlm(provider: LlmSettings.Provider, prompt: String, model: String): String {
+        if (prompt.isBlank()) return "prompt 为空"
+        val p = if (model.isBlank()) provider else provider.copy(model = model)
+        val messages = JSONArray().put(
+            JSONObject().put("role", "system").put(
+                "content",
+                "你是一个严谨的答题与信息分析助手。先在心里逐步分析, 再给出简洁结论; 不确定时说明原因。"
+            )
+        ).put(JSONObject().put("role", "user").put("content", prompt))
+        val r = LlmClient.chat(p, messages, 120_000)
+        return if (r.ok) r.content else "LLM 调用失败: ${r.error}"
+    }
+
+    /**
+     * 功能: 同一问题问两个模型, 返回两份答案供 Agent 对比
+     * 参数: provider 当前配置; prompt 问题; modelB 第二模型 (默认 glm-5.2)
+     * 返回: 两个模型的回答
+     * 使用场景: 做题/关键判断需要第二意见时
+     */
+    suspend fun secondOpinion(provider: LlmSettings.Provider, prompt: String, modelB: String): String {
+        if (prompt.isBlank()) return "prompt 为空"
+        val second = modelB.ifBlank { "glm-5.2" }
+        val a = askLlm(provider, prompt, "")
+        val b = askLlm(provider, prompt, second)
+        return "模型A(${provider.model}):\n$a\n\n模型B($second):\n$b"
+    }
+
+    /** 工具清单 (给 Agent/用户查看) */
+    fun catalog(): String = """
+        |观察: observe, read_page, find_text, list_options, get_activity, screenshot, ocr, long_ocr, see_screen, wait_for_text
+        |点击: tap, tap_text, tap_desc, tap_id, long_press, double_tap, swipe, swipe_direction
+        |输入: input_text, clear_text, set_text_id, key
+        |滚动: scroll_to_text, swipe_direction
+        |应用: launch_app, launch_activity, stop_app, list_packages, app_info, open_url
+        |系统: shell, get_prop, settings_get, settings_put, file_read, file_write, file_list
+        |验证: verify_text, verify_option, verify_question, verify_changed
+        |LLM: ask_llm, second_opinion
+        |表单: answer_form
+        |流程: todo_write, todo_read, note, wait, finish
+        |记忆: memory_read, memory_write, memory_list
+    """.trimMargin()
+
+    // ---------------- 内部 ----------------
+
+    /** 向上找最近的可点击祖先 */
+    private fun clickableAncestor(
+        tree: List<UiObserverService.TreeNode>,
+        node: UiObserverService.TreeNode
+    ): UiObserverService.TreeNode? {
+        var cur: UiObserverService.TreeNode? = node
+        var guard = 0
+        while (cur != null && guard < 8) {
+            if (cur.clickable) return cur
+            cur = tree.getOrNull(cur.parent)
+            guard++
+        }
+        return null
+    }
+}

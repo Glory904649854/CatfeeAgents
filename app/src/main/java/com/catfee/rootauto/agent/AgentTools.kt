@@ -1,0 +1,847 @@
+﻿package com.catfee.rootauto.agent
+
+import android.content.Context
+import android.util.Log
+import com.catfee.rootauto.a11y.UiObserverService
+import com.catfee.rootauto.llm.LlmSettings
+import com.catfee.rootauto.ocr.LongOcr
+import com.catfee.rootauto.root.DaemonClient
+import com.catfee.rootauto.root.RootShell
+import com.catfee.rootauto.root.ScreenVision
+import org.json.JSONArray
+import org.json.JSONObject
+
+/**
+ * AgentTools —— Agent 可调用的原子工具集
+ *
+ * 功能描述:
+ *   把「看屏幕 / 点 / 滑 / 输入 / 启应用 / 等」这些最底层的手机操作
+ *   包装成 OpenAI function calling 的工具定义与执行器。
+ *   工具尽量原子化, 由 LLM 自己组合出复杂流程, 而不是把业务逻辑写死。
+ *
+ * 参数说明:
+ *   execute() 的 provider 仅用于视觉降级 (无障碍读不到内容时截图问模型)。
+ *
+ * 返回值说明:
+ *   execute() 统一返回一段纯文本, 直接作为 tool 消息回灌给模型。
+ *
+ * 使用场景:
+ *   ReActAgent 每一轮的工具调用。
+ *
+ * 修改时间: 2026-11-03
+ */
+object AgentTools {
+
+    private const val TAG = "AgentTools"
+
+    /** 上一次 observe 的界面文本哈希, 用于去重 */
+    @Volatile
+    private var lastObserveHash: String = ""
+
+    /** observe 之后等待界面稳定的默认时间, 太短会读到旧界面 */
+    const val DEFAULT_SETTLE_MS = 800L
+
+    /**
+     * 功能: 生成全部工具定义 (OpenAI function 格式)
+     * 参数: 无
+     * 返回: JSONArray, 可直接放入请求体 tools 字段
+     * 使用场景: 每轮 ReAct 请求都带上
+     */
+    fun definitions(): JSONArray = JSONArray()
+        .put(tool("observe", "获取当前屏幕的界面元素列表。每次操作后都应调用它确认结果。", obj()))
+        .put(
+            tool(
+                "tap", "按绝对坐标点击屏幕。优先使用 tap_text, 只有在拿不到文本时才用坐标。",
+                obj()
+                    .put("x", prop("integer", "横坐标(像素)"))
+                    .put("y", prop("integer", "纵坐标(像素)"))
+                    .also { it.put("required", JSONArray().put("x").put("y")) }
+            )
+        )
+        .put(
+            tool(
+                "tap_text", "按文本内容点击控件, 比坐标点击更稳定。",
+                obj()
+                    .put("text", prop("string", "控件上显示的文字或描述, 支持部分匹配"))
+                    .put("exact", prop("boolean", "true=完全相等, 默认 false 表示包含匹配"))
+                    .also { it.put("required", JSONArray().put("text")) }
+            )
+        )
+        .put(
+            tool(
+                "swipe", "滑动屏幕。上滑看更多内容时 y1 大于 y2。",
+                obj()
+                    .put("x1", prop("integer", "起点横坐标"))
+                    .put("y1", prop("integer", "起点纵坐标"))
+                    .put("x2", prop("integer", "终点横坐标"))
+                    .put("y2", prop("integer", "终点纵坐标"))
+                    .put("duration_ms", prop("integer", "滑动时长, 默认 300 毫秒"))
+                    .also { it.put("required", JSONArray().put("x1").put("y1").put("x2").put("y2")) }
+            )
+        )
+        .put(
+            tool(
+                "input_text", "向当前聚焦的输入框写入文本, 支持中文。会先清空原有内容。",
+                obj()
+                    .put("text", prop("string", "要写入的完整文本"))
+                    .also { it.put("required", JSONArray().put("text")) }
+            )
+        )
+        .put(
+            tool(
+                "key", "发送系统按键。back=返回, home=回桌面, enter=回车, recent=最近任务。",
+                obj()
+                    .put("name", prop("string", "按键名: back / home / enter / recent"))
+                    .also { it.put("required", JSONArray().put("name")) }
+            )
+        )
+        .put(
+            tool(
+                "launch_app", "按包名启动一个应用。",
+                obj()
+                    .put("package", prop("string", "应用包名"))
+                    .also { it.put("required", JSONArray().put("package")) }
+            )
+        )
+        .put(
+            tool(
+                "wait", "等待一段时间, 用于视频缓冲、页面加载、动画结束。单次最长 5 分钟, 可重复调用。",
+                obj()
+                    .put("ms", prop("integer", "等待毫秒数, 建议 1000~5000"))
+                    .also { it.put("required", JSONArray().put("ms")) }
+            )
+        )
+        .put(
+            tool(
+                "read_page", "导出当前页面完整无障碍树 (文字/描述/坐标/可点击), 比 observe 更全, 适合扫描列表。",
+                obj()
+            )
+        )
+        .put(
+            tool(
+                "find_text", "按文字/描述查找控件, 返回候选列表 (坐标/id/是否可点击)。点不到时先用它。",
+                obj()
+                    .put("keyword", prop("string", "关键字"))
+                    .put("exact", prop("boolean", "true=完全相等, 默认 false"))
+                    .put("by_desc", prop("boolean", "true=查 contentDescription, 默认 false 查 text"))
+                    .also { it.put("required", JSONArray().put("keyword")) }
+            )
+        )
+        .put(
+            tool(
+                "list_options", "列出当前屏幕的选项/单选框/复选框: 文字、是否选中、中心坐标。每题优先用它核对; 滚动后重新调用, 不要复用旧坐标。",
+                obj().put("keyword", prop("string", "选项文字关键字, 可空 (默认匹配「选项」/RadioButton/CheckBox)"))
+            )
+        )
+        .put(tool("get_activity", "读取当前前台包名/Activity。", obj()))
+        .put(tool("screenshot", "截屏并返回尺寸/路径。", obj()))
+        .put(
+            tool(
+                "ocr", "本地 OCR 当前屏幕, 返回文字+坐标。WebView/iframe 无障碍读不到时用它。",
+                obj()
+            )
+        )
+        .put(
+            tool(
+                "long_ocr", "长页面滚动拼接 OCR: 从顶部逐屏截图, 合并整页文字+坐标。题目/列表长于一屏时用它, 避免滚到下面只看到答案。",
+                obj().put("max_screens", prop("integer", "最多滚动几屏, 默认 14"))
+            )
+        )
+        .put(
+            tool(
+                "wait_for_text", "等待某个文字出现 (无障碍每秒 + OCR 每10秒)。等待视频/任务完成提示时用, 单次最长 5 分钟。",
+                obj()
+                    .put("keyword", prop("string", "关键字, 如 已完成"))
+                    .put("timeout_ms", prop("integer", "超时毫秒, 默认 8000, 最大 300000 (5分钟)"))
+                    .also { it.put("required", JSONArray().put("keyword")) }
+            )
+        )
+        .put(
+            tool(
+                "tap_desc", "按 contentDescription 点击控件。",
+                obj().put("keyword", prop("string", "描述关键字"))
+                    .also { it.put("required", JSONArray().put("keyword")) }
+            )
+        )
+        .put(
+            tool(
+                "tap_id", "按 resource-id 后缀点击控件。",
+                obj().put("id_suffix", prop("string", "id 后缀, 如 btn_login"))
+                    .also { it.put("required", JSONArray().put("id_suffix")) }
+            )
+        )
+        .put(
+            tool(
+                "long_press", "长按坐标。",
+                obj()
+                    .put("x", prop("integer", "横坐标"))
+                    .put("y", prop("integer", "纵坐标"))
+                    .put("hold_ms", prop("integer", "按住毫秒, 默认 800"))
+                    .also { it.put("required", JSONArray().put("x").put("y")) }
+            )
+        )
+        .put(
+            tool(
+                "double_tap", "双击坐标。",
+                obj()
+                    .put("x", prop("integer", "横坐标"))
+                    .put("y", prop("integer", "纵坐标"))
+                    .also { it.put("required", JSONArray().put("x").put("y")) }
+            )
+        )
+        .put(
+            tool(
+                "swipe_direction", "按方向上/下/左/右滑动, 距离按屏幕短边比例。",
+                obj()
+                    .put("direction", prop("string", "up / down / left / right"))
+                    .put("distance", prop("number", "0.1~0.9, 默认 0.6"))
+                    .put("duration_ms", prop("integer", "默认 400"))
+                    .also { it.put("required", JSONArray().put("direction")) }
+            )
+        )
+        .put(
+            tool(
+                "scroll_to_text", "反复上滑直到文字出现。",
+                obj()
+                    .put("keyword", prop("string", "关键字"))
+                    .put("max_scrolls", prop("integer", "最多滚动次数, 默认 8"))
+                    .also { it.put("required", JSONArray().put("keyword")) }
+            )
+        )
+        .put(tool("clear_text", "清空当前焦点输入框。", obj()))
+        .put(
+            tool(
+                "set_text_id", "按 resource-id 后缀给输入框写入文本 (不依赖焦点)。",
+                obj()
+                    .put("id_suffix", prop("string", "id 后缀"))
+                    .put("text", prop("string", "要写入的文本"))
+                    .also { it.put("required", JSONArray().put("id_suffix").put("text")) }
+            )
+        )
+        .put(
+            tool(
+                "launch_activity", "按 包名/Activity 精确启动页面。",
+                obj().put("component", prop("string", "如 com.example.app/.MainActivity"))
+                    .also { it.put("required", JSONArray().put("component")) }
+            )
+        )
+        .put(
+            tool(
+                "stop_app", "强制停止应用。",
+                obj().put("package", prop("string", "包名"))
+                    .also { it.put("required", JSONArray().put("package")) }
+            )
+        )
+        .put(
+            tool(
+                "list_packages", "列出已安装包名, 可按关键字过滤。",
+                obj().put("keyword", prop("string", "过滤关键字, 可空"))
+            )
+        )
+        .put(
+            tool(
+                "app_info", "读取应用包信息 (版本/权限/Activity)。",
+                obj().put("package", prop("string", "包名"))
+                    .also { it.put("required", JSONArray().put("package")) }
+            )
+        )
+        .put(
+            tool(
+                "open_url", "用系统默认浏览器打开 URL。",
+                obj().put("url", prop("string", "URL"))
+                    .also { it.put("required", JSONArray().put("url")) }
+            )
+        )
+        .put(
+            tool(
+                "shell", "执行 root shell 命令并返回输出。仅用于通用系统查询/操作, 不要执行破坏性命令。",
+                obj().put("command", prop("string", "命令"))
+                    .also { it.put("required", JSONArray().put("command")) }
+            )
+        )
+        .put(
+            tool(
+                "get_prop", "读取系统属性。",
+                obj().put("key", prop("string", "属性名"))
+                    .also { it.put("required", JSONArray().put("key")) }
+            )
+        )
+        .put(
+            tool(
+                "settings_get", "读取 Settings (system/secure/global)。",
+                obj()
+                    .put("namespace", prop("string", "system/secure/global"))
+                    .put("key", prop("string", "键"))
+                    .also { it.put("required", JSONArray().put("key")) }
+            )
+        )
+        .put(
+            tool(
+                "settings_put", "写入 Settings (需要 root)。",
+                obj()
+                    .put("namespace", prop("string", "system/secure/global"))
+                    .put("key", prop("string", "键"))
+                    .put("value", prop("string", "值"))
+                    .also { it.put("required", JSONArray().put("key").put("value")) }
+            )
+        )
+        .put(
+            tool(
+                "file_read", "读取文件内容 (root)。",
+                obj().put("path", prop("string", "路径"))
+                    .also { it.put("required", JSONArray().put("path")) }
+            )
+        )
+        .put(
+            tool(
+                "file_write", "写入文件 (root, 覆盖)。",
+                obj()
+                    .put("path", prop("string", "路径"))
+                    .put("content", prop("string", "内容"))
+                    .also { it.put("required", JSONArray().put("path").put("content")) }
+            )
+        )
+        .put(
+            tool(
+                "file_list", "列目录 (root)。",
+                obj().put("path", prop("string", "路径, 默认 /data/local/tmp"))
+            )
+        )
+        .put(
+            tool(
+                "ask_llm", "让 LLM 回答一个子问题, 可临时指定模型 (如 glm-5.2 / kimi-k2.6)。适合做题、总结、分析。",
+                obj()
+                    .put("prompt", prop("string", "问题/指令"))
+                    .put("model", prop("string", "可选模型名, 空=当前模型"))
+                    .also { it.put("required", JSONArray().put("prompt")) }
+            )
+        )
+        .put(
+            tool(
+                "verify_text", "验证屏幕是否出现某段文字。同时用无障碍和 OCR 两种证据, 返回 PASS/FAIL。提交/确认前必查。",
+                obj().put("keyword", prop("string", "要确认的文字"))
+                    .also { it.put("required", JSONArray().put("keyword")) }
+            )
+        )
+        .put(
+            tool(
+                "verify_option", "按像素颜色验证某个坐标的选项是否已选中 (蓝色实心=选中)。比视觉模型猜复选框状态可靠。",
+                obj()
+                    .put("x", prop("integer", "选项圆圈/方框中心 x"))
+                    .put("y", prop("integer", "选项圆圈/方框中心 y"))
+                    .also { it.put("required", JSONArray().put("x").put("y")) }
+            )
+        )
+        .put(
+            tool(
+                "verify_question", "一次核对一道题所有选项的选中状态 (只截一张图)。多选题点完后调用; 再调一次就是第二遍复核。",
+                JSONObject()
+                    .put("type", "object")
+                    .put(
+                        "properties", JSONObject().put(
+                            "options", JSONObject()
+                                .put("type", "array")
+                                .put(
+                                    "items", JSONObject()
+                                        .put("type", "object")
+                                        .put(
+                                            "properties", JSONObject()
+                                                .put("letter", prop("string", "选项字母, 如 A"))
+                                                .put("x", prop("integer", "选项圆圈中心 x"))
+                                                .put("y", prop("integer", "选项圆圈中心 y"))
+                                        )
+                                        .put(
+                                            "required",
+                                            JSONArray().put("letter").put("x").put("y")
+                                        )
+                                )
+                        )
+                    )
+                    .put("required", JSONArray().put("options"))
+            )
+        )
+        .put(
+            tool(
+                "verify_changed", "验证当前界面相对上一次 observe 是否发生变化。动作后没变化就说明上一步可能无效。",
+                obj()
+            )
+        )
+        .put(
+            tool(
+                "second_opinion", "同一问题问两个模型 (当前模型 + 第二模型), 返回两份答案。关键题目/判断用来交叉验证。",
+                obj()
+                    .put("prompt", prop("string", "问题/指令"))
+                    .put("model_b", prop("string", "第二模型, 默认 glm-5.2"))
+                    .also { it.put("required", JSONArray().put("prompt")) }
+            )
+        )
+        .put(
+            tool(
+                "todo_write", "维护任务清单。多步骤任务先列清单, 每完成一项就更新状态; 清单会注入每轮上下文, 防止漏项。",
+                JSONObject()
+                    .put("type", "object")
+                    .put(
+                        "properties", JSONObject().put(
+                            "items", JSONObject()
+                                .put("type", "array")
+                                .put(
+                                    "items", JSONObject()
+                                        .put("type", "object")
+                                        .put(
+                                            "properties", JSONObject()
+                                                .put("task", prop("string", "子任务"))
+                                                .put(
+                                                    "status", JSONObject()
+                                                        .put("type", "string")
+                                                        .put(
+                                                            "enum", JSONArray()
+                                                                .put("pending")
+                                                                .put("in_progress")
+                                                                .put("completed")
+                                                        )
+                                                )
+                                        )
+                                        .put(
+                                            "required", JSONArray().put("task").put("status")
+                                        )
+                                )
+                        )
+                    )
+                    .put("required", JSONArray().put("items"))
+            )
+        )
+        .put(tool("todo_read", "读取当前任务清单。", obj()))
+        .put(
+            tool(
+                "memory_read", "读取某个 App 的操作记忆 (按包名隔离)。不传包名则读当前前台 App。每轮 system 也会自动注入当前 App 记忆。",
+                obj().put("package", prop("string", "包名, 如 com.example.app; 可空"))
+            )
+        )
+        .put(
+            tool(
+                "memory_write", "写入某个 App 的简洁操作记忆 (≤1200 字)。只记稳定入口/关键控件/易错点, 不要记题目答案。",
+                obj()
+                    .put("package", prop("string", "包名; 空=当前前台 App"))
+                    .put("content", prop("string", "简洁记忆内容"))
+                    .put("append", prop("boolean", "true=追加, 默认覆盖"))
+                    .also { it.put("required", JSONArray().put("content")) }
+            )
+        )
+        .put(tool("memory_list", "列出已保存记忆的 App 包名与大小。", obj()))
+        .put(
+            tool(
+                "answer_form", "通用选项式表单/测验: 先让题目显示在当前页, 再调用。内部 OCR 读题、三模型独立作答并投票、每题 3 次像素核对、整页复查后提交。任何 App 都能用。",
+                obj()
+                    .put("title", prop("string", "标题/上下文, 可空"))
+                    .put("verify_times", prop("integer", "每题核对次数, 默认 3"))
+                    .put("submit", prop("boolean", "是否提交, 默认 true"))
+                    .put("reset", prop("boolean", "提交前先点重做/重新作答, 默认 true"))
+            )
+        )
+        .put(tool("tool_list", "列出当前 Agent 可用的全部原子工具。", obj()))
+        .put(
+            tool(
+                "see_screen", "截图并调用视觉模型读屏。无障碍读不到 WebView/iframe 内容时用它读文字/布局; 不要用它判断复选框是否选中, 选中态用 verify_option。",
+                obj()
+                    .put("question", prop("string", "想问视觉模型的问题, 可空"))
+            )
+        )
+        .put(
+            tool(
+                "note", "把关键信息记录到长期便签。上下文被裁剪后便签仍会保留, 最后汇总时使用。",
+                obj()
+                    .put("text", prop("string", "要记录的内容"))
+                    .also { it.put("required", JSONArray().put("text")) }
+            )
+        )
+        .put(
+            tool(
+                "finish", "任务完成或无法继续时调用, 给出最终结论。",
+                obj()
+                    .put("summary", prop("string", "任务结果说明, 包含已完成什么、关键数据"))
+                    .also { it.put("required", JSONArray().put("summary")) }
+            )
+        )
+
+    /** 构造一个 function 工具定义 */
+    private fun tool(name: String, desc: String, params: JSONObject) = JSONObject()
+        .put("type", "function")
+        .put(
+            "function",
+            JSONObject()
+                .put("name", name)
+                .put("description", desc)
+                .put("parameters", params)
+        )
+
+    /** 省略 properties 的空参数对象 */
+    private fun obj() = JSONObject()
+        .put("type", "object")
+        .put("properties", JSONObject())
+
+    /** 单个参数描述 */
+    private fun prop(type: String, desc: String) =
+        JSONObject().put("type", type).put("description", desc)
+
+    /**
+     * 功能: 执行一次工具调用
+     * 参数:
+     *   context  用于读取屏幕尺寸等
+     *   provider 视觉降级时使用的 LLM 配置, 可为 null (则不降级)
+     *   name     工具名
+     *   argsJson 模型给出的参数 JSON 字符串
+     * 返回: 回灌给模型的文本结果
+     * 使用场景: ReActAgent 循环中的工具执行阶段
+     */
+    suspend fun execute(
+        context: Context,
+        provider: LlmSettings.Provider?,
+        name: String,
+        argsJson: String
+    ): String {
+        // 模型偶尔会返回空串或非法 JSON, 统一兜底成空对象
+        val args = try {
+            if (argsJson.isBlank()) JSONObject() else JSONObject(argsJson)
+        } catch (e: Exception) {
+            Log.w(TAG, "参数解析失败: $argsJson => ${e.message}")
+            JSONObject()
+        }
+        return try {
+            when (name) {
+                "observe" -> observe(context, provider)
+                "read_page" -> readPage()
+                "see_screen" -> {
+                    if (provider == null || !provider.usable) {
+                        "视觉识别失败: LLM 配置不完整"
+                    } else {
+                        val q = args.optString("question").trim()
+                        val v = if (q.isEmpty()) {
+                            ScreenVision.describeScreen(provider)
+                        } else {
+                            ScreenVision.describeScreen(provider, q)
+                        }
+                        if (v.ok) "[视觉识别, ${v.elapsedMs}ms]\n${v.text}" else "视觉识别失败: ${v.error}"
+                    }
+                }
+                "note" -> "已记录"
+                "verify_text" -> ToolRuntime.verifyText(args.optString("keyword"))
+                "verify_option" -> ToolRuntime.verifyOption(
+                    args.optInt("x"), args.optInt("y")
+                )
+                "verify_question" -> ToolRuntime.verifyQuestion(
+                    args.optJSONArray("options") ?: JSONArray()
+                )
+                "verify_changed" -> ToolRuntime.verifyChanged()
+                "second_opinion" -> {
+                    if (provider == null || !provider.usable) {
+                        "LLM 配置不完整"
+                    } else {
+                        ToolRuntime.secondOpinion(
+                            provider,
+                            args.optString("prompt"),
+                            args.optString("model_b")
+                        )
+                    }
+                }
+                "todo_write", "todo_read" -> "由 Agent 循环直接处理"
+                "memory_read" -> {
+                    val pkg = args.optString("package").ifBlank { AppMemory.currentPackage() }
+                    val mem = AppMemory.read(context, pkg)
+                    if (mem.isBlank()) "「$pkg」暂无记忆" else "「$pkg」记忆:\n$mem"
+                }
+                "memory_write" -> {
+                    val pkg = args.optString("package").ifBlank { AppMemory.currentPackage() }
+                    AppMemory.write(
+                        context,
+                        pkg,
+                        args.optString("content"),
+                        args.optBoolean("append", false)
+                    )
+                }
+                "memory_list" -> AppMemory.list(context)
+                "find_text" -> ToolRuntime.findText(
+                    args.optString("keyword"),
+                    args.optBoolean("exact", false),
+                    args.optBoolean("by_desc", false)
+                )
+                "list_options" -> ToolRuntime.listOptions(args.optString("keyword"))
+                "get_activity" -> ToolRuntime.currentActivity()
+                "screenshot" -> ToolRuntime.screenshot()
+                "ocr" -> ToolRuntime.ocr()
+                "long_ocr" -> {
+                    val scan = LongOcr.scan(
+                        context, args.optInt("max_screens", 14)
+                    )
+                    buildString {
+                        append("滚动 ").append(scan.screens).append(" 屏, ")
+                            .append(scan.lines.size).append(" 行:\n")
+                        scan.lines.take(200).forEach { l ->
+                            append('(').append(l.box.centerX()).append(',')
+                                .append(l.box.centerY()).append(") ")
+                                .append(l.text).append('\n')
+                        }
+                    }
+                }
+                "wait_for_text" -> ToolRuntime.waitForText(
+                    args.optString("keyword"),
+                    args.optLong("timeout_ms", 8000)
+                )
+                "tap_desc" -> ToolRuntime.tapDesc(args.optString("keyword"))
+                "tap_id" -> ToolRuntime.tapId(args.optString("id_suffix"))
+                "long_press" -> ToolRuntime.longPress(
+                    args.optInt("x"), args.optInt("y"), args.optInt("hold_ms", 800)
+                )
+                "double_tap" -> ToolRuntime.doubleTap(args.optInt("x"), args.optInt("y"))
+                "swipe_direction" -> ToolRuntime.swipeDirection(
+                    args.optString("direction", "up"),
+                    args.optDouble("distance", 0.6).toFloat(),
+                    args.optInt("duration_ms", 400)
+                )
+                "scroll_to_text" -> ToolRuntime.scrollToText(
+                    args.optString("keyword"),
+                    args.optInt("max_scrolls", 8)
+                )
+                "clear_text" -> ToolRuntime.clearText()
+                "set_text_id" -> ToolRuntime.setTextId(
+                    args.optString("id_suffix"), args.optString("text")
+                )
+                "launch_activity" -> ToolRuntime.launchActivity(args.optString("component"))
+                "stop_app" -> ToolRuntime.stopApp(args.optString("package"))
+                "list_packages" -> ToolRuntime.listPackages(args.optString("keyword"))
+                "app_info" -> ToolRuntime.appInfo(args.optString("package"))
+                "open_url" -> ToolRuntime.openUrl(args.optString("url"))
+                "shell" -> ToolRuntime.shell(args.optString("command"))
+                "get_prop" -> ToolRuntime.getProp(args.optString("key"))
+                "settings_get" -> ToolRuntime.settingsGet(
+                    args.optString("namespace", "system"), args.optString("key")
+                )
+                "settings_put" -> ToolRuntime.settingsPut(
+                    args.optString("namespace", "system"),
+                    args.optString("key"),
+                    args.optString("value")
+                )
+                "file_read" -> ToolRuntime.fileRead(args.optString("path"))
+                "file_write" -> ToolRuntime.fileWrite(
+                    args.optString("path"), args.optString("content")
+                )
+                "file_list" -> ToolRuntime.fileList(args.optString("path"))
+                "ask_llm" -> {
+                    if (provider == null || !provider.usable) {
+                        "LLM 配置不完整"
+                    } else {
+                        ToolRuntime.askLlm(
+                            provider,
+                            args.optString("prompt"),
+                            args.optString("model")
+                        )
+                    }
+                }
+                "answer_form" -> {
+                    val r = FormSolver.solve(
+                        context,
+                        args.optString("title"),
+                        args.optInt("verify_times", 3),
+                        args.optBoolean("submit", true),
+                        args.optBoolean("reset", true)
+                    ) { Log.i(TAG, it) }
+                    "submitted=${r.submitted}, answered=${r.answered}, ${r.message}"
+                }
+                "tool_list" -> ToolRuntime.catalog()
+                "tap" -> {
+                    val ok = DaemonClient.tap(args.optInt("x"), args.optInt("y"))
+                    if (ok) "已点击 (${args.optInt("x")}, ${args.optInt("y")})" else "点击失败: daemon 无响应"
+                }
+                "tap_text" -> ToolRuntime.tapText(
+                    args.optString("text"),
+                    args.optBoolean("exact", false)
+                )
+                "swipe" -> {
+                    val ok = DaemonClient.swipe(
+                        args.optInt("x1"), args.optInt("y1"),
+                        args.optInt("x2"), args.optInt("y2"),
+                        args.optInt("duration_ms", 300)
+                    )
+                    if (ok) "已滑动" else "滑动失败"
+                }
+                "input_text" -> {
+                    val text = args.optString("text")
+                    val svc = UiObserverService.instance
+                    when {
+                        svc == null -> "输入失败: 无障碍服务未连接"
+                        text.isEmpty() -> "输入失败: text 为空"
+                        svc.setTextOnFocused(text) -> "已输入 ${text.length} 个字符"
+                        else -> "输入失败: 当前没有可编辑的输入框, 请先点击输入框"
+                    }
+                }
+                "key" -> keyEvent(args.optString("name"))
+                "launch_app" -> launchApp(args.optString("package"))
+                "wait" -> {
+                    // 单次最多 5 分钟; 分段等待并每 15 秒发进度, 避免界面长时间无反馈
+                    val ms = args.optInt("ms", 1000).coerceIn(200, 300_000).toLong()
+                    val start = System.currentTimeMillis()
+                    var last = 0L
+                    while (System.currentTimeMillis() - start < ms) {
+                        val remain = ms - (System.currentTimeMillis() - start)
+                        kotlinx.coroutines.delay(minOf(1000L, remain).coerceAtLeast(50L))
+                        val elapsed = System.currentTimeMillis() - start
+                        if (elapsed - last >= 15_000) {
+                            last = elapsed
+                            AgentController.publishStep(
+                                "system",
+                                "等待中 · ${elapsed / 1000}s / ${ms / 1000}s",
+                                "wait"
+                            )
+                        }
+                    }
+                    "已等待 ${ms}ms"
+                }
+                else -> "未知工具: $name"
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "执行工具 $name 异常: ${e.message}")
+            "工具执行异常: ${e.message}"
+        }
+    }
+
+    /**
+     * 功能: 用 root 重新启用本应用的无障碍服务
+     * 参数: 无
+     * 返回: true=已下发恢复命令
+     * 使用场景: Agent 启动或 observe 时发现无障碍掉线
+     * 说明: 直接写 secure 设置项, 系统会自动重新绑定服务;
+     *       需要 root, 无 root 时返回 false 交由用户手动处理。
+     */
+    private suspend fun tryRestoreA11y(): Boolean {
+        return try {
+            val svc = "com.catfee.rootauto/com.catfee.rootauto.a11y.UiObserverService"
+            val r = RootShell.exec(
+                "settings put secure enabled_accessibility_services $svc; " +
+                    "settings put secure accessibility_enabled 1"
+            )
+            if (!r.ok) {
+                Log.w(TAG, "恢复无障碍失败: ${r.stderr}")
+                return false
+            }
+            // 系统重新绑定需要一点时间, 给个短等待提高下一轮成功率
+            kotlinx.coroutines.delay(1200)
+            UiObserverService.instance != null
+        } catch (e: Exception) {
+            Log.e(TAG, "恢复无障碍异常: ${e.message}")
+            false
+        }
+    }
+
+    /**
+     * 功能: 导出完整无障碍树 (文字/描述/id/坐标/可点击)
+     * 返回: 紧凑文本
+     * 使用场景: 列表扫描、找控件、比 observe 更全
+     */
+    private fun readPage(): String {
+        val svc = UiObserverService.instance ?: return "无障碍服务未连接"
+        val tree = svc.dumpTree(1000)
+        if (tree.isEmpty()) return "当前页面没有可读节点"
+        return buildString {
+            append("节点 ${tree.size} 个:\n")
+            tree.take(300).forEach { n ->
+                if (n.text.isBlank() && n.desc.isBlank() && n.resourceId.isBlank()) return@forEach
+                append('[').append(n.index).append("] ").append(n.cls)
+                if (n.text.isNotBlank()) append(" \"").append(n.text).append('"')
+                if (n.desc.isNotBlank()) append(" desc=\"").append(n.desc).append('"')
+                if (n.resourceId.isNotBlank()) append(" id=").append(n.resourceId.substringAfterLast('/'))
+                if (n.clickable) append(" 可点击")
+                append(" (").append(n.bounds.centerX()).append(',').append(n.bounds.centerY()).append(')')
+                append('\n')
+            }
+        }
+    }
+
+    /**
+     * 功能: 采集界面快照; 无障碍为空时自动降级为截图 + 视觉识别
+     * 参数: context; provider 可为 null
+     * 返回: 界面描述文本
+     * 使用场景: observe 工具
+     */
+    private suspend fun observe(context: Context, provider: LlmSettings.Provider?): String {
+        // 顺手刷新前台 Activity, 让模型知道自己在哪个界面
+        // dumpsys 原始格式是 "mCurrentFocus=Window{4f4f213 u0 com.example.app/com.example.Activity}",
+        // 直接整串塞给模型既费 token 又难读, 这里只取花括号内的 "包名/Activity" 部分
+        val focus = RootShell.execText(
+            "dumpsys window 2>/dev/null | grep -m1 mCurrentFocus"
+        )
+        val svc = UiObserverService.instance
+        if (svc == null) {
+            // 无障碍被系统杀掉很常见(force-stop / 省电清理), 有 root 就直接拉起来,
+            // 否则 Agent 第一次 observe 就失败, 白白浪费一轮
+            val restored = tryRestoreA11y()
+            if (!restored) {
+                return "无障碍服务未连接, 且自动恢复失败。请让用户在系统设置-无障碍中手动开启 CatfeeAgent。"
+            }
+            return "无障碍服务刚被重新拉起, 请稍后再次 observe。"
+        }
+        svc.cachedActivity = extractFocusTarget(focus)
+        val snap = svc.snapshot()
+        if (snap != null && snap.nodes.isNotEmpty()) {
+            val text = snap.toPromptText()
+            val hash = Integer.toHexString(text.hashCode())
+            ToolRuntime.markObserved(hash)
+            if (hash == lastObserveHash) {
+                return "界面未变化 (hash=$hash)。不要重复 observe; " +
+                    "需要定位用 find_text, 需要完整树用 read_page, 确认动作是否生效用 verify_changed。"
+            }
+            lastObserveHash = hash
+            return "$text\nhash=$hash"
+        }
+        // 无障碍读不到内容 (纯 WebView 画布 / Surface / 自绘控件) → 视觉降级
+        if (provider == null || !provider.usable) {
+            return "无障碍读到 0 个元素, 且未配置可用的视觉模型, 无法降级识别。"
+        }
+        val v = ScreenVision.describeScreen(provider)
+        return if (v.ok) "[视觉降级识别, 耗时 ${v.elapsedMs}ms]\n${v.text}"
+        else "无障碍读到 0 个元素, 视觉降级也失败: ${v.error}"
+    }
+
+    /**
+     * 功能: 从 dumpsys 的 mCurrentFocus 行里提取 "包名/Activity"
+     * 参数: line 形如 "mCurrentFocus=Window{4f4f213 u0 com.a/com.a.BActivity}"
+     * 返回: "com.a/com.a.BActivity", 解析失败返回空串
+     * 使用场景: observe 时告诉模型当前界面
+     */
+    private fun extractFocusTarget(line: String): String {
+        // 花括号里是 "hash u0 包名/Activity", 取最后一段有效内容
+        val inner = line.substringAfter('{', "").substringBefore('}')
+        val parts = inner.split(' ').filter { it.contains('/') }
+        return parts.lastOrNull().orEmpty()
+    }
+
+    /**
+     * 功能: 发送系统按键
+     * 参数: name 语义化按键名
+     * 返回: 结果描述
+     * 说明: 走 daemon 的 uinput, 比 adb input 更快且不依赖 adb
+     */
+    private suspend fun keyEvent(name: String): String {
+        val code = when (name.lowercase()) {
+            "back" -> 158
+            "home" -> 102
+            "enter" -> 28
+            "recent" -> 580
+            else -> return "不支持的按键: $name"
+        }
+        return if (DaemonClient.keyevent(code)) "已发送按键 $name" else "按键发送失败"
+    }
+
+    /**
+     * 功能: 按包名启动应用
+     * 参数: pkg 包名
+     * 返回: 结果描述
+     * 说明: 用 monkey 启动, 会自动选择该包的 LAUNCHER Activity, 无需知道具体类名
+     */
+    private suspend fun launchApp(pkg: String): String {
+        if (pkg.isBlank()) return "启动失败: 包名为空"
+        val r = RootShell.exec(
+            "monkey -p $pkg -c android.intent.category.LAUNCHER 1 2>&1 | tail -2"
+        )
+        val ok = r.stdout.contains("Events injected: 1") || r.stdout.contains("injected")
+        return if (ok) "已启动 $pkg" else "启动 $pkg 可能失败: ${r.stdout.take(160)}"
+    }
+}
