@@ -3,6 +3,8 @@ package com.catfee.rootauto.agent
 import android.content.Context
 import com.catfee.rootauto.llm.LlmSettings
 import com.catfee.rootauto.service.AgentStatusService
+import com.catfee.rootauto.session.Attachment
+import com.catfee.rootauto.session.AttachmentAnalyzer
 import com.catfee.rootauto.session.ChatMessage
 import com.catfee.rootauto.session.SessionManager
 import kotlinx.coroutines.CompletableDeferred
@@ -119,11 +121,13 @@ object AgentController {
         goal: String,
         sessionId: String = "",
         priorContext: String = "",
-        phoneAllowed: Boolean = false
+        phoneAllowed: Boolean = false,
+        attachments: List<Attachment> = emptyList()
     ) {
         if (isRunning) return
         seq = 0
         activeSessionId = sessionId
+        val startedAt = System.currentTimeMillis()
         _state.value = State(
             running = true,
             goal = goal,
@@ -141,11 +145,47 @@ object AgentController {
         job = scope.launch {
             var phoneGranted = phoneAllowed
             var runTokens = 0
+            fun trace(type: String, text: String, tool: String) {
+                publishStep(type, text, tool)
+                if (sessionId.isNotBlank()) {
+                    SessionManager.appendStep(
+                        appContext, sessionId, type, text, tool, System.currentTimeMillis()
+                    )
+                }
+            }
+            var effectiveGoal = goal
+            if (attachments.isNotEmpty()) {
+                trace("tool", "开始解析 ${attachments.size} 个附件", "analyze_resources")
+                val attachmentContext = try {
+                    AttachmentAnalyzer.analyzeAll(appContext, attachments) { progress ->
+                        trace("tool", progress, "analyze_resources")
+                    }
+                } catch (e: Exception) {
+                    "附件解析失败: ${e.message}"
+                }
+                trace(
+                    "result",
+                    "附件解析完成: ${attachmentContext.length} 字符",
+                    "analyze_resources"
+                )
+                if (attachmentContext.isNotBlank()) {
+                    if (sessionId.isNotBlank()) {
+                        SessionManager.setLastUserContext(
+                            appContext, sessionId, attachmentContext
+                        )
+                    }
+                    effectiveGoal = buildString {
+                        append(goal)
+                        append("\n\n以下是用户上传附件的本地解析内容, 请结合它回答/判断:\n")
+                        append(attachmentContext)
+                    }.take(30_000)
+                }
+            }
             val result = try {
                 ReActAgent.run(
                     context = appContext,
                     provider = provider,
-                    goal = goal,
+                    goal = effectiveGoal,
                     priorContext = priorContext,
                     onEvent = { ev ->
                         publishEvent(ev.type, ev.content, ev.tool, ev.timestamp)
@@ -213,6 +253,7 @@ object AgentController {
                 "任务异常: ${e.message}"
             }
             val reasoningText = _state.value.streamReasoning
+            val elapsed = System.currentTimeMillis() - startedAt
             _state.update {
                 it.copy(
                     running = false,
@@ -226,6 +267,7 @@ object AgentController {
             }
             if (sessionId.isNotBlank()) {
                 SessionManager.setResult(appContext, sessionId, result)
+                SessionManager.addDuration(appContext, sessionId, elapsed)
                 if (result.isNotBlank()) {
                     SessionManager.appendMessage(
                         appContext,
@@ -234,6 +276,7 @@ object AgentController {
                             "assistant",
                             result,
                             tokens = runTokens,
+                            elapsedMs = elapsed,
                             reasoning = reasoningText.take(12_000)
                         )
                     )

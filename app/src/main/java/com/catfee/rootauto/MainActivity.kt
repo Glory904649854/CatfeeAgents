@@ -1,12 +1,15 @@
 package com.catfee.rootauto
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.BitmapFactory
 import android.graphics.Color as AndroidColor
 import android.os.Build
 import android.os.Bundle
+import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -22,12 +25,17 @@ import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.rememberTransformableState
+import androidx.compose.foundation.gestures.transformable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsFocusedAsState
@@ -51,6 +59,8 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -58,8 +68,8 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Add
+import androidx.compose.material.icons.rounded.AddPhotoAlternate
 import androidx.compose.material.icons.rounded.ArrowUpward
-import androidx.compose.material.icons.rounded.AttachFile
 import androidx.compose.material.icons.rounded.Bolt
 import androidx.compose.material.icons.rounded.ChatBubbleOutline
 import androidx.compose.material.icons.rounded.Check
@@ -79,7 +89,6 @@ import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material.icons.rounded.Terminal
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -103,6 +112,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
@@ -114,12 +125,15 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.draw.scale
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
@@ -130,12 +144,14 @@ import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import androidx.core.view.WindowCompat
 import com.catfee.rootauto.agent.AgentController
 import com.catfee.rootauto.llm.LlmClient
@@ -158,7 +174,7 @@ import java.util.Date
 import java.util.Locale
 
 /**
- * CatfeeAgent 控制台
+ * CatfeeAgents 控制台
  *
  * 一个统一的对话界面:
  *   - 普通聊天/问答/附件分析: 直接回答
@@ -239,7 +255,8 @@ private fun AgentConsole(activity: ComponentActivity) {
         mutableStateOf(activity.intent?.getStringExtra("task")?.takeIf { it.isNotBlank() } ?: "")
     }
     var pendingAttachments by remember { mutableStateOf<List<Attachment>>(emptyList()) }
-    var analyzing by remember { mutableStateOf(false) }
+    var previewImages by remember { mutableStateOf<List<Attachment>>(emptyList()) }
+    var previewIndex by remember { mutableIntStateOf(0) }
     var showMenu by remember { mutableStateOf(false) }
     var showSettings by remember { mutableStateOf(false) }
     var hint by remember { mutableStateOf("") }
@@ -320,7 +337,7 @@ private fun AgentConsole(activity: ComponentActivity) {
     }
 
     fun send() {
-        if (analyzing || current?.running == true) return
+        if (current?.running == true) return
         val text = task.trim()
         val attachments = pendingAttachments
         if (text.isEmpty() && attachments.isEmpty()) {
@@ -338,48 +355,28 @@ private fun AgentConsole(activity: ComponentActivity) {
         persistLog()
         keyboard?.hide()
         hint = ""
-        analyzing = attachments.isNotEmpty()
 
         val session = current ?: SessionManager.newSession("chat")
         val prior = buildPriorContext(session)
-        scope.launch {
-            val attachmentContext = try {
-                AttachmentAnalyzer.analyzeAll(activity, attachments)
-            } catch (e: Exception) {
-                "附件解析失败: ${e.message}"
-            }
-            withContext(Dispatchers.Main) {
-                val content = text.ifBlank { "请分析这些附件" }
-                SessionManager.appendMessage(
-                    activity,
-                    session.id,
-                    ChatMessage(
-                        "user",
-                        content,
-                        context = attachmentContext,
-                        attachments = attachments
-                    )
-                )
-                val goal = buildString {
-                    append(content)
-                    if (attachmentContext.isNotBlank()) {
-                        append("\n\n以下是用户上传附件的本地解析内容, 请结合它回答/判断:\n")
-                        append(attachmentContext)
-                    }
-                }.take(30_000)
-                AgentController.start(
-                    context = activity,
-                    provider = provider,
-                    goal = goal,
-                    sessionId = session.id,
-                    priorContext = prior,
-                    phoneAllowed = session.phoneAllowed
-                )
-                task = ""
-                pendingAttachments = emptyList()
-                analyzing = false
-            }
-        }
+        val content = text.ifBlank { "请分析这些附件" }
+        // 先把用户消息和附件发出去; 解析工作交给 AgentController,
+        // 这样聊天区会立即出现"解析资源中"的工具步骤, 而不是发送前卡住。
+        SessionManager.appendMessage(
+            activity,
+            session.id,
+            ChatMessage("user", content, attachments = attachments)
+        )
+        AgentController.start(
+            context = activity,
+            provider = provider,
+            goal = content,
+            sessionId = session.id,
+            priorContext = prior,
+            phoneAllowed = session.phoneAllowed,
+            attachments = attachments
+        )
+        task = ""
+        pendingAttachments = emptyList()
     }
 
     fun stop() {
@@ -418,6 +415,9 @@ private fun AgentConsole(activity: ComponentActivity) {
     val savedSteps = current?.steps.orEmpty().map {
         AgentController.Step(it.seq, it.type, it.text, it.tool, it.time)
     }
+    val allImages = current?.messages?.flatMap { m ->
+        m.attachments.filter { it.kind == "image" }
+    }.orEmpty()
 
     val listState = rememberLazyListState()
     val scrollSignal = current?.messages?.size ?: 0
@@ -426,12 +426,19 @@ private fun AgentConsole(activity: ComponentActivity) {
         scrollSignal,
         streaming,
         pendingConfirm,
-        agent.streamText.length / 100,
-        agent.streamReasoning.length / 200
+        agent.streamText.length / 40,
+        agent.streamReasoning.length / 80
     ) {
-        delay(50)
+        delay(35)
         val count = listState.layoutInfo.totalItemsCount
-        if (count > 0) listState.animateScrollToItem(count - 1)
+        if (count > 0) {
+            // 给最后一项一个很大的 offset, 让列表真正贴到底部, 而不是只把最后一项的顶部对齐
+            if (streaming) {
+                listState.scrollToItem(count - 1, 1_000_000)
+            } else {
+                listState.animateScrollToItem(count - 1, 1_000_000)
+            }
+        }
     }
 
     Scaffold(containerColor = Bg) { pad ->
@@ -465,7 +472,19 @@ private fun AgentConsole(activity: ComponentActivity) {
                 current?.messages?.forEach { msg ->
                     item(key = "m-${msg.time}-${msg.content.hashCode()}") {
                         Box(Modifier.animateItem()) {
-                            if (msg.role == "user") UserBubble(msg) else AssistantBubble(msg)
+                            if (msg.role == "user") {
+                                UserBubble(
+                                    msg,
+                                    onImageClick = { a ->
+                                        val idx = allImages.indexOfFirst { it.id == a.id }
+                                        previewImages = allImages
+                                        previewIndex = if (idx >= 0) idx else 0
+                                    },
+                                    onFileClick = { a -> openAttachment(context, a) }
+                                )
+                            } else {
+                                AssistantBubble(msg)
+                            }
                         }
                     }
                 }
@@ -508,9 +527,8 @@ private fun AgentConsole(activity: ComponentActivity) {
                     pendingAttachments = pendingAttachments.filterNot { it.id == id }
                 },
                 onPickAttachments = { attachmentPicker.launch(arrayOf("*/*")) },
-                analyzing = analyzing,
                 running = running,
-                canSend = !analyzing && !running &&
+                canSend = !running &&
                     (task.isNotBlank() || pendingAttachments.isNotEmpty()),
                 onSend = { send() },
                 onStop = { stop() },
@@ -614,6 +632,14 @@ private fun AgentConsole(activity: ComponentActivity) {
             onDismiss = { showSettings = false }
         )
     }
+
+    if (previewImages.isNotEmpty()) {
+        ImagePreviewOverlay(
+            images = previewImages,
+            initialIndex = previewIndex,
+            onClose = { previewImages = emptyList() }
+        )
+    }
 }
 
 private fun buildPriorContext(session: Session): String {
@@ -650,21 +676,44 @@ private fun Header(running: Boolean, onMenu: () -> Unit) {
         ) {
             Image(
                 painter = painterResource(R.drawable.app_logo),
-                contentDescription = "CatfeeAgent",
+                contentDescription = "CatfeeAgents",
                 modifier = Modifier.fillMaxSize(),
                 contentScale = ContentScale.Crop
             )
         }
         Spacer(Modifier.width(10.dp))
         Column(Modifier.weight(1f)) {
-            Text(
-                "CatfeeAgent",
-                fontSize = 18.sp,
-                fontWeight = FontWeight.SemiBold,
-                color = Ink,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
+            Row(verticalAlignment = Alignment.Top) {
+                Text(
+                    buildAnnotatedString {
+                        withStyle(
+                            SpanStyle(
+                                fontFamily = FontFamily.Serif,
+                                fontWeight = FontWeight.Bold,
+                                letterSpacing = (-0.6).sp,
+                                color = Ink
+                            )
+                        ) { append("Catfee") }
+                        withStyle(
+                            SpanStyle(
+                                fontWeight = FontWeight.Light,
+                                fontStyle = FontStyle.Italic,
+                                letterSpacing = 0.3.sp,
+                                color = Accent
+                            )
+                        ) { append("Agents") }
+                    },
+                    fontSize = 20.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Box(
+                    Modifier
+                        .padding(start = 2.dp, top = 4.dp)
+                        .size(4.dp)
+                        .background(Color(0xFFEF4444), CircleShape)
+                )
+            }
             Row(verticalAlignment = Alignment.CenterVertically) {
                 if (running) {
                     val transition = rememberInfiniteTransition(label = "run")
@@ -714,7 +763,8 @@ private fun SessionLine(session: Session) {
         )
         if (!session.isEmpty) {
             Text(
-                "${formatCount(session.totalTokens)} tok · ${formatCount(session.contextChars)} ctx",
+                "${formatCount(session.totalTokens)} tok · ${formatCount(session.contextChars)} ctx" +
+                    if (session.totalDurationMs > 0) " · ${formatDuration(session.totalDurationMs)}" else "",
                 fontSize = 9.5.sp,
                 color = Color(0xFF9CA3AF)
             )
@@ -725,14 +775,18 @@ private fun SessionLine(session: Session) {
 /* ---------------- Chat bubbles ---------------- */
 
 @Composable
-private fun UserBubble(msg: ChatMessage) {
+private fun UserBubble(
+    msg: ChatMessage,
+    onImageClick: (Attachment) -> Unit,
+    onFileClick: (Attachment) -> Unit
+) {
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
         Column(
             modifier = Modifier.widthIn(max = 300.dp),
             horizontalAlignment = Alignment.End
         ) {
             if (msg.attachments.isNotEmpty()) {
-                AttachmentStrip(msg.attachments)
+                AttachmentStrip(msg.attachments, onImageClick, onFileClick)
                 Spacer(Modifier.height(6.dp))
             }
             Surface(
@@ -773,6 +827,14 @@ private fun AssistantBubble(msg: ChatMessage) {
                         fontSize = 8.5.sp,
                         color = Color(0xFF9CA3AF)
                     )
+                    if (msg.elapsedMs > 0) {
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            formatDuration(msg.elapsedMs),
+                            fontSize = 8.5.sp,
+                            color = Color(0xFF9CA3AF)
+                        )
+                    }
                     if (msg.tokens > 0) {
                         Spacer(Modifier.width(6.dp))
                         Text("${formatCount(msg.tokens)} tok", fontSize = 8.5.sp, color = Color(0xFF9CA3AF))
@@ -1287,7 +1349,6 @@ private fun Composer(
     attachments: List<Attachment>,
     onRemoveAttachment: (String) -> Unit,
     onPickAttachments: () -> Unit,
-    analyzing: Boolean,
     running: Boolean,
     canSend: Boolean,
     onSend: () -> Unit,
@@ -1306,7 +1367,11 @@ private fun Composer(
                 border = BorderStroke(1.dp, lerp(Line, Accent.copy(alpha = 0.5f), borderAmount))
             ) {
                 Column(Modifier.padding(10.dp)) {
-                    if (attachments.isNotEmpty()) {
+                    AnimatedVisibility(
+                        visible = attachments.isNotEmpty(),
+                        enter = fadeIn(tween(160)) + expandVertically(tween(180)),
+                        exit = fadeOut(tween(120)) + shrinkVertically(tween(160))
+                    ) {
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -1320,20 +1385,7 @@ private fun Composer(
                         }
                     }
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        IconButton(
-                            onClick = onPickAttachments,
-                            modifier = Modifier
-                                .size(36.dp)
-                                .clip(CircleShape)
-                                .background(Color(0xFFF3F4F6))
-                        ) {
-                            Icon(
-                                Icons.Rounded.AttachFile,
-                                contentDescription = "添加图片/文件",
-                                tint = Muted,
-                                modifier = Modifier.size(18.dp)
-                            )
-                        }
+                        AttachmentButton(onPickAttachments)
                         Spacer(Modifier.width(6.dp))
                         BasicTextField(
                             value = task,
@@ -1371,15 +1423,6 @@ private fun Composer(
                     ) {
                         ModelChip(model)
                         Spacer(Modifier.weight(1f))
-                        if (analyzing) {
-                            CircularProgressIndicator(
-                                modifier = Modifier.size(11.dp),
-                                strokeWidth = 1.5.dp,
-                                color = Accent
-                            )
-                            Spacer(Modifier.width(5.dp))
-                            Text("解析附件…", fontSize = 9.sp, color = Accent)
-                        }
                     }
                 }
             }
@@ -1392,6 +1435,33 @@ private fun Composer(
                 )
             }
         }
+    }
+}
+
+@Composable
+private fun AttachmentButton(onClick: () -> Unit) {
+    val source = remember { MutableInteractionSource() }
+    val pressed by source.collectIsPressedAsState()
+    val scale by animateFloatAsState(if (pressed) 0.9f else 1f, tween(90), label = "attachScale")
+    Box(
+        modifier = Modifier
+            .size(38.dp)
+            .scale(scale)
+            .clip(RoundedCornerShape(12.dp))
+            .background(Accent.copy(alpha = 0.08f))
+            .clickable(
+                interactionSource = source,
+                indication = null,
+                onClick = onClick
+            ),
+        contentAlignment = Alignment.Center
+    ) {
+        Icon(
+            Icons.Rounded.AddPhotoAlternate,
+            contentDescription = "添加图片或文件",
+            tint = Accent,
+            modifier = Modifier.size(19.dp)
+        )
     }
 }
 
@@ -1487,25 +1557,38 @@ private fun PendingAttachment(a: Attachment, onRemove: () -> Unit) {
 }
 
 @Composable
-private fun AttachmentStrip(attachments: List<Attachment>) {
+private fun AttachmentStrip(
+    attachments: List<Attachment>,
+    onImageClick: (Attachment) -> Unit,
+    onFileClick: (Attachment) -> Unit
+) {
     Row(
         modifier = Modifier.horizontalScroll(rememberScrollState()),
         horizontalArrangement = Arrangement.spacedBy(6.dp)
     ) {
         attachments.forEach { a ->
-            if (a.kind == "image") AttachmentThumb(a, 92.dp) else FileChip(a)
+            if (a.kind == "image") {
+                AttachmentThumb(a, 92.dp) { onImageClick(a) }
+            } else {
+                FileChip(a) { onFileClick(a) }
+            }
         }
     }
 }
 
 @Composable
-private fun AttachmentThumb(a: Attachment, size: androidx.compose.ui.unit.Dp) {
+private fun AttachmentThumb(
+    a: Attachment,
+    size: androidx.compose.ui.unit.Dp,
+    onClick: (() -> Unit)? = null
+) {
     val bitmap by produceState<ImageBitmap?>(initialValue = null, a.path) {
         value = withContext(Dispatchers.IO) {
             decodeSampledBitmap(a.path, 360)?.asImageBitmap()
         }
     }
     Surface(
+        modifier = if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier,
         shape = RoundedCornerShape(12.dp),
         color = Color(0xFFF1F3F5),
         border = BorderStroke(1.dp, Line)
@@ -1526,8 +1609,9 @@ private fun AttachmentThumb(a: Attachment, size: androidx.compose.ui.unit.Dp) {
 }
 
 @Composable
-private fun FileChip(a: Attachment) {
+private fun FileChip(a: Attachment, onClick: (() -> Unit)? = null) {
     Surface(
+        modifier = if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier,
         shape = RoundedCornerShape(12.dp),
         color = Color(0xFFF1F3F5),
         border = BorderStroke(1.dp, Line)
@@ -1561,6 +1645,145 @@ private fun formatSize(bytes: Long): String = when {
     bytes >= 1024 * 1024 -> String.format(Locale.getDefault(), "%.1f MB", bytes / 1024.0 / 1024.0)
     bytes >= 1024 -> String.format(Locale.getDefault(), "%.1f KB", bytes / 1024.0)
     else -> "$bytes B"
+}
+
+private fun openAttachment(context: android.content.Context, a: Attachment) {
+    try {
+        val uri = FileProvider.getUriForFile(
+            context,
+            "${context.packageName}.fileprovider",
+            File(a.path)
+        )
+        val intent = Intent(Intent.ACTION_VIEW)
+            .setDataAndType(uri, a.mime.ifBlank { "*/*" })
+            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        context.startActivity(intent)
+    } catch (e: Exception) {
+        Toast.makeText(context, "无法打开该文件: ${e.message}", Toast.LENGTH_SHORT).show()
+    }
+}
+
+@Composable
+private fun ImagePreviewOverlay(
+    images: List<Attachment>,
+    initialIndex: Int,
+    onClose: () -> Unit
+) {
+    if (images.isEmpty()) return
+    BackHandler(onBack = onClose)
+    var shown by remember { mutableStateOf(false) }
+    var zoomed by remember { mutableStateOf(false) }
+    val pagerState = rememberPagerState(
+        initialPage = initialIndex.coerceIn(0, images.lastIndex)
+    ) { images.size }
+    LaunchedEffect(Unit) { shown = true }
+    LaunchedEffect(pagerState.currentPage) { zoomed = false }
+
+    AnimatedVisibility(
+        visible = shown,
+        enter = fadeIn(tween(180)) + scaleIn(initialScale = 0.96f, animationSpec = tween(200)),
+        exit = fadeOut(tween(140)) + scaleOut(targetScale = 0.97f, animationSpec = tween(160))
+    ) {
+        Box(Modifier.fillMaxSize().background(Color(0xF20B0F1A))) {
+            HorizontalPager(
+                state = pagerState,
+                modifier = Modifier.fillMaxSize(),
+                userScrollEnabled = !zoomed
+            ) { page ->
+                ZoomableImage(
+                    a = images[page],
+                    modifier = Modifier.fillMaxSize()
+                ) { zoomed = it }
+            }
+            Row(
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .statusBarsPadding()
+                    .fillMaxWidth()
+                    .padding(horizontal = 14.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    "${pagerState.currentPage + 1} / ${images.size}",
+                    color = Color.White,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Medium
+                )
+                Spacer(Modifier.weight(1f))
+                IconButton(
+                    onClick = onClose,
+                    modifier = Modifier
+                        .size(36.dp)
+                        .clip(CircleShape)
+                        .background(Color.White.copy(alpha = 0.12f))
+                ) {
+                    Icon(Icons.Rounded.Close, "关闭预览", tint = Color.White, modifier = Modifier.size(19.dp))
+                }
+            }
+            Text(
+                "双指缩放/旋转 · 双击还原 · 左右滑动切换",
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = 34.dp),
+                color = Color.White.copy(alpha = 0.55f),
+                fontSize = 10.sp
+            )
+        }
+    }
+}
+
+@Composable
+private fun ZoomableImage(
+    a: Attachment,
+    modifier: Modifier = Modifier,
+    onZoomChanged: (Boolean) -> Unit = {}
+) {
+    val bitmap by produceState<ImageBitmap?>(initialValue = null, a.path) {
+        value = withContext(Dispatchers.IO) {
+            decodeSampledBitmap(a.path, 2400)?.asImageBitmap()
+        }
+    }
+    var scale by remember(a.path) { mutableFloatStateOf(1f) }
+    var rotation by remember(a.path) { mutableFloatStateOf(0f) }
+    var offset by remember(a.path) { mutableStateOf(Offset.Zero) }
+    val transform = rememberTransformableState { zoomChange, panChange, rotationChange ->
+        scale = (scale * zoomChange).coerceIn(1f, 6f)
+        rotation += rotationChange
+        if (scale > 1.01f) offset += panChange
+        onZoomChanged(scale > 1.01f)
+    }
+    Box(
+        modifier = modifier
+            .transformable(transform)
+            .pointerInput(a.path) {
+                detectTapGestures(onDoubleTap = {
+                    scale = 1f
+                    rotation = 0f
+                    offset = Offset.Zero
+                    onZoomChanged(false)
+                })
+            },
+        contentAlignment = Alignment.Center
+    ) {
+        if (bitmap != null) {
+            Image(
+                bitmap = bitmap!!,
+                contentDescription = a.name,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .graphicsLayer(
+                        scaleX = scale,
+                        scaleY = scale,
+                        rotationZ = rotation,
+                        translationX = offset.x,
+                        translationY = offset.y
+                    ),
+                contentScale = ContentScale.Fit
+            )
+        } else {
+            Text("加载中…", color = Color.White.copy(alpha = 0.6f), fontSize = 11.sp)
+        }
+    }
 }
 
 private fun decodeSampledBitmap(path: String, maxSide: Int): android.graphics.Bitmap? {
@@ -1602,7 +1825,7 @@ private fun MenuSheet(
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    "CatfeeAgent",
+                    "CatfeeAgents",
                     fontSize = 20.sp,
                     fontWeight = FontWeight.SemiBold,
                     color = Ink,
@@ -1708,8 +1931,12 @@ private fun SessionRow(
                 }
                 Text(
                     "$time · ${formatCount(summary.totalTokens)} tok · " +
-                        "${formatCount(summary.contextChars)} ctx · " +
-                        "${summary.messageCount} msgs",
+                        "${formatCount(summary.contextChars)} ctx" +
+                        if (summary.totalDurationMs > 0) {
+                            " · ${formatDuration(summary.totalDurationMs)}"
+                        } else {
+                            ""
+                        } + " · ${summary.messageCount} msgs",
                     fontSize = 9.sp,
                     color = Muted,
                     maxLines = 1,
@@ -1956,6 +2183,17 @@ private fun formatCount(n: Int): String = when {
     n >= 1_000_000 -> String.format(Locale.getDefault(), "%.1fM", n / 1_000_000.0)
     n >= 1_000 -> String.format(Locale.getDefault(), "%.1fK", n / 1_000.0)
     else -> n.toString()
+}
+
+private fun formatDuration(ms: Long): String = when {
+    ms < 1_000 -> String.format(Locale.getDefault(), "%.1fs", ms / 1000.0)
+    ms < 60_000 -> String.format(Locale.getDefault(), "%.1fs", ms / 1000.0)
+    else -> {
+        val totalSec = ms / 1000
+        val m = totalSec / 60
+        val s = totalSec % 60
+        if (s == 0L) "${m}m" else "${m}m ${s}s"
+    }
 }
 
 /** 轻量 Markdown: **加粗** 与 `行内代码` */

@@ -1,4 +1,4 @@
-﻿package com.catfee.rootauto.agent
+package com.catfee.rootauto.agent
 
 import android.content.Context
 import android.util.Log
@@ -774,7 +774,7 @@ object AgentTools {
             // 否则 Agent 第一次 observe 就失败, 白白浪费一轮
             val restored = tryRestoreA11y()
             if (!restored) {
-                return "无障碍服务未连接, 且自动恢复失败。请让用户在系统设置-无障碍中手动开启 CatfeeAgent。"
+                return "无障碍服务未连接, 且自动恢复失败。请让用户在系统设置-无障碍中手动开启 CatfeeAgents。"
             }
             return "无障碍服务刚被重新拉起, 请稍后再次 observe。"
         }

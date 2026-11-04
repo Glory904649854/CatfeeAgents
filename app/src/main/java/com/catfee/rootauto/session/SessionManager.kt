@@ -122,6 +122,26 @@ object SessionManager {
         }
     }
 
+    fun addDuration(context: Context, sessionId: String, elapsedMs: Long) {
+        if (elapsedMs <= 0) return
+        updateById(context, sessionId) { s ->
+            s.copy(totalDurationMs = s.totalDurationMs + elapsedMs)
+        }
+    }
+
+    /** 附件解析完成后, 把解析文本补到最近一条 user 消息的隐藏上下文里 */
+    fun setLastUserContext(context: Context, sessionId: String, contextText: String) {
+        if (contextText.isBlank()) return
+        updateById(context, sessionId) { s ->
+            val msgs = s.messages.toMutableList()
+            val idx = msgs.indexOfLast { it.role == "user" }
+            if (idx >= 0) {
+                msgs[idx] = msgs[idx].copy(context = contextText)
+            }
+            s.copy(messages = msgs)
+        }
+    }
+
     fun setContextChars(context: Context, sessionId: String, chars: Int) {
         if (chars <= 0) return
         updateById(context, sessionId) { it.copy(contextChars = chars) }

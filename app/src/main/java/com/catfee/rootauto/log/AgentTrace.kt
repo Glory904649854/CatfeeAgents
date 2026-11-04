@@ -1,4 +1,4 @@
-﻿package com.catfee.rootauto.log
+package com.catfee.rootauto.log
 
 import android.content.Context
 import android.os.Build
@@ -232,7 +232,7 @@ object AgentTrace {
             .put("title", title.take(255))
             .put("content", content)
             .put("tags", tagArr)
-            .put("source", "CatfeeAgent/Android")
+            .put("source", "CatfeeAgents/Android")
             .put("extra", extra)
     }
 

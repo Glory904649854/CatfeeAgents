@@ -1,4 +1,4 @@
-# CatfeeAgent
+# CatfeeAgents
 
 一个面向 Android 的通用 LLM 助手：既能正常聊天、分析图片/文件，也能用自然语言让 Agent 观察屏幕、选择工具并操作手机。
 
@@ -15,6 +15,8 @@
   - 图片先在本地做 PP-OCR / ML Kit 识别，再把 OCR 文本交给 LLM 判断；
   - 文本直接读取，PDF 渲染前几页后 OCR，DOCX/XLSX/PPTX 解包提取文本；
   - 不支持格式会明确提示，不会假装读过。
+- **附件预览**：已发送图片可点开全屏遮罩预览，支持双指缩放/旋转、双击还原、多图左右滑动；文件用系统应用打开。
+- **耗时统计**：每条助手回复显示本轮耗时（含附件解析/工具调用），会话累计总耗时。
 - **手机操作确认**：首次需要读取/控制手机时，在聊天框内弹一次确认卡；允许后本会话不再询问。
 - **ReAct Agent**：OpenAI 兼容 function calling，循环执行「观察 → 思考 → 动作 → 校验」。
 - **通用原子工具**：点击、长按、滑动、输入、启动 App、读无障碍树、截图、OCR、等待、校验、记忆、计划等。
@@ -32,11 +34,13 @@
 ## 统一对话 / 会话
 
 - 普通聊天、问答、附件分析：直接回答，不调用设备工具。
+- 附件会在**消息发送后**解析：Activity 中出现 `analyze_resources` 工具步骤（正在解析第 N/M 个附件），解析完成后再交给模型；不会在发送前卡住输入框。
 - 需要读取/操作手机时：模型会先请求工具；App 在聊天框内弹出「允许控制手机？」确认卡。
   - 允许后写入当前会话 `phone_allowed`，本会话后续设备操作不再询问；
   - 拒绝则本次不执行，下一次仍会询问。
-- 每条会话持久化消息、附件元数据、Agent 步骤、结果、token 累计和上下文长度；
+- 每条会话持久化消息、附件元数据、Agent 步骤、结果、token/上下文/累计耗时；
   菜单 →「历史会话」可回到旧会话继续，菜单 →「新建会话」可开新会话。
+- 已发送的图片可点击全屏预览（缩放/旋转/多图左右切换）；文件点击用系统应用打开。
 - 切换会话后继续发消息：历史消息和附件解析摘要会作为 `priorContext` 带入新任务。
 
 ## 运行要求
@@ -46,7 +50,7 @@
 | Android | 8.0+（minSdk 26） |
 | 架构 | arm64 真机 |
 | Root | Magisk / su 可用（uinput 注入、截图、部分系统操作） |
-| 无障碍 | 开启 CatfeeAgent 的无障碍服务 |
+| 无障碍 | 开启 CatfeeAgents 的无障碍服务 |
 | 通知 | Android 13+ 需授予通知权限 |
 | 网络 | 能访问所配置的 LLM 接口；远程日志需访问 `https://api.catfee.cn`（可改） |
 
@@ -193,7 +197,7 @@ Content-Type: application/json
     "tools": []
   },
   "tags": ["agent", "step", "com.example.app"],
-  "source": "CatfeeAgent/Android",
+  "source": "CatfeeAgents/Android",
   "extra": { "task_id": "T...", "step": 1, "package": "com.example.app" }
 }
 ```
@@ -321,7 +325,7 @@ magisk/                          # Magisk 模块相关文件
 
 ## 构建信息
 
-- 应用名：`CatfeeAgent`
+- 应用名：`CatfeeAgents`
 - `applicationId`: `com.catfee.rootauto`（包名保持不变，兼容已授权的无障碍/日志配置）
 - `versionName`: `0.1.0`
 - `compileSdk`: 36 / `targetSdk`: 34 / `minSdk`: 26

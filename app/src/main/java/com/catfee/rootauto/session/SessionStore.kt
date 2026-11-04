@@ -47,6 +47,8 @@ data class ChatMessage(
     val content: String,
     val time: Long = System.currentTimeMillis(),
     val tokens: Int = 0,
+    /** 本轮交互耗时 (含附件解析/工具调用), 毫秒 */
+    val elapsedMs: Long = 0,
     /** 模型思维链, 用于聊天里的"思考过程"折叠展示 */
     val reasoning: String = "",
     /** 附件解析/OCR 后的隐藏上下文, 不直接展示在气泡里 */
@@ -61,6 +63,7 @@ data class ChatMessage(
             .put("content", content)
             .put("time", time)
             .put("tokens", tokens)
+            .put("elapsed_ms", elapsedMs)
             .put("reasoning", reasoning)
             .put("context", context)
             .put("attachments", arr)
@@ -79,6 +82,7 @@ data class ChatMessage(
                 content = o.optString("content", ""),
                 time = o.optLong("time", 0L),
                 tokens = o.optInt("tokens", 0),
+                elapsedMs = o.optLong("elapsed_ms", 0L),
                 reasoning = o.optString("reasoning", ""),
                 context = o.optString("context", ""),
                 attachments = list
@@ -132,6 +136,7 @@ data class Session(
     val completionTokens: Int = 0,
     val totalTokens: Int = 0,
     val contextChars: Int = 0,
+    val totalDurationMs: Long = 0,
     val result: String = "",
     val running: Boolean = false,
     /** 本会话是否已允许 Agent 操作/读取手机 (确认一次后不再询问) */
@@ -156,6 +161,7 @@ data class Session(
             .put("completion_tokens", completionTokens)
             .put("total_tokens", totalTokens)
             .put("context_chars", contextChars)
+            .put("total_duration_ms", totalDurationMs)
             .put("result", result)
             .put("running", running)
             .put("phone_allowed", phoneAllowed)
@@ -168,6 +174,7 @@ data class Session(
         updatedAt = updatedAt,
         totalTokens = totalTokens,
         contextChars = contextChars,
+        totalDurationMs = totalDurationMs,
         messageCount = messages.size,
         stepCount = steps.size,
         resultPreview = result.take(80)
@@ -201,6 +208,7 @@ data class Session(
                     completionTokens = o.optInt("completion_tokens", 0),
                     totalTokens = o.optInt("total_tokens", 0),
                     contextChars = o.optInt("context_chars", 0),
+                    totalDurationMs = o.optLong("total_duration_ms", 0L),
                     result = o.optString("result", ""),
                     running = false,
                     phoneAllowed = o.optBoolean("phone_allowed", false)
@@ -221,6 +229,7 @@ data class SessionSummary(
     val updatedAt: Long,
     val totalTokens: Int,
     val contextChars: Int,
+    val totalDurationMs: Long,
     val messageCount: Int,
     val stepCount: Int,
     val resultPreview: String
@@ -232,6 +241,7 @@ data class SessionSummary(
         .put("updated_at", updatedAt)
         .put("total_tokens", totalTokens)
         .put("context_chars", contextChars)
+        .put("total_duration_ms", totalDurationMs)
         .put("message_count", messageCount)
         .put("step_count", stepCount)
         .put("result_preview", resultPreview)
@@ -244,6 +254,7 @@ data class SessionSummary(
             updatedAt = o.optLong("updated_at", 0L),
             totalTokens = o.optInt("total_tokens", 0),
             contextChars = o.optInt("context_chars", 0),
+            totalDurationMs = o.optLong("total_duration_ms", 0L),
             messageCount = o.optInt("message_count", 0),
             stepCount = o.optInt("step_count", 0),
             resultPreview = o.optString("result_preview", "")

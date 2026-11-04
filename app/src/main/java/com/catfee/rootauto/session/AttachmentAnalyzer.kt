@@ -75,16 +75,22 @@ object AttachmentAnalyzer {
     }
 
     /** 多个附件依次解析, 返回给 LLM 的隐藏上下文 */
-    suspend fun analyzeAll(context: Context, attachments: List<Attachment>): String {
+    suspend fun analyzeAll(
+        context: Context,
+        attachments: List<Attachment>,
+        onProgress: (String) -> Unit = {}
+    ): String {
         if (attachments.isEmpty()) return ""
         val sb = StringBuilder()
-        for (a in attachments) {
-            if (sb.length >= MAX_TEXT_CHARS) break
+        attachments.forEachIndexed { index, a ->
+            if (sb.length >= MAX_TEXT_CHARS) return@forEachIndexed
+            onProgress("正在解析 ${index + 1}/${attachments.size}: ${a.name}")
             val text = analyze(context, a)
             sb.append("\n\n===== 附件: ").append(a.name).append(" (").append(a.mime)
                 .append(", ").append(a.size).append(" bytes) =====\n")
             sb.append(text.take(MAX_TEXT_CHARS - sb.length))
         }
+        onProgress("附件解析完成, 共 ${attachments.size} 个")
         return sb.toString().trim().take(MAX_TEXT_CHARS)
     }
 

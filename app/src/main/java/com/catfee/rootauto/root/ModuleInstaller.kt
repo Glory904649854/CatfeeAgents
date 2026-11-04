@@ -1,4 +1,4 @@
-﻿package com.catfee.rootauto.root
+package com.catfee.rootauto.root
 
 import android.content.Context
 import android.util.Log
@@ -107,10 +107,10 @@ object ModuleInstaller {
                 // module.prop 决定 Magisk 是否加载该模块
                 append("cat > $MODULE_DIR/module.prop <<'EOF'\n")
                 append("id=$MODULE_ID\n")
-                append("name=CatfeeAgent 底层能力模块\n")
+                append("name=CatfeeAgents 底层能力模块\n")
                 append("version=0.1.0\n")
                 append("versionCode=1\n")
-                append("author=CatfeeAgent\n")
+                append("author=CatfeeAgents\n")
                 append("description=提供 uinput 输入注入与截图能力\n")
                 append("EOF\n")
                 // service.sh 负责开机自启
