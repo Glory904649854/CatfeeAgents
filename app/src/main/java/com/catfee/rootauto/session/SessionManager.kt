@@ -46,6 +46,16 @@ object SessionManager {
         _current.value = loaded.copy(running = false)
     }
 
+    /** 删除会话; 如果删的是当前会话, 自动换成一个新的空会话 */
+    suspend fun delete(context: Context, id: String) {
+        saveJobs.remove(id)?.cancel()
+        SessionStore.delete(context, id)
+        if (_current.value?.id == id) {
+            _current.value = SessionStore.newSession("chat")
+        }
+        refreshHistory(context)
+    }
+
     /** 首次进入 App: 新建一个空会话 (不落盘, 发第一条消息才出现在历史里) */
     suspend fun ensureSession(context: Context, mode: String): Session {
         _current.value?.let { return it }

@@ -37,6 +37,10 @@ object AgentTools {
     /** 上一次 observe 的界面文本哈希, 用于去重 */
     @Volatile
     private var lastObserveHash: String = ""
+    private var lastReadPageHash: String = ""
+    private var lastSeeHash: String = ""
+    private var lastSeeQuestion: String = ""
+    private var lastSeeText: String = ""
 
     /** observe 之后等待界面稳定的默认时间, 太短会读到旧界面 */
     const val DEFAULT_SETTLE_MS = 800L
@@ -515,12 +519,29 @@ object AgentTools {
                         "视觉识别失败: LLM 配置不完整"
                     } else {
                         val q = args.optString("question").trim()
-                        val v = if (q.isEmpty()) {
-                            ScreenVision.describeScreen(provider)
+                        val screenHash = ToolRuntime.currentScreenHash()
+                        if (screenHash.isNotBlank() && screenHash == lastSeeHash &&
+                            q == lastSeeQuestion && lastSeeText.isNotBlank()
+                        ) {
+                            "屏幕未变化 (hash=$screenHash), 不要重复 see_screen; " +
+                                "直接使用上一次视觉结果, 或用 ocr/find_text 定位。"
                         } else {
-                            ScreenVision.describeScreen(provider, q)
+                            val v = if (q.isEmpty()) {
+                                ScreenVision.describeScreen(provider)
+                            } else {
+                                ScreenVision.describeScreen(provider, q)
+                            }
+                            if (v.ok) {
+                                if (screenHash.isNotBlank()) {
+                                    lastSeeHash = screenHash
+                                    lastSeeQuestion = q
+                                    lastSeeText = v.text
+                                }
+                                "[视觉识别, ${v.elapsedMs}ms]\n${v.text}"
+                            } else {
+                                "视觉识别失败: ${v.error}"
+                            }
                         }
-                        if (v.ok) "[视觉识别, ${v.elapsedMs}ms]\n${v.text}" else "视觉识别失败: ${v.error}"
                     }
                 }
                 "note" -> "已记录"
@@ -588,10 +609,19 @@ object AgentTools {
                 )
                 "tap_desc" -> ToolRuntime.tapDesc(args.optString("keyword"))
                 "tap_id" -> ToolRuntime.tapId(args.optString("id_suffix"))
-                "long_press" -> ToolRuntime.longPress(
-                    args.optInt("x"), args.optInt("y"), args.optInt("hold_ms", 800)
-                )
-                "double_tap" -> ToolRuntime.doubleTap(args.optInt("x"), args.optInt("y"))
+                "long_press" -> {
+                    val x = args.optInt("x")
+                    val y = args.optInt("y")
+                    val bad = invalidCoord(x, y)
+                    if (bad != null) bad
+                    else ToolRuntime.longPress(x, y, args.optInt("hold_ms", 800))
+                }
+                "double_tap" -> {
+                    val x = args.optInt("x")
+                    val y = args.optInt("y")
+                    val bad = invalidCoord(x, y)
+                    if (bad != null) bad else ToolRuntime.doubleTap(x, y)
+                }
                 "swipe_direction" -> ToolRuntime.swipeDirection(
                     args.optString("direction", "up"),
                     args.optDouble("distance", 0.6).toFloat(),
@@ -648,20 +678,35 @@ object AgentTools {
                 }
                 "tool_list" -> ToolRuntime.catalog()
                 "tap" -> {
-                    val ok = DaemonClient.tap(args.optInt("x"), args.optInt("y"))
-                    if (ok) "已点击 (${args.optInt("x")}, ${args.optInt("y")})" else "点击失败: daemon 无响应"
+                    val x = args.optInt("x")
+                    val y = args.optInt("y")
+                    val bad = invalidCoord(x, y)
+                    if (bad != null) {
+                        bad
+                    } else {
+                        val ok = DaemonClient.tap(x, y)
+                        if (ok) "已点击 ($x, $y)" else "点击失败: daemon 无响应"
+                    }
                 }
                 "tap_text" -> ToolRuntime.tapText(
                     args.optString("text"),
                     args.optBoolean("exact", false)
                 )
                 "swipe" -> {
-                    val ok = DaemonClient.swipe(
-                        args.optInt("x1"), args.optInt("y1"),
-                        args.optInt("x2"), args.optInt("y2"),
-                        args.optInt("duration_ms", 300)
-                    )
-                    if (ok) "已滑动" else "滑动失败"
+                    val x1 = args.optInt("x1")
+                    val y1 = args.optInt("y1")
+                    val x2 = args.optInt("x2")
+                    val y2 = args.optInt("y2")
+                    val bad = invalidCoord(x1, y1) ?: invalidCoord(x2, y2)
+                    if (bad != null) {
+                        bad
+                    } else {
+                        val ok = DaemonClient.swipe(
+                            x1, y1, x2, y2,
+                            args.optInt("duration_ms", 300)
+                        )
+                        if (ok) "已滑动" else "滑动失败"
+                    }
                 }
                 "input_text" -> {
                     val text = args.optString("text")
@@ -736,11 +781,22 @@ object AgentTools {
      * 返回: 紧凑文本
      * 使用场景: 列表扫描、找控件、比 observe 更全
      */
+    /** 坐标越界直接拒绝, 并把屏幕尺寸/换算方法告诉模型; 避免反复点屏幕外 */
+    private suspend fun invalidCoord(x: Int, y: Int): String? {
+        val (w, h) = DaemonClient.screenSize()
+        if (x !in 0 until w || y !in 0 until h) {
+            return "坐标越界: ($x,$y), 当前屏幕 ${w}x${h}。tap 坐标必须是屏幕像素; " +
+                "如果来自 see_screen 的 0~1000 归一化坐标, 先换算为 " +
+                "x*${w}/1000, y*${h}/1000; 或者改用 tap_text / find_text / tap_id。越界坐标不会执行。"
+        }
+        return null
+    }
+
     private fun readPage(): String {
         val svc = UiObserverService.instance ?: return "无障碍服务未连接"
         val tree = svc.dumpTree(1000)
         if (tree.isEmpty()) return "当前页面没有可读节点"
-        return buildString {
+        val text = buildString {
             append("节点 ${tree.size} 个:\n")
             tree.take(300).forEach { n ->
                 if (n.text.isBlank() && n.desc.isBlank() && n.resourceId.isBlank()) return@forEach
@@ -753,6 +809,13 @@ object AgentTools {
                 append('\n')
             }
         }
+        val hash = Integer.toHexString(text.hashCode())
+        if (hash == lastReadPageHash) {
+            return "页面未变化 (hash=$hash)。不要重复 read_page; " +
+                "需要定位用 find_text / scroll_to_text, 确认动作是否生效用 verify_changed。"
+        }
+        lastReadPageHash = hash
+        return text
     }
 
     /**

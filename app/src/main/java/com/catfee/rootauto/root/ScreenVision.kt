@@ -43,7 +43,7 @@ object ScreenVision {
     private const val SHOT_PATH = "/data/local/tmp/catfee_shot.raw"
 
     /** 送模型前的最长边, 越大越清晰但 token 越多; 1080 宽已足够读清单行文字 */
-    private const val MAX_EDGE = 1080
+    private const val MAX_EDGE = 2400
 
     /** JPEG 质量, 85 在文字场景下基本无肉眼损失 */
     private const val JPEG_QUALITY = 85
@@ -159,9 +159,19 @@ object ScreenVision {
      */
     suspend fun describeScreen(
         provider: LlmSettings.Provider,
-        question: String = DEFAULT_QUESTION
+        question: String = ""
     ): VisionResult = withContext(Dispatchers.IO) {
         val started = System.currentTimeMillis()
+        val (screenW, screenH) = DaemonClient.screenSize()
+        val prompt = buildString {
+            append("屏幕实际像素尺寸: ${screenW}x${screenH}。\n")
+            append(if (question.isBlank()) defaultQuestion() else question)
+            append(
+                "\n坐标要求: 所有控件坐标必须是这张截图的**绝对像素** " +
+                    "x∈[0,${screenW - 1}], y∈[0,${screenH - 1}], " +
+                    "不要输出 0~1000 归一化坐标, 也不要用超出屏幕的数字。"
+            )
+        }
         val (b64, err) = captureBase64Jpeg()
         if (b64.isEmpty()) {
             return@withContext VisionResult(false, error = err, elapsedMs = System.currentTimeMillis() - started)
@@ -174,7 +184,7 @@ object ScreenVision {
                             JSONObject().put("type", "image_url")
                                 .put("image_url", JSONObject().put("url", "data:image/jpeg;base64,$b64"))
                         )
-                        .put(JSONObject().put("type", "text").put("text", question))
+                        .put(JSONObject().put("type", "text").put("text", prompt))
                 )
             )
             val r = LlmClient.chat(provider, messages)
@@ -191,14 +201,15 @@ object ScreenVision {
     }
 
     /**
-     * 默认提问模板: 强制模型输出「可点击元素 + 大致坐标」, 便于后续 tap。
-     * 坐标以 0~1000 归一化给出, 避免模型对绝对像素的漂移。
+     * 默认提问模板: 强制模型输出「可点击元素 + 绝对像素坐标」。
+     * 以前用 0~1000 归一化, 模型经常直接把归一化值当像素 tap, 导致点到屏幕外;
+     * 现在图片不再缩到 1080, 坐标空间与真实屏幕一致, 并要求绝对像素。
      */
-    private val DEFAULT_QUESTION = """
+    private fun defaultQuestion(): String = """
         你是 Android 手机的视觉识别模块。请阅读这张手机截图, 输出:
         1) 当前页面在做什么 (一句话)
         2) 所有可点击或可读的控件, 逐行按格式输出:
-           名称 | 类型(按钮/输入框/文本/图标) | 中心坐标(x,y, 以图片宽高的 0~1000 归一化)
+           名称 | 类型(按钮/输入框/文本/图标) | 中心坐标(x,y, 绝对像素)
         3) 如果当前页面有题目, 把题干与所有选项原文完整抄出来
         只输出上述内容, 不要额外解释。
     """.trimIndent()

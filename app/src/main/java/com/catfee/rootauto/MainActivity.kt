@@ -77,6 +77,7 @@ import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.Checklist
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.ContentCopy
+import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.Description
 import androidx.compose.material.icons.rounded.ErrorOutline
 import androidx.compose.material.icons.rounded.ExpandMore
@@ -87,6 +88,7 @@ import androidx.compose.material.icons.rounded.Psychology
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material.icons.rounded.Terminal
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -257,6 +259,7 @@ private fun AgentConsole(activity: ComponentActivity) {
     var pendingAttachments by remember { mutableStateOf<List<Attachment>>(emptyList()) }
     var previewImages by remember { mutableStateOf<List<Attachment>>(emptyList()) }
     var previewIndex by remember { mutableIntStateOf(0) }
+    var pendingDelete by remember { mutableStateOf<SessionSummary?>(null) }
     var showMenu by remember { mutableStateOf(false) }
     var showSettings by remember { mutableStateOf(false) }
     var hint by remember { mutableStateOf("") }
@@ -549,6 +552,7 @@ private fun AgentConsole(activity: ComponentActivity) {
                     showMenu = false
                 }
             },
+            onDelete = { pendingDelete = it },
             onSettings = {
                 showMenu = false
                 showSettings = true
@@ -633,6 +637,30 @@ private fun AgentConsole(activity: ComponentActivity) {
         )
     }
 
+    pendingDelete?.let { s ->
+        AlertDialog(
+            onDismissRequest = { pendingDelete = null },
+            title = { Text("删除会话？") },
+            text = {
+                Text("将删除「${s.title}」及其消息、步骤和附件记录，不可恢复。")
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        pendingDelete = null
+                        if (agent.running && agent.sessionId == s.id) {
+                            AgentController.stop()
+                        }
+                        scope.launch { SessionManager.delete(activity, s.id) }
+                    }
+                ) { Text("删除", color = Danger) }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingDelete = null }) { Text("取消") }
+            }
+        )
+    }
+
     if (previewImages.isNotEmpty()) {
         ImagePreviewOverlay(
             images = previewImages,
@@ -644,18 +672,19 @@ private fun AgentConsole(activity: ComponentActivity) {
 
 private fun buildPriorContext(session: Session): String {
     val sb = StringBuilder()
-    session.messages.takeLast(8).forEach { m ->
+    // 只带最近 4 条: 旧目标/旧结果太多会让模型把历史任务当成当前任务
+    session.messages.takeLast(4).forEach { m ->
         sb.append(if (m.role == "user") "用户: " else "助手: ")
-        sb.append(m.content.replace('\n', ' ').take(500)).append('\n')
+        sb.append(m.content.replace('\n', ' ').take(300)).append('\n')
         if (m.context.isNotBlank()) {
             sb.append("[该消息附件的解析摘要] ")
-                .append(m.context.replace('\n', ' ').take(600)).append('\n')
+                .append(m.context.replace('\n', ' ').take(400)).append('\n')
         }
     }
     if (session.result.isNotBlank()) {
-        sb.append("最近一次结果: ").append(session.result.take(800)).append('\n')
+        sb.append("最近一次结果: ").append(session.result.take(500)).append('\n')
     }
-    return sb.toString().take(4_000)
+    return sb.toString().take(2_000)
 }
 
 /* ---------------- Header / session line ---------------- */
@@ -1700,6 +1729,7 @@ private fun ImagePreviewOverlay(
                     .align(Alignment.TopCenter)
                     .statusBarsPadding()
                     .fillMaxWidth()
+                    .background(Color.Black.copy(alpha = 0.35f))
                     .padding(horizontal = 14.dp, vertical = 8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
@@ -1707,7 +1737,10 @@ private fun ImagePreviewOverlay(
                     "${pagerState.currentPage + 1} / ${images.size}",
                     color = Color.White,
                     fontSize = 12.sp,
-                    fontWeight = FontWeight.Medium
+                    fontWeight = FontWeight.Medium,
+                    modifier = Modifier
+                        .background(Color.Black.copy(alpha = 0.45f), RoundedCornerShape(50))
+                        .padding(horizontal = 9.dp, vertical = 4.dp)
                 )
                 Spacer(Modifier.weight(1f))
                 IconButton(
@@ -1715,7 +1748,7 @@ private fun ImagePreviewOverlay(
                     modifier = Modifier
                         .size(36.dp)
                         .clip(CircleShape)
-                        .background(Color.White.copy(alpha = 0.12f))
+                        .background(Color.Black.copy(alpha = 0.45f))
                 ) {
                     Icon(Icons.Rounded.Close, "关闭预览", tint = Color.White, modifier = Modifier.size(19.dp))
                 }
@@ -1724,8 +1757,9 @@ private fun ImagePreviewOverlay(
                 "双指缩放/旋转 · 双击还原 · 左右滑动切换",
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
-                    .padding(bottom = 34.dp),
-                color = Color.White.copy(alpha = 0.55f),
+                    .background(Color.Black.copy(alpha = 0.45f), RoundedCornerShape(50))
+                    .padding(horizontal = 14.dp, vertical = 7.dp),
+                color = Color.White.copy(alpha = 0.8f),
                 fontSize = 10.sp
             )
         }
@@ -1805,6 +1839,7 @@ private fun MenuSheet(
     runningSessionId: String,
     onNew: () -> Unit,
     onOpen: (String) -> Unit,
+    onDelete: (SessionSummary) -> Unit,
     onSettings: () -> Unit,
     onDismiss: () -> Unit
 ) {
@@ -1858,7 +1893,8 @@ private fun MenuSheet(
                     summary = s,
                     selected = s.id == currentId,
                     running = s.id == runningSessionId,
-                    onClick = { onOpen(s.id) }
+                    onClick = { onOpen(s.id) },
+                    onDelete = { onDelete(s) }
                 )
                 Spacer(Modifier.height(7.dp))
             }
@@ -1885,7 +1921,8 @@ private fun SessionRow(
     summary: SessionSummary,
     selected: Boolean,
     running: Boolean,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    onDelete: () -> Unit
 ) {
     val time = remember(summary.updatedAt) {
         SimpleDateFormat("MM-dd HH:mm", Locale.getDefault()).format(Date(summary.updatedAt))
@@ -1941,6 +1978,17 @@ private fun SessionRow(
                     color = Muted,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
+                )
+            }
+            IconButton(
+                onClick = onDelete,
+                modifier = Modifier.size(30.dp)
+            ) {
+                Icon(
+                    Icons.Rounded.DeleteOutline,
+                    contentDescription = "删除会话",
+                    tint = Color(0xFF9CA3AF),
+                    modifier = Modifier.size(16.dp)
                 )
             }
         }

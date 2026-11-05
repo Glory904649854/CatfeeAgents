@@ -48,17 +48,18 @@ object ReActAgent {
     private const val TOTAL_TIMEOUT_MS = 8 * 60 * 60 * 1000L
 
     /** 历史消息上限 (含 system), 超过则滑动窗口丢弃最老的对话, 防止上下文爆掉 */
-    private const val MAX_MESSAGES = 80
+    private const val MAX_MESSAGES = 60
 
     /**
      * 上下文总字符预算。
      * 只按条数裁剪会被超长的 OCR/长页结果撑爆: 80 条 × 几万字一样会超模型上下文,
      * 表现为请求很慢、超时重试、甚至模型忘记任务目标。
+     * 实测长任务会顶到 48K 字符, 模型注意力明显下降; 收紧到 40K。
      */
-    private const val MAX_CONTEXT_CHARS = 60_000
+    private const val MAX_CONTEXT_CHARS = 40_000
 
     /** 单条工具结果回灌上限, 超出部分截断并提示 Agent 用更精确的工具重读 */
-    private const val MAX_TOOL_MESSAGE_CHARS = 16_000
+    private const val MAX_TOOL_MESSAGE_CHARS = 10_000
 
     /** 便签/计划每轮都进 system, 需要限制总长度, 否则长任务会自己把上下文撑爆 */
     private const val MAX_NOTES_CHARS = 4_000
@@ -78,6 +79,12 @@ object ReActAgent {
         "settings_get", "settings_put", "shell",
         "file_list", "file_read", "file_write",
         "app_info", "get_prop", "list_packages", "answer_form"
+    )
+
+    /** 完全相同且连续重复时大概率是卡死的动作类工具; 滚动/等待类不在此列 */
+    private val REPEAT_BLOCK_TOOLS = setOf(
+        "tap", "tap_text", "tap_id", "tap_desc", "double_tap", "long_press",
+        "input_text", "clear_text", "set_text_id"
     )
 
     /**
@@ -105,6 +112,11 @@ object ReActAgent {
           首次设备操作会由 App 弹确认卡, 用户允许后本会话不再询问。
         - 用户上传的图片已经由 App 本地 OCR, 文件已经本地解析; 解析文本会附在用户消息里,
           直接基于这些文字回答, 不要假装看到了原始图片。
+        - 当前任务目标优先于历史会话和 App 记忆。历史里的旧目标只作参考, 不要因为旧记忆/旧会话
+          切回答题、刷课等旧任务; 用户现在让你看视频就只看视频。
+        - tap 坐标必须是当前屏幕像素; 先确认 x < 屏幕宽, y < 屏幕高。
+          see_screen 返回的是绝对像素; 如果拿到的是 0~1000 归一化值, 先换算再点。
+          越界坐标会被直接拒绝, 不要反复重试同一个越界坐标。
 
         你是一个通用的 Android 手机操作 Agent。你通过工具直接控制这台真机, 可以操作任意 App 完成用户目标。
         工具覆盖: 观察(无障碍/OCR/截图/视觉)、点击(坐标/文字/描述/id/长按/双击)、滑动、输入、
@@ -200,6 +212,11 @@ object ReActAgent {
         AgentTrace.startTask(context, goal, provider.model, SYSTEM_PROMPT, startPkg)
         var currentStep = 0
         var phoneGranted = false
+        var lastCallSig = ""
+        var sameCallCount = 0
+        var targetPkg = startPkg
+        var memoryWritten = false
+        var usedDeviceTool = false
         val firstUser = buildString {
             append("任务目标: ").append(goal)
             if (priorContext.isNotBlank()) {
@@ -253,6 +270,9 @@ object ReActAgent {
                 }
                 // 按当前前台 App 注入它的简短记忆 (入口/关键控件/坑)
                 val fgPkg = AppMemory.currentPackage()
+                if (fgPkg.isNotBlank() && fgPkg != context.packageName) {
+                    targetPkg = fgPkg
+                }
                 val appMem = AppMemory.read(context, fgPkg)
                 if (appMem.isNotBlank()) {
                     hints.append("\n\n===== 当前 App 记忆 (").append(fgPkg).append(") =====\n").append(appMem)
@@ -306,6 +326,12 @@ object ReActAgent {
                 // 没有工具调用: 普通聊天/问答/附件分析到此结束, 直接把回答作为最终结果
                 if (r.toolCalls.isEmpty()) {
                     if (r.content.isNotBlank()) {
+                        if (!memoryWritten && usedDeviceTool) {
+                            autoWriteMemory(
+                                context, provider, targetPkg, goal, r.content,
+                                notes.toString(), onEvent
+                            )
+                        }
                         AgentTrace.step(
                             context, step, lastInput, r.content,
                             emptyList(), emptyList(), llmMs, r.reasoning, ctxChars, ctxMsgs
@@ -332,6 +358,28 @@ object ReActAgent {
                 for (call in r.toolCalls) {
                     val t0 = System.currentTimeMillis()
                     onEvent(Event("tool", call.arguments, tool = call.name))
+                    val callSig = call.name + "|" + call.arguments
+                    if (callSig == lastCallSig) {
+                        sameCallCount++
+                    } else {
+                        lastCallSig = callSig
+                        sameCallCount = 1
+                    }
+                    if (call.name in REPEAT_BLOCK_TOOLS && sameCallCount >= 3) {
+                        val blocked = "重复调用已阻止: 同一工具+参数已连续 $sameCallCount 次。" +
+                            "请换方法/坐标, 或 finish 说明障碍。"
+                        onEvent(Event("system", blocked))
+                        toolTraces.add(
+                            AgentTrace.ToolTrace(call.name, call.arguments, blocked, 0, false)
+                        )
+                        messages.put(toolMessage(call.id, blocked))
+                        if (sameCallCount >= 6) {
+                            AgentTrace.finish(context, false, "重复调用过多, 任务终止", step)
+                            return "重复调用过多, 任务终止"
+                        }
+                        continue
+                    }
+                    if (call.name in DEVICE_TOOLS) usedDeviceTool = true
                     if (call.name in DEVICE_TOOLS && !phoneGranted) {
                         val allowed = ensurePhonePermission(call.name, call.arguments)
                         if (!allowed) {
@@ -348,6 +396,12 @@ object ReActAgent {
                                 System.currentTimeMillis() - t0
                             )
                         )
+                        if (!memoryWritten && usedDeviceTool) {
+                            autoWriteMemory(
+                                context, provider, targetPkg, goal, summary,
+                                notes.toString(), onEvent
+                            )
+                        }
                         AgentTrace.step(
                             context, step, lastInput, r.content,
                             r.toolCalls.map { it.name to it.arguments },
@@ -453,6 +507,9 @@ object ReActAgent {
                         continue
                     }
                     val result = AgentTools.execute(context, provider, call.name, call.arguments)
+                    if (call.name == "memory_write" && !result.startsWith("写入失败")) {
+                        memoryWritten = true
+                    }
                     val elapsed = System.currentTimeMillis() - t0
                     val toolOk = !(result.startsWith("失败") || result.startsWith("错误") ||
                         result.startsWith("Exception") || result.contains("执行失败"))
@@ -531,6 +588,51 @@ object ReActAgent {
             onEvent(Event("error", "任务异常: ${e.message}"))
             AgentTrace.finish(context, false, "任务异常: ${e.message}", currentStep)
             return "任务异常: ${e.message}"
+        }
+    }
+
+    /**
+     * 任务完成时自动整理一条 App 记忆。
+     * 模型经常忘记调用 memory_write, 导致按包名隔离的记忆一直是空的;
+     * 这里用一次轻量 LLM 提取稳定入口/控件/坑, 明确禁止题目答案和一次性数据。
+     */
+    private suspend fun autoWriteMemory(
+        context: Context,
+        provider: LlmSettings.Provider,
+        pkg: String,
+        goal: String,
+        summary: String,
+        notes: String,
+        onEvent: (Event) -> Unit
+    ) {
+        if (pkg.isBlank() || pkg == context.packageName) return
+        onEvent(Event("system", "整理 App 记忆…"))
+        val prompt = """
+            App 包名: $pkg
+            任务目标: ${goal.take(500)}
+            任务结果: ${summary.take(800)}
+            过程便签: ${notes.take(1200)}
+
+            请只提取这个 App 的稳定入口、关键控件、容易误点的位置/坑, 最多 300 字。
+            禁止记录: 题目答案、课程进度、具体任务结果、临时弹窗、用户隐私、一次性数据。
+            如果没有稳定信息, 只输出: 暂无稳定信息
+        """.trimIndent()
+        val messages = JSONArray().put(
+            JSONObject().put("role", "system")
+                .put("content", "你是 Android App 操作记忆整理器。只输出记忆正文, 不要解释。")
+        ).put(JSONObject().put("role", "user").put("content", prompt))
+        val r = try {
+            LlmClient.chat(provider, messages, 20_000)
+        } catch (e: Exception) {
+            Log.w(TAG, "auto memory failed: ${e.message}")
+            return
+        }
+        val text = r.content.trim()
+        if (!r.ok || text.length < 8 || text.contains("暂无稳定")) return
+        val writeResult = AppMemory.write(context, pkg, text.take(600), append = true)
+        Log.i(TAG, "auto memory [$pkg]: $writeResult")
+        if (!writeResult.startsWith("写入失败")) {
+            onEvent(Event("system", "已更新 App 记忆 ($pkg)"))
         }
     }
 
