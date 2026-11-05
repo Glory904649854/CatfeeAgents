@@ -53,12 +53,19 @@ data class ChatMessage(
     val reasoning: String = "",
     /** 附件解析/OCR 后的隐藏上下文, 不直接展示在气泡里 */
     val context: String = "",
-    val attachments: List<Attachment> = emptyList()
+    val attachments: List<Attachment> = emptyList(),
+    /** 稳定消息 ID, 用于 UI key、引用、编辑和分支 */
+    val id: String = newId(),
+    /** 引用回复的原文快照 */
+    val quotedText: String = "",
+    /** 因 Agent 被占用而失败时的用户消息 ID, 用于重试 */
+    val retryAnchorId: String = ""
 ) {
     fun toJson(): JSONObject {
         val arr = JSONArray()
         attachments.forEach { arr.put(it.toJson()) }
         return JSONObject()
+            .put("id", id)
             .put("role", role)
             .put("content", content)
             .put("time", time)
@@ -66,10 +73,14 @@ data class ChatMessage(
             .put("elapsed_ms", elapsedMs)
             .put("reasoning", reasoning)
             .put("context", context)
+            .put("quoted_text", quotedText)
+            .put("retry_anchor", retryAnchorId)
             .put("attachments", arr)
     }
 
     companion object {
+        fun newId(): String = UUID.randomUUID().toString().replace("-", "").take(12)
+
         fun fromJson(o: JSONObject): ChatMessage {
             val list = ArrayList<Attachment>()
             o.optJSONArray("attachments")?.let { arr ->
@@ -78,6 +89,7 @@ data class ChatMessage(
                 }
             }
             return ChatMessage(
+                id = o.optString("id").ifBlank { newId() },
                 role = o.optString("role", "assistant"),
                 content = o.optString("content", ""),
                 time = o.optLong("time", 0L),
@@ -85,7 +97,9 @@ data class ChatMessage(
                 elapsedMs = o.optLong("elapsed_ms", 0L),
                 reasoning = o.optString("reasoning", ""),
                 context = o.optString("context", ""),
-                attachments = list
+                quotedText = o.optString("quoted_text", ""),
+                attachments = list,
+                retryAnchorId = o.optString("retry_anchor", "")
             )
         }
     }
@@ -140,7 +154,15 @@ data class Session(
     val result: String = "",
     val running: Boolean = false,
     /** 本会话是否已允许 Agent 操作/读取手机 (确认一次后不再询问) */
-    val phoneAllowed: Boolean = false
+    val phoneAllowed: Boolean = false,
+    val pinned: Boolean = false,
+    val archived: Boolean = false,
+    val favorite: Boolean = false,
+    val summary: String = "",
+    /** true 时允许自动标题覆盖; 手动改名后置 false */
+    val titleAuto: Boolean = false,
+    /** 本会话模型覆盖; 空=使用全局默认 */
+    val model: String = ""
 ) {
     val isEmpty: Boolean get() = messages.isEmpty() && steps.isEmpty() && result.isBlank()
 
@@ -165,6 +187,12 @@ data class Session(
             .put("result", result)
             .put("running", running)
             .put("phone_allowed", phoneAllowed)
+            .put("pinned", pinned)
+            .put("archived", archived)
+            .put("favorite", favorite)
+            .put("summary", summary)
+            .put("title_auto", titleAuto)
+            .put("model", model)
     }
 
     fun toSummary(): SessionSummary = SessionSummary(
@@ -177,7 +205,14 @@ data class Session(
         totalDurationMs = totalDurationMs,
         messageCount = messages.size,
         stepCount = steps.size,
-        resultPreview = result.take(80)
+        resultPreview = (summary.ifBlank { result }).take(80),
+        promptTokens = promptTokens,
+        completionTokens = completionTokens,
+        pinned = pinned,
+        archived = archived,
+        favorite = favorite,
+        summary = summary,
+        model = model
     )
 
     companion object {
@@ -211,7 +246,13 @@ data class Session(
                     totalDurationMs = o.optLong("total_duration_ms", 0L),
                     result = o.optString("result", ""),
                     running = false,
-                    phoneAllowed = o.optBoolean("phone_allowed", false)
+                    phoneAllowed = o.optBoolean("phone_allowed", false),
+                    pinned = o.optBoolean("pinned", false),
+                    archived = o.optBoolean("archived", false),
+                    favorite = o.optBoolean("favorite", false),
+                    summary = o.optString("summary", ""),
+                    titleAuto = o.optBoolean("title_auto", false),
+                    model = o.optString("model", "")
                 )
             } catch (e: Exception) {
                 Log.w("Session", "parse session failed: ${e.message}")
@@ -232,7 +273,14 @@ data class SessionSummary(
     val totalDurationMs: Long,
     val messageCount: Int,
     val stepCount: Int,
-    val resultPreview: String
+    val resultPreview: String,
+    val promptTokens: Int = 0,
+    val completionTokens: Int = 0,
+    val pinned: Boolean = false,
+    val archived: Boolean = false,
+    val favorite: Boolean = false,
+    val summary: String = "",
+    val model: String = ""
 ) {
     fun toJson(): JSONObject = JSONObject()
         .put("id", id)
@@ -245,6 +293,13 @@ data class SessionSummary(
         .put("message_count", messageCount)
         .put("step_count", stepCount)
         .put("result_preview", resultPreview)
+        .put("prompt_tokens", promptTokens)
+        .put("completion_tokens", completionTokens)
+        .put("pinned", pinned)
+        .put("archived", archived)
+        .put("favorite", favorite)
+        .put("summary", summary)
+        .put("model", model)
 
     companion object {
         fun fromJson(o: JSONObject): SessionSummary = SessionSummary(
@@ -257,7 +312,14 @@ data class SessionSummary(
             totalDurationMs = o.optLong("total_duration_ms", 0L),
             messageCount = o.optInt("message_count", 0),
             stepCount = o.optInt("step_count", 0),
-            resultPreview = o.optString("result_preview", "")
+            resultPreview = o.optString("result_preview", ""),
+            promptTokens = o.optInt("prompt_tokens", 0),
+            completionTokens = o.optInt("completion_tokens", 0),
+            pinned = o.optBoolean("pinned", false),
+            archived = o.optBoolean("archived", false),
+            favorite = o.optBoolean("favorite", false),
+            summary = o.optString("summary", ""),
+            model = o.optString("model", "")
         )
     }
 }
@@ -287,7 +349,8 @@ object SessionStore {
             title = if (mode == "agent") "New agent task" else "New chat",
             mode = mode,
             createdAt = now,
-            updatedAt = now
+            updatedAt = now,
+            titleAuto = true
         )
     }
 

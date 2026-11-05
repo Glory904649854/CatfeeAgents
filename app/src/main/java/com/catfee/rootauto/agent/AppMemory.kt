@@ -27,7 +27,14 @@ object AppMemory {
 
     private const val TAG = "AgentMemory"
     private const val MAX_INJECT = 800
-    private const val MAX_WRITE = 1200
+    const val MAX_WRITE = 1200
+
+    data class MemoryEntry(
+        val pkg: String,
+        val chars: Int,
+        val preview: String,
+        val updatedAt: Long
+    )
 
     /** 当前前台 App 的包名 */
     suspend fun currentPackage(): String {
@@ -86,4 +93,47 @@ object AppMemory {
             "${it.nameWithoutExtension}: ${it.length()} 字节"
         }
     }
+
+    /** UI 用: 结构化列出记忆 */
+    fun listEntries(context: Context): List<MemoryEntry> {
+        val files = dir(context).listFiles()?.filter { it.name.endsWith(".md") }.orEmpty()
+        return files.sortedByDescending { it.lastModified() }.mapNotNull { f ->
+            try {
+                val raw = f.readText()
+                MemoryEntry(
+                    pkg = f.nameWithoutExtension,
+                    chars = raw.length,
+                    preview = raw.replace('\n', ' ').trim().take(100),
+                    updatedAt = f.lastModified()
+                )
+            } catch (e: Exception) {
+                null
+            }
+        }
+    }
+
+    /** UI 用: 读取完整记忆, 不做注入上限截断 */
+    fun readRaw(context: Context, pkg: String): String {
+        if (pkg.isBlank()) return ""
+        return try {
+            val f = file(context, pkg)
+            if (f.exists()) f.readText() else ""
+        } catch (e: Exception) {
+            Log.w(TAG, "读取完整记忆失败: ${e.message}")
+            ""
+        }
+    }
+
+    fun delete(context: Context, pkg: String): Boolean {
+        if (pkg.isBlank()) return false
+        return try {
+            file(context, pkg).delete()
+        } catch (e: Exception) {
+            Log.w(TAG, "删除记忆失败: ${e.message}")
+            false
+        }
+    }
+
+    fun overwrite(context: Context, pkg: String, content: String): String =
+        write(context, pkg, content, append = false)
 }

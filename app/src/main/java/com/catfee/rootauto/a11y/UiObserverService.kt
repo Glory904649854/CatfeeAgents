@@ -6,6 +6,7 @@ import android.os.Bundle
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import com.catfee.rootauto.root.ScreenGeometry
 
 /**
  * UiObserverService —— 无障碍服务, 负责采集并压缩界面元素树
@@ -95,7 +96,10 @@ class UiObserverService : AccessibilityService() {
          * 返回: 形如 "[1] Button \"登录\" (540,1200)"
          */
         fun toPromptText(): String = buildString {
-            append("Screen: ${screenW}x${screenH} | App: $packageName | Activity: $activity\n")
+            append(
+                "Screen: ${screenW}x${screenH} rotation=${ScreenGeometry.rotationLabel()} | " +
+                    "App: $packageName | Activity: $activity\n"
+            )
             nodes.forEach { n ->
                 append('[').append(n.id).append("] ")
                 append(n.cls.substringAfterLast('.'))
@@ -120,6 +124,7 @@ class UiObserverService : AccessibilityService() {
     override fun onServiceConnected() {
         super.onServiceConnected()
         instance = this
+        ScreenGeometry.init(this)
         Log.i(TAG, "无障碍服务已连接")
     }
 
@@ -182,15 +187,15 @@ class UiObserverService : AccessibilityService() {
                 .take(MAX_NODES)
                 .mapIndexed { idx, n -> n.copy(id = idx + 1) }
 
-            val dm = resources.displayMetrics
+            val (displayW, displayH) = ScreenGeometry.displaySize()
             Snapshot(
                 // 优先用当前活动窗口自己的包名; lastPackage 会被通知栏等 SystemUI 事件污染,
                 // 只有拿不到 root 包名时才退回它
                 packageName = root.packageName?.toString()?.takeIf { it.isNotBlank() }
                     ?: lastPackage,
                 activity = cachedActivity,
-                screenW = dm.widthPixels,
-                screenH = dm.heightPixels,
+                screenW = displayW,
+                screenH = displayH,
                 nodes = top
             )
         } catch (e: Exception) {

@@ -1,7 +1,10 @@
 package com.catfee.rootauto.agent
 
 import android.content.Context
+import android.os.SystemClock
+import com.catfee.rootauto.llm.LlmClient
 import com.catfee.rootauto.llm.LlmSettings
+import com.catfee.rootauto.root.ScreenGeometry
 import com.catfee.rootauto.service.AgentStatusService
 import com.catfee.rootauto.session.Attachment
 import com.catfee.rootauto.session.AttachmentAnalyzer
@@ -17,24 +20,19 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
+import org.json.JSONArray
+import org.json.JSONObject
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
- * AgentController —— Agent 任务的唯一入口与状态中心
+ * AgentController —— 每个会话独立运行态 + 全局唯一 Agent 槽位
  *
- * 功能描述:
- *   把「启动/停止 Agent」从 Activity 里抽出来, 放到应用级单例:
- *     1. 用应用级 CoroutineScope 跑任务, Activity 退到后台/旋转屏幕都不会中断
- *     2. 用 StateFlow 暴露运行状态与步骤列表, 界面和通知栏各自订阅
- *     3. 启动时拉起前台服务, 保证后台执行不被系统回收
- *
- * 使用场景:
- *   MainActivity 的开始/停止按钮; AgentStatusService 读取状态更新通知。
- *
- * 修改时间: 2026-11-03
+ * Chat 可以多会话并发; 设备操作同一时间只允许一个会话占用。
  */
 object AgentController {
 
-    /** 一条执行步骤 (思考/工具调用/工具结果/完成/失败) */
     data class Step(
         val seq: Int,
         val type: String,
@@ -43,14 +41,12 @@ object AgentController {
         val time: Long
     )
 
-    /** 等待用户确认的设备操作 */
     data class PendingConfirm(
         val sessionId: String,
         val tool: String,
         val arguments: String
     )
 
-    /** Agent 整体状态 */
     data class State(
         val running: Boolean = false,
         val goal: String = "",
@@ -61,59 +57,122 @@ object AgentController {
         val streaming: Boolean = false,
         val streamText: String = "",
         val streamReasoning: String = "",
-        val pendingConfirm: PendingConfirm? = null
+        val pendingConfirm: PendingConfirm? = null,
+        val blockedByAgent: Boolean = false,
+        val blockedReason: String = "",
+        val phase: String = "idle",
+        val stepNumber: Int = 0,
+        val startedAtWall: Long = 0L,
+        val startedAtElapsed: Long = 0L,
+        val lastEventAtElapsed: Long = 0L,
+        val phaseStartedAtElapsed: Long = 0L,
+        val lastEventText: String = "",
+        val terminalKind: String = "",
+        val sessionTitle: String = ""
     )
 
+    private class Run(
+        val key: String,
+        val sessionId: String,
+        val context: Context,
+        val state: MutableStateFlow<State>,
+        val seq: AtomicInteger = AtomicInteger(0)
+    ) {
+        var job: Job? = null
+        @Volatile var confirm: CompletableDeferred<Boolean>? = null
+        @Volatile var agentClaimed: Boolean = false
+        @Volatile var conflictReason: String = ""
+    }
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private var job: Job? = null
-    private var seq = 0
-    @Volatile private var activeSessionId = ""
+    private val runs = ConcurrentHashMap<String, Run>()
+
+    private val agentSlot = Any()
+    @Volatile private var agentOwnerKey: String? = null
     @Volatile private var appContextRef: Context? = null
-    @Volatile private var confirmDeferred: CompletableDeferred<Boolean>? = null
 
-    private val _state = MutableStateFlow(State())
-    val state: StateFlow<State> = _state.asStateFlow()
+    private val _states = MutableStateFlow<Map<String, State>>(emptyMap())
+    val states: StateFlow<Map<String, State>> = _states.asStateFlow()
 
-    /** 是否正在执行 */
-    val isRunning: Boolean get() = job?.isActive == true
+    /** 只给通知栏使用: 当前 Agent owner 的最终/运行态; chat 不占用 */
+    private val _agentState = MutableStateFlow<State?>(null)
+    val agentState: StateFlow<State?> = _agentState.asStateFlow()
 
-    /**
-     * 功能: 给长时间运行的工具上报一条进度
-     * 参数: type 事件类型; text 内容; tool 工具名
-     * 使用场景: 长时间运行的工具需要让界面/通知栏实时看到当前进度
-     */
+    val isRunning: Boolean get() = runs.isNotEmpty()
+
+    fun isSessionRunning(sessionId: String): Boolean =
+        runs.containsKey(keyOf(sessionId))
+
+    fun agentBusySessionId(): String? {
+        val key = agentOwnerKey ?: return null
+        return runs[key]?.sessionId
+    }
+
+    private fun keyOf(sessionId: String): String = sessionId.ifBlank { "__default__" }
+
     fun publishStep(type: String, text: String, tool: String) {
-        appendStep(type, text, tool, System.currentTimeMillis())
+        val key = agentOwnerKey ?: return
+        runs[key]?.let { appendStep(it, type, text, tool, System.currentTimeMillis()) }
     }
 
-    /** 追加一条 Agent 事件 (LLM 心跳与主循环可能并发, 统一在这里串行分配 seq) */
     fun publishEvent(type: String, text: String, tool: String, time: Long) {
-        appendStep(type, text, tool, time)
+        val key = agentOwnerKey ?: return
+        runs[key]?.let { appendStep(it, type, text, tool, time) }
     }
 
-    @Synchronized
-    private fun appendStep(type: String, text: String, tool: String, time: Long) {
-        seq++
+    private fun appendStep(run: Run, type: String, text: String, tool: String, time: Long) {
+        val seq = run.seq.incrementAndGet()
         val step = Step(seq, type, text, tool, time)
         android.util.Log.i(
             "AgentStep",
-            "#${step.seq} ${step.type}" +
-                (if (step.tool.isNotBlank()) " ${step.tool}" else "") +
-                ": ${step.text.take(300)}"
+            "[${run.sessionId}] #$seq $type" +
+                (if (tool.isNotBlank()) " $tool" else "") +
+                ": ${text.take(300)}"
         )
-        _state.update {
+        val now = SystemClock.elapsedRealtime()
+        run.state.update {
+            val nextPhase = when (type) {
+                "tool" -> "operating"
+                "think" -> "waiting_llm"
+                "done" -> "done"
+                "error" -> "error"
+                else -> it.phase
+            }
             it.copy(
                 steps = it.steps + step,
-                currentTool = if (tool.isNotBlank()) tool else it.currentTool
+                currentTool = if (tool.isNotBlank()) tool else it.currentTool,
+                phase = nextPhase,
+                phaseStartedAtElapsed = if (nextPhase != it.phase) now else it.phaseStartedAtElapsed,
+                lastEventAtElapsed = now,
+                lastEventText = text.take(160)
             )
         }
+        publishState(run)
+    }
+
+    /** ReActAgent 上报真实阶段; 不写入 steps, 只更新状态栏/悬浮窗 */
+    private fun updatePhase(run: Run, phase: String, step: Int, detail: String) {
+        val now = SystemClock.elapsedRealtime()
+        run.state.update {
+            it.copy(
+                phase = phase,
+                stepNumber = if (step > 0) step else it.stepNumber,
+                phaseStartedAtElapsed = if (phase != it.phase) now else it.phaseStartedAtElapsed,
+                lastEventAtElapsed = now,
+                lastEventText = detail.ifBlank { it.lastEventText }.take(160)
+            )
+        }
+        publishState(run)
+    }
+
+    private fun publishState(run: Run) {
+        _states.update { it + (run.key to run.state.value) }
+        if (run.agentClaimed) _agentState.value = run.state.value
     }
 
     /**
-     * 功能: 启动一次 Agent 任务
-     * 参数: context; provider LLM 配置; goal 自然语言任务目标
-     * 返回: 无
-     * 使用场景: 主界面「开始执行」
+     * 启动一次会话运行。不同会话可以同时跑 chat; 同一会话只允许一个 run。
+     * Agent 槽位在 ReActAgent 真正调用 enter_agent_mode 时才 claim。
      */
     fun start(
         context: Context,
@@ -123,36 +182,70 @@ object AgentController {
         priorContext: String = "",
         phoneAllowed: Boolean = false,
         attachments: List<Attachment> = emptyList()
-    ) {
-        if (isRunning) return
-        seq = 0
-        activeSessionId = sessionId
-        val startedAt = System.currentTimeMillis()
-        _state.value = State(
-            running = true,
-            goal = goal,
-            currentTool = "",
-            sessionId = sessionId,
-            streaming = true
+    ): Boolean {
+        val key = keyOf(sessionId)
+        val nowWall = System.currentTimeMillis()
+        val nowElapsed = SystemClock.elapsedRealtime()
+        val state = MutableStateFlow(
+            State(
+                running = true,
+                goal = goal,
+                currentTool = "",
+                sessionId = sessionId,
+                streaming = true,
+                phase = "waiting_llm",
+                stepNumber = 0,
+                startedAtWall = nowWall,
+                startedAtElapsed = nowElapsed,
+                lastEventAtElapsed = nowElapsed,
+                phaseStartedAtElapsed = nowElapsed,
+                lastEventText = "准备开始",
+                sessionTitle = goal.replace('\n', ' ').take(36)
+            )
         )
-        if (sessionId.isNotBlank()) {
-            SessionManager.setRunning(context.applicationContext, sessionId, true)
-        }
-        // 先拉起前台服务, 保证切到其他 App 后任务继续跑、通知栏能看到进度
-        AgentStatusService.start(context)
+        val run = Run(key, sessionId, context.applicationContext, state)
+        if (runs.putIfAbsent(key, run) != null) return false
+
         val appContext = context.applicationContext
         appContextRef = appContext
-        job = scope.launch {
-            var phoneGranted = phoneAllowed
-            var runTokens = 0
-            fun trace(type: String, text: String, tool: String) {
-                publishStep(type, text, tool)
-                if (sessionId.isNotBlank()) {
-                    SessionManager.appendStep(
-                        appContext, sessionId, type, text, tool, System.currentTimeMillis()
-                    )
-                }
+        ScreenGeometry.init(appContext)
+        // 新运行开始时清掉上一轮 Agent 的终态, 避免状态服务误显示旧结果
+        if (agentOwnerKey == null) _agentState.value = null
+        publishState(run)
+        if (sessionId.isNotBlank()) {
+            SessionManager.setRunning(appContext, sessionId, true)
+        }
+        run.job = scope.launch {
+            executeRun(run, provider, goal, priorContext, phoneAllowed, attachments)
+        }
+        return true
+    }
+
+    private suspend fun executeRun(
+        run: Run,
+        provider: LlmSettings.Provider,
+        goal: String,
+        priorContext: String,
+        phoneAllowed: Boolean,
+        attachments: List<Attachment>
+    ) {
+        val appContext = run.context
+        val sessionId = run.sessionId
+        val startedAt = System.currentTimeMillis()
+        var phoneGranted = phoneAllowed
+        var runTokens = 0
+        var result = ""
+
+        fun trace(type: String, text: String, tool: String) {
+            appendStep(run, type, text, tool, System.currentTimeMillis())
+            if (sessionId.isNotBlank()) {
+                SessionManager.appendStep(
+                    appContext, sessionId, type, text, tool, System.currentTimeMillis()
+                )
             }
+        }
+
+        try {
             var effectiveGoal = goal
             if (attachments.isNotEmpty()) {
                 trace("tool", "开始解析 ${attachments.size} 个附件", "analyze_resources")
@@ -170,9 +263,7 @@ object AgentController {
                 )
                 if (attachmentContext.isNotBlank()) {
                     if (sessionId.isNotBlank()) {
-                        SessionManager.setLastUserContext(
-                            appContext, sessionId, attachmentContext
-                        )
+                        SessionManager.setLastUserContext(appContext, sessionId, attachmentContext)
                     }
                     effectiveGoal = buildString {
                         append(goal)
@@ -181,31 +272,29 @@ object AgentController {
                     }.take(30_000)
                 }
             }
-            val result = try {
+
+            result = try {
                 ReActAgent.run(
                     context = appContext,
                     provider = provider,
                     goal = effectiveGoal,
                     priorContext = priorContext,
                     onEvent = { ev ->
-                        publishEvent(ev.type, ev.content, ev.tool, ev.timestamp)
-                        // 纯 UI 心跳不写入会话历史, 否则历史里全是"等待模型响应"
+                        if (ev.type == "conflict") run.conflictReason = ev.content
+                        appendStep(run, ev.type, ev.content, ev.tool, ev.timestamp)
                         val heartbeat = ev.type == "system" &&
                             ev.content.startsWith("Step ") &&
                             ev.content.contains("等待模型响应")
                         if (sessionId.isNotBlank() && !heartbeat) {
                             SessionManager.appendStep(
-                                appContext, sessionId,
-                                ev.type, ev.content, ev.tool, ev.timestamp
+                                appContext, sessionId, ev.type, ev.content, ev.tool, ev.timestamp
                             )
                         }
                     },
                     onUsage = { prompt, completion, total ->
                         runTokens += total
                         if (sessionId.isNotBlank()) {
-                            SessionManager.addUsage(
-                                appContext, sessionId, prompt, completion, total
-                            )
+                            SessionManager.addUsage(appContext, sessionId, prompt, completion, total)
                         }
                     },
                     onContext = { _, chars ->
@@ -214,37 +303,55 @@ object AgentController {
                         }
                     },
                     onStreamContent = { piece ->
-                        _state.update { it.copy(streamText = it.streamText + piece) }
+                        run.state.update { it.copy(streamText = it.streamText + piece) }
+                        publishState(run)
                     },
                     onStreamReasoning = { piece ->
-                        _state.update {
-                            it.copy(streamReasoning = it.streamReasoning + piece)
-                        }
+                        run.state.update { it.copy(streamReasoning = it.streamReasoning + piece) }
+                        publishState(run)
                     },
                     ensurePhonePermission = { tool, args ->
                         if (phoneGranted) {
                             true
                         } else {
                             val deferred = CompletableDeferred<Boolean>()
-                            confirmDeferred = deferred
-                            _state.update {
+                            run.confirm = deferred
+                            val waitStart = SystemClock.elapsedRealtime()
+                            run.state.update {
                                 it.copy(
-                                    pendingConfirm = PendingConfirm(sessionId, tool, args)
+                                    pendingConfirm = PendingConfirm(sessionId, tool, args),
+                                    phase = "waiting_confirm",
+                                    phaseStartedAtElapsed = waitStart,
+                                    lastEventAtElapsed = waitStart,
+                                    lastEventText = "等待用户允许控制手机"
                                 )
                             }
+                            publishState(run)
                             val allowed = deferred.await()
-                            confirmDeferred = null
-                            _state.update { it.copy(pendingConfirm = null) }
+                            run.confirm = null
+                            val resumed = SystemClock.elapsedRealtime()
+                            run.state.update {
+                                it.copy(
+                                    pendingConfirm = null,
+                                    phase = if (allowed) "waiting_llm" else "error",
+                                    phaseStartedAtElapsed = resumed,
+                                    lastEventAtElapsed = resumed,
+                                    lastEventText = if (allowed) "用户已允许控制手机" else "用户拒绝控制手机"
+                                )
+                            }
+                            publishState(run)
                             if (allowed) {
                                 phoneGranted = true
                                 if (sessionId.isNotBlank()) {
-                                    SessionManager.setPhoneAllowed(
-                                        appContext, sessionId, true
-                                    )
+                                    SessionManager.setPhoneAllowed(appContext, sessionId, true)
                                 }
                             }
                             allowed
                         }
+                    },
+                    claimAgentMode = { claimAgentMode(run) },
+                    onPhase = { phase, step, detail ->
+                        updatePhase(run, phase, step, detail)
                     }
                 )
             } catch (e: kotlinx.coroutines.CancellationException) {
@@ -252,73 +359,236 @@ object AgentController {
             } catch (e: Exception) {
                 "任务异常: ${e.message}"
             }
-            val reasoningText = _state.value.streamReasoning
+
+            val conflict = run.conflictReason.isNotBlank()
+            val finalResult = if (conflict && !result.startsWith("暂未进入手机操作模式")) {
+                "暂未进入手机操作模式：另一个会话的 Agent 正在操作手机。\n\n$result"
+            } else {
+                result
+            }
+            val reasoningText = run.state.value.streamReasoning
             val elapsed = System.currentTimeMillis() - startedAt
-            _state.update {
+            val terminal = when {
+                conflict -> "blocked"
+                finalResult == "已停止" -> "stopped"
+                finalResult.startsWith("任务异常") ||
+                    finalResult.startsWith("LLM 请求失败") ||
+                    finalResult.startsWith("超时") ||
+                    finalResult.startsWith("模型未返回") ||
+                    finalResult.startsWith("配置不完整") -> "error"
+                else -> "done"
+            }
+            val endElapsed = SystemClock.elapsedRealtime()
+            run.state.update {
                 it.copy(
                     running = false,
-                    result = result,
+                    result = finalResult,
                     currentTool = "",
                     streaming = false,
                     streamText = "",
                     streamReasoning = "",
-                    pendingConfirm = null
+                    pendingConfirm = null,
+                    blockedByAgent = conflict,
+                    blockedReason = run.conflictReason,
+                    phase = terminal,
+                    terminalKind = terminal,
+                    lastEventAtElapsed = endElapsed
                 )
             }
+            publishState(run)
+
             if (sessionId.isNotBlank()) {
-                SessionManager.setResult(appContext, sessionId, result)
+                SessionManager.setResult(appContext, sessionId, finalResult)
                 SessionManager.addDuration(appContext, sessionId, elapsed)
-                if (result.isNotBlank()) {
+                if (finalResult.isNotBlank()) {
+                    val anchorId = if (conflict) {
+                        SessionManager.snapshot(appContext, sessionId)
+                            ?.messages?.lastOrNull { it.role == "user" }?.id.orEmpty()
+                    } else {
+                        ""
+                    }
                     SessionManager.appendMessage(
                         appContext,
                         sessionId,
                         ChatMessage(
                             "assistant",
-                            result,
+                            finalResult,
                             tokens = runTokens,
                             elapsedMs = elapsed,
-                            reasoning = reasoningText.take(12_000)
+                            reasoning = reasoningText.take(12_000),
+                            retryAnchorId = anchorId
                         )
                     )
                 }
+                if (finalResult.isNotBlank() &&
+                    finalResult != "已停止" &&
+                    !finalResult.startsWith("任务异常") &&
+                    !finalResult.startsWith("用户未允许") &&
+                    !finalResult.startsWith("配置不完整")
+                ) {
+                    scope.launch {
+                        generateTitleAndSummary(appContext, provider, sessionId, goal, finalResult)
+                    }
+                }
             }
-            activeSessionId = ""
-            // 通知栏由 AgentStatusService 监听 running=false 后自行收尾
+        } finally {
+            run.confirm?.complete(false)
+            run.confirm = null
+            runs.remove(run.key)
+            _states.update { it - run.key }
+            if (sessionId.isNotBlank()) {
+                SessionManager.setRunning(appContext, sessionId, false)
+            }
+            if (run.agentClaimed) {
+                _agentState.value = run.state.value
+                synchronized(agentSlot) {
+                    if (agentOwnerKey == run.key) agentOwnerKey = null
+                }
+            }
         }
-    }
-
-    /** 用户在聊天框内允许/拒绝设备操作 */
-    fun answerConfirm(allow: Boolean) {
-        val deferred = confirmDeferred
-        confirmDeferred = null
-        _state.update { it.copy(pendingConfirm = null) }
-        deferred?.complete(allow)
     }
 
     /**
-     * 功能: 停止当前任务
-     * 使用场景: 主界面「停止」
+     * 尝试占用全局 Agent 槽位。返回 null 表示成功, 否则为冲突原因。
+     * 必须在申请手机权限之前调用。
      */
-    fun stop() {
-        val sid = activeSessionId
-        val ctx = appContextRef
-        confirmDeferred?.complete(false)
-        confirmDeferred = null
-        job?.cancel()
-        job = null
-        if (sid.isNotBlank() && ctx != null) {
-            SessionManager.setRunning(ctx, sid, false)
-            SessionManager.setResult(ctx, sid, "已停止")
+    private fun claimAgentMode(run: Run): String? {
+        synchronized(agentSlot) {
+            val owner = agentOwnerKey
+            if (owner != null && owner != run.key) {
+                return "另一个会话的 Agent 正在操作手机, 当前会话暂时不能进入手机操作模式。"
+            }
+            agentOwnerKey = run.key
+            run.agentClaimed = true
         }
-        _state.update {
+        _agentState.value = run.state.value
+        appContextRef?.let { ctx ->
+            try {
+                AgentStatusService.start(ctx)
+            } catch (e: Exception) {
+                android.util.Log.w("AgentController", "启动通知服务失败: ${e.message}")
+            }
+        }
+        return null
+    }
+
+    private fun releaseAgentMode(key: String) {
+        synchronized(agentSlot) {
+            if (agentOwnerKey == key) agentOwnerKey = null
+        }
+    }
+
+    /** 任务结束后异步生成会话标题/摘要; 不阻塞任务完成 */
+    private suspend fun generateTitleAndSummary(
+        context: Context,
+        provider: LlmSettings.Provider,
+        sessionId: String,
+        goal: String,
+        result: String
+    ) {
+        if (!provider.usable) return
+        val session = SessionManager.snapshot(context, sessionId) ?: return
+        val firstUser = session.messages.firstOrNull { it.role == "user" }
+            ?.content?.take(600) ?: goal.take(600)
+        try {
+            if (session.titleAuto) {
+                val prompt = "根据下面这轮对话生成一个 4~12 个汉字的中文标题。\n" +
+                    "只输出标题本身, 不要引号、句号、解释或换行。\n" +
+                    "用户: $firstUser\n助手: ${result.take(600)}"
+                val r = withTimeoutOrNull(15_000) {
+                    LlmClient.chat(
+                        provider,
+                        JSONArray()
+                            .put(JSONObject().put("role", "system")
+                                .put("content", "你是简洁的会话标题生成器。"))
+                            .put(JSONObject().put("role", "user").put("content", prompt))
+                    )
+                }
+                val title = r?.content?.lineSequence()?.firstOrNull()
+                    ?.trim()?.trim('"', '“', '”', '。', '.', '\n', '\r')?.take(24).orEmpty()
+                if (title.isNotBlank()) {
+                    SessionManager.applyAutoTitle(context, sessionId, title)
+                }
+            }
+            if (session.summary.isBlank() && session.messages.size >= 6) {
+                val transcript = session.messages.takeLast(12).joinToString("\n") { m ->
+                    (if (m.role == "user") "用户: " else "助手: ") +
+                        m.content.replace('\n', ' ').take(500)
+                }
+                val prompt = "用不超过 300 字总结这段对话, 保留任务目标、已完成事项、关键结论或结果; " +
+                    "不要编造。\n$transcript"
+                val r = withTimeoutOrNull(20_000) {
+                    LlmClient.chat(
+                        provider,
+                        JSONArray()
+                            .put(JSONObject().put("role", "system")
+                                .put("content", "你是会话摘要器, 只输出摘要正文。"))
+                            .put(JSONObject().put("role", "user").put("content", prompt))
+                    )
+                }
+                val summary = r?.content?.trim()?.take(400).orEmpty()
+                if (summary.isNotBlank()) {
+                    SessionManager.setSummary(context, sessionId, summary)
+                }
+            }
+        } catch (e: Exception) {
+            android.util.Log.w("AgentController", "生成标题/摘要失败: ${e.message}")
+        }
+    }
+
+    /** 用户在聊天框内允许/拒绝某个会话的设备操作 */
+    fun answerConfirm(sessionId: String, allow: Boolean) {
+        val run = runs[keyOf(sessionId)] ?: return
+        val deferred = run.confirm
+        run.confirm = null
+        run.state.update { it.copy(pendingConfirm = null) }
+        publishState(run)
+        deferred?.complete(allow)
+    }
+
+    /** 停止指定会话; 不传 sessionId 时停止全部 */
+    fun stop(sessionId: String = "") {
+        val targets = if (sessionId.isBlank()) {
+            runs.values.toList()
+        } else {
+            listOfNotNull(runs[keyOf(sessionId)])
+        }
+        targets.forEach { stopRun(it) }
+    }
+
+    /** 通知栏/悬浮窗停止按钮: 只停 Agent owner, 不影响其他 chat */
+    fun stopAgent() {
+        val key = agentOwnerKey ?: return
+        runs[key]?.let { stopRun(it) }
+    }
+
+    private fun stopRun(run: Run) {
+        run.confirm?.complete(false)
+        run.confirm = null
+        run.job?.cancel()
+        val now = SystemClock.elapsedRealtime()
+        run.state.update {
             it.copy(
                 running = false,
                 currentTool = "",
                 streaming = false,
                 streamText = "",
                 streamReasoning = "",
-                pendingConfirm = null
+                pendingConfirm = null,
+                phase = "stopped",
+                terminalKind = "stopped",
+                lastEventAtElapsed = now,
+                lastEventText = "用户已停止"
             )
+        }
+        publishState(run)
+        if (run.sessionId.isNotBlank()) {
+            SessionManager.setRunning(run.context, run.sessionId, false)
+            SessionManager.setResult(run.context, run.sessionId, "已停止")
+        }
+        if (run.agentClaimed) {
+            _agentState.value = run.state.value
+            releaseAgentMode(run.key)
         }
     }
 }

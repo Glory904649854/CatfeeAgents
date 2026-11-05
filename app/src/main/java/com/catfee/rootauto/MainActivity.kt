@@ -4,6 +4,8 @@ import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.BitmapFactory
+import android.net.Uri
+import android.provider.Settings
 import android.graphics.Color as AndroidColor
 import android.os.Build
 import android.os.Bundle
@@ -51,6 +53,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -68,7 +71,7 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Add
-import androidx.compose.material.icons.rounded.AddPhotoAlternate
+import androidx.compose.material.icons.rounded.Archive
 import androidx.compose.material.icons.rounded.ArrowUpward
 import androidx.compose.material.icons.rounded.Bolt
 import androidx.compose.material.icons.rounded.ChatBubbleOutline
@@ -76,21 +79,32 @@ import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.Checklist
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.CallSplit
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.DeleteOutline
+import androidx.compose.material.icons.rounded.FormatQuote
+import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Description
+import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.ErrorOutline
 import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.Info
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.Menu
+import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material.icons.rounded.Psychology
+import androidx.compose.material.icons.rounded.PushPin
+import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Settings
+import androidx.compose.material.icons.rounded.Share
+import androidx.compose.material.icons.rounded.Star
 import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material.icons.rounded.Terminal
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -114,13 +128,16 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -146,7 +163,6 @@ import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
@@ -155,15 +171,24 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import androidx.core.view.WindowCompat
+import androidx.lifecycle.lifecycleScope
+import com.catfee.rootauto.a11y.UiObserverService
 import com.catfee.rootauto.agent.AgentController
+import com.catfee.rootauto.agent.AppMemory
 import com.catfee.rootauto.llm.LlmClient
 import com.catfee.rootauto.llm.LlmSettings
+import com.catfee.rootauto.llm.UsageSettings
 import com.catfee.rootauto.log.AgentTrace
 import com.catfee.rootauto.log.LogSettings
+import com.catfee.rootauto.root.RootShell
+import com.catfee.rootauto.root.ScreenGeometry
+import com.catfee.rootauto.service.AgentStatusService
+import com.catfee.rootauto.service.DisplaySettings
 import com.catfee.rootauto.session.Attachment
 import com.catfee.rootauto.session.AttachmentAnalyzer
 import com.catfee.rootauto.session.ChatMessage
 import com.catfee.rootauto.session.Session
+import com.catfee.rootauto.session.SessionExporter
 import com.catfee.rootauto.session.SessionManager
 import com.catfee.rootauto.session.SessionSummary
 import kotlinx.coroutines.Dispatchers
@@ -187,6 +212,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        ScreenGeometry.init(this)
         window.statusBarColor = AndroidColor.rgb(247, 248, 250)
         window.navigationBarColor = AndroidColor.rgb(247, 248, 250)
         WindowCompat.getInsetsController(window, window.decorView)
@@ -195,7 +221,18 @@ class MainActivity : ComponentActivity() {
             .isAppearanceLightNavigationBars = true
         setContent {
             AgentStudioTheme {
-                AgentConsole(this)
+                AppRoot(this)
+            }
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        val sessionId = intent.getStringExtra("session_id").orEmpty()
+        if (sessionId.isNotBlank()) {
+            lifecycleScope.launch {
+                SessionManager.open(this@MainActivity, sessionId)
             }
         }
     }
@@ -210,7 +247,8 @@ private val Bg = Color(0xFFF7F8FA)
 private val Ink = Color(0xFF111827)
 private val Muted = Color(0xFF6B7280)
 private val Line = Color(0xFFE5E7EB)
-private val Accent = Color(0xFF2563EB)
+/** 品牌红: 与黑白红 Logo 一致, 不再使用蓝色 */
+private val Accent = Color(0xFFE11D2E)
 private val Success = Color(0xFF16A34A)
 private val Warning = Color(0xFFD97706)
 private val Danger = Color(0xFFDC2626)
@@ -242,16 +280,66 @@ private fun AgentStudioTheme(content: @Composable () -> Unit) {
     )
 }
 
+/**
+ * 启动只保留窗口背景里的那一层 Logo:
+ * 先用同色底把 Logo 淡出成纯背景, 再让主界面淡入, 避免两个 Logo 同屏或位置跳动。
+ */
+@Composable
+private fun AppRoot(activity: ComponentActivity) {
+    var phase by rememberSaveable { mutableIntStateOf(0) }
+    val cover by animateFloatAsState(
+        targetValue = if (phase >= 1) 1f else 0f,
+        animationSpec = tween(260),
+        label = "splashCover"
+    )
+    val content by animateFloatAsState(
+        targetValue = if (phase >= 2) 1f else 0f,
+        animationSpec = tween(380),
+        label = "appEnter"
+    )
+
+    Box(Modifier.fillMaxSize()) {
+        // 同色遮罩: 盖掉窗口背景里的 Logo, 之后常驻在主界面下方
+        Box(
+            Modifier
+                .fillMaxSize()
+                .background(Bg)
+                .graphicsLayer { alpha = cover }
+        )
+        Box(
+            Modifier
+                .fillMaxSize()
+                .graphicsLayer {
+                    alpha = content
+                    translationY = (1f - content) * 18.dp.toPx()
+                }
+        ) {
+            AgentConsole(activity)
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        if (phase == 0) {
+            withFrameNanos { }
+            phase = 1
+            delay(260)
+            phase = 2
+        }
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun AgentConsole(activity: ComponentActivity) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val keyboard = LocalSoftwareKeyboardController.current
+    val clipboard = LocalClipboardManager.current
 
     val current by SessionManager.current.collectAsState()
     val sessions by SessionManager.summaries.collectAsState()
-    val agent by AgentController.state.collectAsState()
+    val agentStates by AgentController.states.collectAsState()
+    val agent = agentStates[current?.id.orEmpty()] ?: AgentController.State()
 
     var task by remember {
         mutableStateOf(activity.intent?.getStringExtra("task")?.takeIf { it.isNotBlank() } ?: "")
@@ -260,9 +348,55 @@ private fun AgentConsole(activity: ComponentActivity) {
     var previewImages by remember { mutableStateOf<List<Attachment>>(emptyList()) }
     var previewIndex by remember { mutableIntStateOf(0) }
     var pendingDelete by remember { mutableStateOf<SessionSummary?>(null) }
+    var pendingRename by remember { mutableStateOf<SessionSummary?>(null) }
+    var renameText by remember { mutableStateOf("") }
+    var actionMessage by remember { mutableStateOf<ChatMessage?>(null) }
+    var editingMessage by remember { mutableStateOf<ChatMessage?>(null) }
+    var editText by remember { mutableStateOf("") }
+    var quotedText by remember { mutableStateOf("") }
     var showMenu by remember { mutableStateOf(false) }
     var showSettings by remember { mutableStateOf(false) }
+    var showModelSheet by remember { mutableStateOf(false) }
+    var rootGranted by remember { mutableStateOf<Boolean?>(null) }
+    var overlayEnabled by remember { mutableStateOf(DisplaySettings.overlayEnabled(activity)) }
+    var overlayGranted by remember { mutableStateOf(Settings.canDrawOverlays(activity)) }
+
+    val overlayPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) {
+        val granted = Settings.canDrawOverlays(activity)
+        overlayGranted = granted
+        if (granted) {
+            overlayEnabled = true
+            DisplaySettings.setOverlayEnabled(activity, true)
+            AgentStatusService.refreshOverlay(activity)
+        }
+    }
+
+    fun requestOverlayPermission() {
+        try {
+            overlayPermissionLauncher.launch(
+                Intent(
+                    Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                    Uri.parse("package:${activity.packageName}")
+                )
+            )
+        } catch (e: Exception) {
+            try {
+                overlayPermissionLauncher.launch(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION))
+            } catch (_: Exception) {
+            }
+        }
+    }
     var hint by remember { mutableStateOf("") }
+
+    // 打开设置时只查询授权状态, 不主动申请 root
+    LaunchedEffect(showSettings) {
+        if (showSettings) {
+            rootGranted = withContext(Dispatchers.IO) { RootShell.appGrantedRoot() }
+            overlayGranted = Settings.canDrawOverlays(activity)
+        }
+    }
 
     // ---- LLM 配置 ----
     val saved = remember { LlmSettings.active(activity) }
@@ -270,6 +404,8 @@ private fun AgentConsole(activity: ComponentActivity) {
     var apiKey by remember { mutableStateOf(saved?.apiKey ?: DEFAULT_API_KEY) }
     var model by remember { mutableStateOf(saved?.model ?: DEFAULT_MODEL) }
     var testResult by remember { mutableStateOf("") }
+    var fetchedModels by remember { mutableStateOf<List<String>>(emptyList()) }
+    var fetchingModels by remember { mutableStateOf(false) }
 
     // ---- 远程日志配置 ----
     val logCfg = remember { LogSettings.config(activity) }
@@ -296,6 +432,13 @@ private fun AgentConsole(activity: ComponentActivity) {
         model = model.trim()
     )
 
+    /** 本会话模型优先; 空则跟随全局默认 */
+    fun providerFor(session: Session?): LlmSettings.Provider {
+        val base = currentProvider()
+        val override = session?.model?.trim().orEmpty()
+        return if (override.isBlank()) base else base.copy(model = override)
+    }
+
     fun persistLog() {
         LogSettings.save(
             activity,
@@ -310,13 +453,55 @@ private fun AgentConsole(activity: ComponentActivity) {
         )
     }
 
+    fun resetComposer() {
+        task = ""
+        pendingAttachments = emptyList()
+        previewImages = emptyList()
+        quotedText = ""
+        hint = ""
+    }
+
     fun newSession() {
         SessionManager.flush(activity)
         SessionManager.newSession("chat")
-        task = ""
-        pendingAttachments = emptyList()
-        hint = ""
+        resetComposer()
         showMenu = false
+    }
+
+    // 切换/删除会话时清空输入框草稿和待发送附件, 避免旧会话内容残留
+    var lastSessionId by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(current?.id) {
+        val id = current?.id ?: return@LaunchedEffect
+        val previous = lastSessionId
+        lastSessionId = id
+        if (previous != null && previous != id) resetComposer()
+    }
+
+    var exportTarget by remember { mutableStateOf<SessionSummary?>(null) }
+    val exportLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("text/markdown")
+    ) { uri ->
+        val target = exportTarget
+        exportTarget = null
+        if (uri != null && target != null) {
+            scope.launch {
+                val s = SessionManager.snapshot(activity, target.id)
+                if (s == null) {
+                    hint = "导出失败: 会话不存在"
+                } else {
+                    hint = if (SessionExporter.write(activity, s, uri)) {
+                        "已导出到所选位置"
+                    } else {
+                        "导出失败"
+                    }
+                }
+            }
+        }
+    }
+
+    fun exportSession(s: SessionSummary) {
+        exportTarget = s
+        exportLauncher.launch(SessionExporter.safeFileName(s.title))
     }
 
     val attachmentPicker = rememberLauncherForActivityResult(
@@ -339,51 +524,138 @@ private fun AgentConsole(activity: ComponentActivity) {
         }
     }
 
+    fun goalWithContext(msg: ChatMessage): String = buildString {
+        if (msg.quotedText.isNotBlank()) {
+            append("引用内容:\n").append(msg.quotedText.take(1_000)).append("\n\n用户: ")
+        }
+        append(msg.content)
+        if (msg.context.isNotBlank()) {
+            append("\n\n以下是该消息附件的本地解析内容, 请结合它回答:\n")
+            append(msg.context.take(30_000))
+        }
+    }
+
+    fun startTurn(
+        session: Session,
+        prior: String,
+        goal: String,
+        attachments: List<Attachment>
+    ) {
+        val provider = providerFor(session)
+        if (!provider.usable) {
+            hint = "LLM 配置不完整，点菜单进入 Settings 填写"
+            showSettings = true
+            return
+        }
+        val ok = AgentController.start(
+            context = activity,
+            provider = provider,
+            goal = goal,
+            sessionId = session.id,
+            priorContext = prior,
+            phoneAllowed = session.phoneAllowed,
+            attachments = attachments
+        )
+        if (!ok) hint = "当前还有任务在运行，请先停止"
+    }
+
     fun send() {
-        if (current?.running == true) return
+        if (agent.running) {
+            hint = "当前会话还有任务在运行，先停止或等待完成"
+            return
+        }
         val text = task.trim()
         val attachments = pendingAttachments
         if (text.isEmpty() && attachments.isEmpty()) {
             hint = "先输入消息，或添加图片/文件"
             return
         }
-        val provider = currentProvider()
+        val session = current ?: SessionManager.newSession("chat")
+        val provider = providerFor(session)
         if (!provider.usable) {
             hint = "LLM 配置不完整，点菜单进入 Settings 填写"
             showSettings = true
             return
         }
-        LlmSettings.upsert(activity, provider)
+        // 全局默认仍保存; 会话级模型只影响本次请求, 不污染默认配置
+        LlmSettings.upsert(activity, currentProvider())
         LlmSettings.setActiveId(activity, "main")
         persistLog()
         keyboard?.hide()
         hint = ""
 
-        val session = current ?: SessionManager.newSession("chat")
-        val prior = buildPriorContext(session)
         val content = text.ifBlank { "请分析这些附件" }
+        val quote = quotedText
+        val userMessage = ChatMessage(
+            "user", content, attachments = attachments, quotedText = quote
+        )
+        val prior = buildPriorContext(session)
         // 先把用户消息和附件发出去; 解析工作交给 AgentController,
         // 这样聊天区会立即出现"解析资源中"的工具步骤, 而不是发送前卡住。
-        SessionManager.appendMessage(
-            activity,
-            session.id,
-            ChatMessage("user", content, attachments = attachments)
-        )
-        AgentController.start(
-            context = activity,
-            provider = provider,
-            goal = content,
-            sessionId = session.id,
-            priorContext = prior,
-            phoneAllowed = session.phoneAllowed,
+        SessionManager.appendMessage(activity, session.id, userMessage)
+        startTurn(
+            session = session,
+            prior = prior,
+            goal = goalWithContext(userMessage),
             attachments = attachments
         )
         task = ""
         pendingAttachments = emptyList()
+        quotedText = ""
+    }
+
+    fun regenerateFrom(msg: ChatMessage, retryHint: Boolean = false) {
+        if (agent.running) {
+            hint = "当前还有任务在运行，先停止后再重新生成"
+            actionMessage = null
+            return
+        }
+        val session = current ?: return
+        val idx = session.messages.indexOfFirst { it.id == msg.id }
+        if (idx < 0) return
+        val anchor = if (msg.role == "assistant") {
+            session.messages.take(idx).lastOrNull { it.role == "user" }
+        } else {
+            msg
+        }
+        if (anchor == null) {
+            hint = "找不到对应的用户消息"
+            return
+        }
+        actionMessage = null
+        scope.launch {
+            val updated = SessionManager.truncateAfter(activity, session.id, anchor.id) ?: return@launch
+            val prior = buildPriorContext(updated.copy(messages = updated.messages.dropLast(1)))
+            val goal = buildString {
+                if (retryHint) {
+                    append("上次因另一个会话的 Agent 占用手机，未能进入手机操作模式。")
+                    append("请重新进入手机操作模式并继续该任务。\n\n")
+                }
+                append(goalWithContext(anchor))
+            }
+            startTurn(updated, prior, goal, emptyList())
+        }
+    }
+
+    fun retryAgent(assistant: ChatMessage) {
+        val anchorId = assistant.retryAnchorId
+        if (anchorId.isBlank()) return
+        val anchor = current?.messages?.firstOrNull { it.id == anchorId } ?: return
+        actionMessage = null
+        regenerateFrom(anchor, retryHint = true)
+    }
+
+    fun branchFrom(msg: ChatMessage) {
+        val session = current ?: return
+        actionMessage = null
+        scope.launch {
+            val branch = SessionManager.fork(activity, session.id, msg.id)
+            hint = if (branch != null) "已从该消息创建分支会话" else "分支失败"
+        }
     }
 
     fun stop() {
-        AgentController.stop()
+        AgentController.stop(current?.id.orEmpty())
         hint = "已停止"
     }
 
@@ -412,7 +684,7 @@ private fun AgentConsole(activity: ComponentActivity) {
     }
 
     val streaming = agent.streaming && agent.sessionId == current?.id
-    val running = current?.running == true
+    val running = agent.running
     val pendingConfirm = agent.pendingConfirm?.takeIf { it.sessionId == current?.id }
     val liveSteps = if (streaming) agent.steps else emptyList()
     val savedSteps = current?.steps.orEmpty().map {
@@ -449,7 +721,8 @@ private fun AgentConsole(activity: ComponentActivity) {
             Modifier
                 .fillMaxSize()
                 .padding(pad)
-                .imePadding()
+                .imePadding(),
+            horizontalAlignment = Alignment.CenterHorizontally
         ) {
             Header(
                 running = running,
@@ -459,11 +732,15 @@ private fun AgentConsole(activity: ComponentActivity) {
                     showMenu = true
                 }
             )
-            current?.let { SessionLine(it) }
+            current?.takeIf { !it.isEmpty }?.let { SessionLine(it) }
 
+            // 每个会话使用独立的列表实例: 切换/删除会话时旧消息和动画层立即销毁,
+            // 避免旧气泡残留在新会话的空状态下面。
+            key(current?.id) {
             LazyColumn(
                 state = listState,
                 modifier = Modifier
+                    .widthIn(max = 760.dp)
                     .fillMaxWidth()
                     .weight(1f),
                 contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 10.dp),
@@ -473,7 +750,7 @@ private fun AgentConsole(activity: ComponentActivity) {
                     item { EmptyState() }
                 }
                 current?.messages?.forEach { msg ->
-                    item(key = "m-${msg.time}-${msg.content.hashCode()}") {
+                    item(key = "m-${msg.id}") {
                         Box(Modifier.animateItem()) {
                             if (msg.role == "user") {
                                 UserBubble(
@@ -483,10 +760,17 @@ private fun AgentConsole(activity: ComponentActivity) {
                                         previewImages = allImages
                                         previewIndex = if (idx >= 0) idx else 0
                                     },
-                                    onFileClick = { a -> openAttachment(context, a) }
+                                    onFileClick = { a -> openAttachment(context, a) },
+                                    onLongPress = { actionMessage = msg }
                                 )
                             } else {
-                                AssistantBubble(msg)
+                                AssistantBubble(
+                                    msg,
+                                    onLongPress = { actionMessage = msg },
+                                    onRetry = if (msg.retryAnchorId.isNotBlank()) {
+                                        { retryAgent(msg) }
+                                    } else null
+                                )
                             }
                         }
                     }
@@ -504,8 +788,17 @@ private fun AgentConsole(activity: ComponentActivity) {
                     item(key = "confirm-${pendingConfirm.tool}") {
                         ApprovalCard(
                             pending = pendingConfirm,
-                            onAllow = { AgentController.answerConfirm(true) },
-                            onDeny = { AgentController.answerConfirm(false) }
+                            onAllow = {
+                                try {
+                                    AgentStatusService.start(activity)
+                                } catch (e: Exception) {
+                                    hint = "通知服务启动失败: ${e.message}"
+                                }
+                                AgentController.answerConfirm(current?.id.orEmpty(), true)
+                            },
+                            onDeny = {
+                                AgentController.answerConfirm(current?.id.orEmpty(), false)
+                            }
                         )
                     }
                 }
@@ -520,11 +813,15 @@ private fun AgentConsole(activity: ComponentActivity) {
                     }
                 }
             }
+            }
 
             Composer(
                 task = task,
                 onTaskChange = { task = it },
-                model = model,
+                model = current?.model?.ifBlank { model } ?: model,
+                onModelClick = { showModelSheet = true },
+                quotedText = quotedText,
+                onClearQuote = { quotedText = "" },
                 attachments = pendingAttachments,
                 onRemoveAttachment = { id ->
                     pendingAttachments = pendingAttachments.filterNot { it.id == id }
@@ -544,7 +841,7 @@ private fun AgentConsole(activity: ComponentActivity) {
         MenuSheet(
             sessions = sessions,
             currentId = current?.id.orEmpty(),
-            runningSessionId = if (agent.running) agent.sessionId else "",
+            runningSessionIds = agentStates.filter { it.value.running }.keys,
             onNew = { newSession() },
             onOpen = { id ->
                 scope.launch {
@@ -553,6 +850,27 @@ private fun AgentConsole(activity: ComponentActivity) {
                 }
             },
             onDelete = { pendingDelete = it },
+            onRename = {
+                pendingRename = it
+                renameText = it.title
+            },
+            onPin = { s ->
+                scope.launch { SessionManager.setFlags(activity, s.id, pinned = !s.pinned) }
+            },
+            onFavorite = { s ->
+                scope.launch { SessionManager.setFlags(activity, s.id, favorite = !s.favorite) }
+            },
+            onArchive = { s ->
+                scope.launch {
+                    val archive = !s.archived
+                    SessionManager.setFlags(activity, s.id, archived = archive)
+                    if (archive && current?.id == s.id) {
+                        SessionManager.newSession("chat")
+                        resetComposer()
+                    }
+                }
+            },
+            onExport = { exportSession(it) },
             onSettings = {
                 showMenu = false
                 showSettings = true
@@ -563,12 +881,34 @@ private fun AgentConsole(activity: ComponentActivity) {
 
     if (showSettings) {
         SettingsSheet(
+            sessions = sessions,
             baseUrl = baseUrl,
-            onBaseUrl = { baseUrl = it },
+            onBaseUrl = {
+                baseUrl = it
+                fetchedModels = emptyList()
+            },
             apiKey = apiKey,
-            onApiKey = { apiKey = it },
+            onApiKey = {
+                apiKey = it
+                fetchedModels = emptyList()
+            },
             model = model,
             onModel = { model = it },
+            models = fetchedModels,
+            modelsLoading = fetchingModels,
+            rootGranted = rootGranted,
+            overlayEnabled = overlayEnabled,
+            overlayGranted = overlayGranted,
+            onOverlayEnabled = { enabled ->
+                if (enabled && !Settings.canDrawOverlays(activity)) {
+                    requestOverlayPermission()
+                } else {
+                    overlayEnabled = enabled
+                    DisplaySettings.setOverlayEnabled(activity, enabled)
+                    AgentStatusService.refreshOverlay(activity)
+                }
+            },
+            onRequestOverlay = { requestOverlayPermission() },
             testResult = testResult,
             onSaveModel = {
                 val p = currentProvider()
@@ -578,15 +918,24 @@ private fun AgentConsole(activity: ComponentActivity) {
                 testResult = "已保存 · ${p.model}"
             },
             onTestModel = {
-                val p = currentProvider()
-                LlmSettings.upsert(activity, p)
-                LlmSettings.setActiveId(activity, "main")
-                testResult = "正在测试连接…"
-                scope.launch {
-                    val (models, err) = LlmClient.listModels(p)
-                    withContext(Dispatchers.Main) {
-                        testResult = if (err.isNotEmpty()) "连接失败: $err"
-                        else "连接成功 · ${models.size} 个模型"
+                if (!fetchingModels) {
+                    val p = currentProvider()
+                    LlmSettings.upsert(activity, p)
+                    LlmSettings.setActiveId(activity, "main")
+                    fetchingModels = true
+                    testResult = "正在拉取模型列表…"
+                    scope.launch {
+                        val (models, err) = LlmClient.listModels(p)
+                        withContext(Dispatchers.Main) {
+                            fetchingModels = false
+                            if (err.isNotEmpty()) {
+                                fetchedModels = emptyList()
+                                testResult = "连接失败: $err"
+                            } else {
+                                fetchedModels = models
+                                testResult = "连接成功 · ${models.size} 个模型，点击下方模型选择"
+                            }
+                        }
                     }
                 }
             },
@@ -637,6 +986,21 @@ private fun AgentConsole(activity: ComponentActivity) {
         )
     }
 
+    if (showModelSheet) {
+        current?.let { s ->
+            ModelSheet(
+                currentModel = s.model,
+                globalModel = model,
+                models = fetchedModels,
+                onSelect = { selected ->
+                    scope.launch { SessionManager.setModel(activity, s.id, selected) }
+                    showModelSheet = false
+                },
+                onDismiss = { showModelSheet = false }
+            )
+        } ?: run { showModelSheet = false }
+    }
+
     pendingDelete?.let { s ->
         AlertDialog(
             onDismissRequest = { pendingDelete = null },
@@ -648,15 +1012,128 @@ private fun AgentConsole(activity: ComponentActivity) {
                 TextButton(
                     onClick = {
                         pendingDelete = null
-                        if (agent.running && agent.sessionId == s.id) {
-                            AgentController.stop()
+                        val deletingCurrent = current?.id == s.id
+                        if (AgentController.isSessionRunning(s.id)) {
+                            AgentController.stop(s.id)
                         }
-                        scope.launch { SessionManager.delete(activity, s.id) }
+                        scope.launch {
+                            SessionManager.delete(activity, s.id)
+                            if (deletingCurrent) {
+                                resetComposer()
+                                showMenu = false
+                            }
+                        }
                     }
                 ) { Text("删除", color = Danger) }
             },
             dismissButton = {
                 TextButton(onClick = { pendingDelete = null }) { Text("取消") }
+            }
+        )
+    }
+
+    actionMessage?.let { msg ->
+        MessageActionSheet(
+            message = msg,
+            onCopy = {
+                clipboard.setText(AnnotatedString(msg.content))
+                actionMessage = null
+            },
+            onQuote = {
+                quotedText = msg.content.take(400)
+                actionMessage = null
+            },
+            onEdit = {
+                if (msg.role == "user") {
+                    editingMessage = msg
+                    editText = msg.content
+                }
+                actionMessage = null
+            },
+            onRegenerate = { regenerateFrom(msg) },
+            onBranch = { branchFrom(msg) },
+            onDismiss = { actionMessage = null }
+        )
+    }
+
+    editingMessage?.let { msg ->
+        AlertDialog(
+            onDismissRequest = { editingMessage = null },
+            title = { Text("编辑消息") },
+            text = {
+                OutlinedTextField(
+                    value = editText,
+                    onValueChange = { editText = it },
+                    minLines = 3,
+                    maxLines = 8,
+                    shape = RoundedCornerShape(14.dp),
+                    modifier = Modifier.fillMaxWidth()
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val newText = editText.trim()
+                        val session = current
+                        if (agent.running) {
+                            hint = "当前还有任务在运行，先停止后再编辑"
+                            editingMessage = null
+                        } else if (newText.isNotEmpty() && session != null) {
+                            scope.launch {
+                                SessionManager.replaceMessage(activity, session.id, msg.id) {
+                                    it.copy(content = newText)
+                                }
+                                val updated = SessionManager.truncateAfter(activity, session.id, msg.id)
+                                    ?: return@launch
+                                val edited = updated.messages.firstOrNull { it.id == msg.id }
+                                    ?: return@launch
+                                val prior = buildPriorContext(
+                                    updated.copy(messages = updated.messages.dropLast(1))
+                                )
+                                startTurn(updated, prior, goalWithContext(edited), emptyList())
+                                editingMessage = null
+                            }
+                        }
+                    },
+                    enabled = editText.isNotBlank()
+                ) { Text("保存并重新生成") }
+            },
+            dismissButton = {
+                TextButton(onClick = { editingMessage = null }) { Text("取消") }
+            }
+        )
+    }
+
+    pendingRename?.let { s ->
+        AlertDialog(
+            onDismissRequest = { pendingRename = null },
+            title = { Text("重命名会话") },
+            text = {
+                OutlinedTextField(
+                    value = renameText,
+                    onValueChange = { renameText = it.take(60) },
+                    singleLine = true,
+                    label = { Text("标题") },
+                    shape = RoundedCornerShape(14.dp),
+                    modifier = Modifier.fillMaxWidth()
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val title = renameText.trim()
+                        if (title.isNotEmpty()) {
+                            scope.launch {
+                                SessionManager.rename(activity, s.id, title)
+                            }
+                        }
+                        pendingRename = null
+                    },
+                    enabled = renameText.isNotBlank()
+                ) { Text("保存") }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingRename = null }) { Text("取消") }
             }
         )
     }
@@ -712,37 +1189,28 @@ private fun Header(running: Boolean, onMenu: () -> Unit) {
         }
         Spacer(Modifier.width(10.dp))
         Column(Modifier.weight(1f)) {
-            Row(verticalAlignment = Alignment.Top) {
-                Text(
-                    buildAnnotatedString {
-                        withStyle(
-                            SpanStyle(
-                                fontFamily = FontFamily.Serif,
-                                fontWeight = FontWeight.Bold,
-                                letterSpacing = (-0.6).sp,
-                                color = Ink
-                            )
-                        ) { append("Catfee") }
-                        withStyle(
-                            SpanStyle(
-                                fontWeight = FontWeight.Light,
-                                fontStyle = FontStyle.Italic,
-                                letterSpacing = 0.3.sp,
-                                color = Accent
-                            )
-                        ) { append("Agents") }
-                    },
-                    fontSize = 20.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-                Box(
-                    Modifier
-                        .padding(start = 2.dp, top = 4.dp)
-                        .size(4.dp)
-                        .background(Color(0xFFEF4444), CircleShape)
-                )
-            }
+            Text(
+                buildAnnotatedString {
+                    withStyle(
+                        SpanStyle(
+                            fontWeight = FontWeight.Bold,
+                            letterSpacing = (-0.5).sp,
+                            color = Ink
+                        )
+                    ) { append("Catfee") }
+                    withStyle(
+                        SpanStyle(
+                            fontWeight = FontWeight.Bold,
+                            letterSpacing = (-0.5).sp,
+                            color = Accent
+                        )
+                    ) { append("Agents") }
+                },
+                fontSize = 20.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Spacer(Modifier.height(1.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
                 if (running) {
                     val transition = rememberInfiniteTransition(label = "run")
@@ -753,7 +1221,7 @@ private fun Header(running: Boolean, onMenu: () -> Unit) {
                     )
                     Box(Modifier.size(6.dp).alpha(a).background(Accent, CircleShape))
                     Spacer(Modifier.width(5.dp))
-                    Text("Working on this device", fontSize = 10.sp, color = Accent)
+                    Text("Working on this device", fontSize = 10.sp, color = Muted)
                 } else {
                     Text("Chat & phone agent", fontSize = 10.sp, color = Muted)
                 }
@@ -764,8 +1232,7 @@ private fun Header(running: Boolean, onMenu: () -> Unit) {
             modifier = Modifier
                 .size(38.dp)
                 .clip(CircleShape)
-                .border(1.dp, Line, CircleShape)
-                .background(Color.White)
+                .background(Color(0xFFF1F3F5))
         ) {
             Icon(Icons.Rounded.Menu, contentDescription = "菜单", tint = Ink, modifier = Modifier.size(19.dp))
         }
@@ -807,11 +1274,19 @@ private fun SessionLine(session: Session) {
 private fun UserBubble(
     msg: ChatMessage,
     onImageClick: (Attachment) -> Unit,
-    onFileClick: (Attachment) -> Unit
+    onFileClick: (Attachment) -> Unit,
+    onLongPress: () -> Unit
 ) {
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .pointerInput(msg.id) { detectTapGestures(onLongPress = { onLongPress() }) },
+        horizontalArrangement = Arrangement.End
+    ) {
         Column(
-            modifier = Modifier.widthIn(max = 300.dp),
+            modifier = Modifier
+                .fillMaxWidth(0.86f)
+                .widthIn(max = 520.dp),
             horizontalAlignment = Alignment.End
         ) {
             if (msg.attachments.isNotEmpty()) {
@@ -822,23 +1297,44 @@ private fun UserBubble(
                 shape = RoundedCornerShape(18.dp, 18.dp, 6.dp, 18.dp),
                 color = Ink
             ) {
-                Text(
-                    msg.content,
-                    modifier = Modifier.padding(horizontal = 13.dp, vertical = 10.dp),
-                    fontSize = 13.5.sp,
-                    lineHeight = 20.sp,
-                    color = Color.White
-                )
+                Column(Modifier.padding(horizontal = 13.dp, vertical = 10.dp)) {
+                    if (msg.quotedText.isNotBlank()) {
+                        Text(
+                            "引用: ${msg.quotedText.replace('\n', ' ').take(160)}",
+                            fontSize = 10.sp,
+                            lineHeight = 14.sp,
+                            color = Color.White.copy(alpha = 0.62f),
+                            modifier = Modifier.padding(bottom = 4.dp)
+                        )
+                    }
+                    Text(
+                        msg.content,
+                        fontSize = 13.5.sp,
+                        lineHeight = 20.sp,
+                        color = Color.White
+                    )
+                }
             }
         }
     }
 }
 
 @Composable
-private fun AssistantBubble(msg: ChatMessage) {
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Start) {
+private fun AssistantBubble(
+    msg: ChatMessage,
+    onLongPress: () -> Unit,
+    onRetry: (() -> Unit)? = null
+) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .pointerInput(msg.id) { detectTapGestures(onLongPress = { onLongPress() }) },
+        horizontalArrangement = Arrangement.Start
+    ) {
         Surface(
-            modifier = Modifier.widthIn(max = 320.dp),
+            modifier = Modifier
+                .fillMaxWidth(0.9f)
+                .widthIn(max = 560.dp),
             shape = RoundedCornerShape(18.dp, 18.dp, 18.dp, 6.dp),
             color = Color.White,
             border = BorderStroke(1.dp, Line)
@@ -849,6 +1345,14 @@ private fun AssistantBubble(msg: ChatMessage) {
                     Spacer(Modifier.height(8.dp))
                 }
                 MarkdownContent(msg.content)
+                if (msg.retryAnchorId.isNotBlank() && onRetry != null) {
+                    TextButton(
+                        onClick = onRetry,
+                        contentPadding = PaddingValues(0.dp)
+                    ) {
+                        Text("重试进入手机模式", fontSize = 10.5.sp, color = Accent)
+                    }
+                }
                 Spacer(Modifier.height(6.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
@@ -886,10 +1390,12 @@ private fun StreamingBubble(reasoning: String, content: String, tool: String) {
     )
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Start) {
         Surface(
-            modifier = Modifier.widthIn(max = 330.dp),
+            modifier = Modifier
+                .fillMaxWidth(0.92f)
+                .widthIn(max = 580.dp),
             shape = RoundedCornerShape(18.dp, 18.dp, 18.dp, 6.dp),
             color = Color.White,
-            border = BorderStroke(1.dp, Accent.copy(alpha = 0.2f))
+            border = BorderStroke(1.dp, Line)
         ) {
             Column {
                 Column(Modifier.padding(horizontal = 13.dp, vertical = 11.dp)) {
@@ -932,7 +1438,7 @@ private fun TypingRow(label: String) {
     )
     Row(verticalAlignment = Alignment.CenterVertically) {
         listOf(a1, a2, a3).forEach { a ->
-            Box(Modifier.size(6.dp).alpha(a).background(Accent, CircleShape))
+            Box(Modifier.size(6.dp).alpha(a).background(Muted, CircleShape))
             Spacer(Modifier.width(4.dp))
         }
         Text(label, fontSize = 10.sp, color = Muted)
@@ -1201,6 +1707,7 @@ private fun ApprovalCard(
 }
 
 private fun permissionAction(tool: String): String = when {
+    tool == "enter_agent_mode" -> "进入手机操作模式"
     tool == "observe" || tool == "read_page" || tool == "ocr" ||
         tool == "long_ocr" || tool == "screenshot" || tool == "see_screen" ||
         tool == "get_activity" || tool == "find_text" || tool == "list_options" ->
@@ -1241,10 +1748,10 @@ private fun ActivitySection(
                     Modifier
                         .size(28.dp)
                         .clip(RoundedCornerShape(9.dp))
-                        .background(Accent.copy(alpha = 0.08f)),
+                        .background(Color(0xFFF1F3F5)),
                     contentAlignment = Alignment.Center
                 ) {
-                    Icon(Icons.Rounded.Terminal, null, tint = Accent, modifier = Modifier.size(14.dp))
+                    Icon(Icons.Rounded.Terminal, null, tint = Muted, modifier = Modifier.size(14.dp))
                 }
                 Spacer(Modifier.width(8.dp))
                 Column(Modifier.weight(1f)) {
@@ -1258,7 +1765,7 @@ private fun ActivitySection(
                         Text(
                             if (currentTool.isBlank()) "Working…" else "Working · $currentTool",
                             fontSize = 9.sp,
-                            color = Accent
+                            color = Muted
                         )
                     }
                 }
@@ -1375,6 +1882,9 @@ private fun Composer(
     task: String,
     onTaskChange: (String) -> Unit,
     model: String,
+    onModelClick: () -> Unit,
+    quotedText: String,
+    onClearQuote: () -> Unit,
     attachments: List<Attachment>,
     onRemoveAttachment: (String) -> Unit,
     onPickAttachments: () -> Unit,
@@ -1388,14 +1898,45 @@ private fun Composer(
     val focused by focusSource.collectIsFocusedAsState()
     val borderAmount by animateFloatAsState(if (focused) 1f else 0f, tween(180), label = "focus")
     Surface(modifier = Modifier.fillMaxWidth(), color = Bg) {
-        Column(Modifier.padding(horizontal = 16.dp, vertical = 6.dp)) {
+        Column(Modifier.padding(horizontal = 14.dp, vertical = 5.dp)) {
             Surface(
                 modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(22.dp),
+                shape = RoundedCornerShape(26.dp),
                 color = Color.White,
-                border = BorderStroke(1.dp, lerp(Line, Accent.copy(alpha = 0.5f), borderAmount))
+                border = BorderStroke(1.dp, lerp(Color(0xFFECEEF2), Accent.copy(alpha = 0.42f), borderAmount))
             ) {
-                Column(Modifier.padding(10.dp)) {
+                Column(Modifier.padding(horizontal = 8.dp, vertical = 8.dp)) {
+                    if (quotedText.isNotBlank()) {
+                        Surface(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(bottom = 6.dp),
+                            shape = RoundedCornerShape(12.dp),
+                            color = Color(0xFFF3F4F6)
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(start = 10.dp, end = 2.dp, top = 6.dp, bottom = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    "引用: ${quotedText.replace('\n', ' ')}",
+                                    fontSize = 10.sp,
+                                    color = Muted,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                IconButton(onClick = onClearQuote, modifier = Modifier.size(26.dp)) {
+                                    Icon(
+                                        Icons.Rounded.Close,
+                                        "取消引用",
+                                        tint = Muted,
+                                        modifier = Modifier.size(14.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
                     AnimatedVisibility(
                         visible = attachments.isNotEmpty(),
                         enter = fadeIn(tween(160)) + expandVertically(tween(180)),
@@ -1405,62 +1946,87 @@ private fun Composer(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .horizontalScroll(rememberScrollState())
-                                .padding(bottom = 7.dp),
-                            horizontalArrangement = Arrangement.spacedBy(7.dp)
+                                .padding(start = 2.dp, end = 2.dp, bottom = 6.dp),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
                             attachments.forEach { a ->
                                 PendingAttachment(a) { onRemoveAttachment(a.id) }
                             }
                         }
                     }
-                    Row(verticalAlignment = Alignment.CenterVertically) {
+                    // 多行输入时 + / 发送按钮贴顶, 不随文本高度一起居中
+                    Row(verticalAlignment = Alignment.Top) {
                         AttachmentButton(onPickAttachments)
-                        Spacer(Modifier.width(6.dp))
+                        Spacer(Modifier.width(2.dp))
                         BasicTextField(
                             value = task,
                             onValueChange = onTaskChange,
                             modifier = Modifier
                                 .weight(1f)
-                                .heightIn(min = 38.dp, max = 120.dp),
-                            textStyle = TextStyle(fontSize = 14.5.sp, lineHeight = 21.sp, color = Ink),
+                                .heightIn(min = 40.dp, max = 120.dp),
+                            textStyle = TextStyle(fontSize = 15.sp, lineHeight = 22.sp, color = Ink),
                             cursorBrush = SolidColor(Accent),
                             maxLines = 4,
                             interactionSource = focusSource,
                             decorationBox = { inner ->
-                                Box {
+                                Box(Modifier.padding(vertical = 9.dp)) {
                                     if (task.isEmpty()) {
                                         Text(
-                                            "发消息，或让 Agent 操作手机…",
-                                            fontSize = 14.5.sp,
-                                            color = Color(0xFF9CA3AF)
+                                            "发消息或描述任务…",
+                                            fontSize = 15.sp,
+                                            color = Color(0xFF9AA0A6),
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
                                         )
                                     }
                                     inner()
                                 }
                             }
                         )
-                        Spacer(Modifier.width(6.dp))
+                        Spacer(Modifier.width(4.dp))
                         if (running) {
                             StopButton(onStop)
                         } else {
                             RunButton(canSend, onSend)
                         }
                     }
-                    Row(
-                        modifier = Modifier.padding(top = 4.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        ModelChip(model)
-                        Spacer(Modifier.weight(1f))
-                    }
                 }
+            }
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 4.dp, end = 4.dp, top = 4.dp)
+                    .clip(RoundedCornerShape(50))
+                    .clickable(onClick = onModelClick)
+                    .padding(horizontal = 6.dp, vertical = 3.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box(Modifier.size(5.dp).background(Success, CircleShape))
+                Spacer(Modifier.width(6.dp))
+                Text(
+                    model.ifBlank { "未配置模型" },
+                    fontSize = 9.5.sp,
+                    color = Muted,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+                Text("切换", fontSize = 9.sp, color = Color(0xFF9CA3AF))
+                Icon(
+                    Icons.Rounded.ExpandMore,
+                    contentDescription = "切换本会话模型",
+                    tint = Color(0xFF9CA3AF),
+                    modifier = Modifier.size(13.dp)
+                )
             }
             if (hint.isNotBlank()) {
                 Text(
                     hint,
                     fontSize = 10.5.sp,
                     color = Muted,
-                    modifier = Modifier.padding(start = 6.dp, top = 5.dp)
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(start = 10.dp, top = 3.dp)
                 )
             }
         }
@@ -1471,13 +2037,12 @@ private fun Composer(
 private fun AttachmentButton(onClick: () -> Unit) {
     val source = remember { MutableInteractionSource() }
     val pressed by source.collectIsPressedAsState()
-    val scale by animateFloatAsState(if (pressed) 0.9f else 1f, tween(90), label = "attachScale")
+    val bg by animateFloatAsState(if (pressed) 1f else 0f, tween(110), label = "attachBg")
     Box(
         modifier = Modifier
-            .size(38.dp)
-            .scale(scale)
-            .clip(RoundedCornerShape(12.dp))
-            .background(Accent.copy(alpha = 0.08f))
+            .size(36.dp)
+            .clip(CircleShape)
+            .background(lerp(Color(0xFFF3F4F6), Color(0xFFE8EAED), bg))
             .clickable(
                 interactionSource = source,
                 indication = null,
@@ -1486,33 +2051,11 @@ private fun AttachmentButton(onClick: () -> Unit) {
         contentAlignment = Alignment.Center
     ) {
         Icon(
-            Icons.Rounded.AddPhotoAlternate,
+            Icons.Rounded.Add,
             contentDescription = "添加图片或文件",
-            tint = Accent,
-            modifier = Modifier.size(19.dp)
+            tint = Ink,
+            modifier = Modifier.size(20.dp)
         )
-    }
-}
-
-@Composable
-private fun ModelChip(model: String) {
-    Surface(shape = RoundedCornerShape(50), color = Color(0xFFF3F4F6)) {
-        Row(
-            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Box(Modifier.size(4.dp).background(Success, CircleShape))
-            Spacer(Modifier.width(5.dp))
-            Text(
-                model.ifBlank { "model" },
-                fontSize = 9.sp,
-                color = Muted,
-                fontFamily = FontFamily.Monospace,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.widthIn(max = 150.dp)
-            )
-        }
     }
 }
 
@@ -1523,10 +2066,10 @@ private fun RunButton(enabled: Boolean, onClick: () -> Unit) {
     val scale by animateFloatAsState(if (pressed) 0.92f else 1f, tween(90), label = "scale")
     Box(
         modifier = Modifier
-            .size(38.dp)
+            .size(36.dp)
             .scale(scale)
             .clip(CircleShape)
-            .background(if (enabled) Ink else Color(0xFFE5E7EB))
+            .background(if (enabled) Ink else Color(0xFFF1F3F4))
             .clickable(
                 enabled = enabled,
                 interactionSource = source,
@@ -1538,7 +2081,7 @@ private fun RunButton(enabled: Boolean, onClick: () -> Unit) {
         Icon(
             Icons.Rounded.ArrowUpward,
             contentDescription = "发送",
-            tint = if (enabled) Color.White else Color(0xFF9CA3AF),
+            tint = if (enabled) Color.White else Color(0xFFB6BAC0),
             modifier = Modifier.size(18.dp)
         )
     }
@@ -1546,20 +2089,20 @@ private fun RunButton(enabled: Boolean, onClick: () -> Unit) {
 
 @Composable
 private fun StopButton(onClick: () -> Unit) {
-    Surface(
-        shape = RoundedCornerShape(50),
-        color = Color(0xFFFEF2F2),
-        border = BorderStroke(1.dp, Color(0xFFFECACA)),
-        modifier = Modifier.clickable(onClick = onClick)
+    Box(
+        modifier = Modifier
+            .size(36.dp)
+            .clip(CircleShape)
+            .background(Ink)
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center
     ) {
-        Row(
-            modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Icon(Icons.Rounded.Stop, null, tint = Danger, modifier = Modifier.size(13.dp))
-            Spacer(Modifier.width(4.dp))
-            Text("Stop", fontSize = 10.sp, fontWeight = FontWeight.Medium, color = Danger)
-        }
+        Icon(
+            Icons.Rounded.Stop,
+            contentDescription = "停止",
+            tint = Color.White,
+            modifier = Modifier.size(14.dp)
+        )
     }
 }
 
@@ -1567,7 +2110,7 @@ private fun StopButton(onClick: () -> Unit) {
 private fun PendingAttachment(a: Attachment, onRemove: () -> Unit) {
     Box {
         if (a.kind == "image") {
-            AttachmentThumb(a, 64.dp)
+            AttachmentThumb(a, 58.dp)
         } else {
             FileChip(a)
         }
@@ -1576,11 +2119,12 @@ private fun PendingAttachment(a: Attachment, onRemove: () -> Unit) {
                 .align(Alignment.TopEnd)
                 .size(18.dp)
                 .clip(CircleShape)
-                .background(Color(0xFF111827))
+                .background(Color.White)
+                .border(1.dp, Line, CircleShape)
                 .clickable(onClick = onRemove),
             contentAlignment = Alignment.Center
         ) {
-            Icon(Icons.Rounded.Close, null, tint = Color.White, modifier = Modifier.size(11.dp))
+            Icon(Icons.Rounded.Close, "移除附件", tint = Ink, modifier = Modifier.size(11.dp))
         }
     }
 }
@@ -1618,15 +2162,15 @@ private fun AttachmentThumb(
     }
     Surface(
         modifier = if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier,
-        shape = RoundedCornerShape(12.dp),
+        shape = RoundedCornerShape(14.dp),
         color = Color(0xFFF1F3F5),
-        border = BorderStroke(1.dp, Line)
+        border = BorderStroke(1.dp, Color(0xFFE8EAED))
     ) {
         if (bitmap != null) {
             Image(
                 bitmap = bitmap!!,
                 contentDescription = a.name,
-                modifier = Modifier.size(size).clip(RoundedCornerShape(12.dp)),
+                modifier = Modifier.size(size).clip(RoundedCornerShape(14.dp)),
                 contentScale = ContentScale.Crop
             )
         } else {
@@ -1641,28 +2185,38 @@ private fun AttachmentThumb(
 private fun FileChip(a: Attachment, onClick: (() -> Unit)? = null) {
     Surface(
         modifier = if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier,
-        shape = RoundedCornerShape(12.dp),
-        color = Color(0xFFF1F3F5),
-        border = BorderStroke(1.dp, Line)
+        shape = RoundedCornerShape(14.dp),
+        color = Color(0xFFF8F9FB),
+        border = BorderStroke(1.dp, Color(0xFFF0F1F4))
     ) {
         Row(
-            modifier = Modifier.padding(horizontal = 8.dp, vertical = 7.dp),
+            modifier = Modifier.padding(horizontal = 7.dp, vertical = 7.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Icon(Icons.Rounded.Description, null, tint = Accent, modifier = Modifier.size(15.dp))
-            Spacer(Modifier.width(5.dp))
+            Box(
+                Modifier
+                    .size(28.dp)
+                    .clip(RoundedCornerShape(9.dp))
+                    .background(Accent.copy(alpha = 0.07f)),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(Icons.Rounded.Description, null, tint = Accent, modifier = Modifier.size(15.dp))
+            }
+            Spacer(Modifier.width(7.dp))
             Column {
                 Text(
                     a.name,
-                    fontSize = 9.5.sp,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Medium,
                     color = Ink,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.widthIn(max = 120.dp)
+                    modifier = Modifier.widthIn(max = 118.dp)
                 )
+                Spacer(Modifier.height(1.dp))
                 Text(
                     formatSize(a.size),
-                    fontSize = 8.sp,
+                    fontSize = 8.5.sp,
                     color = Muted
                 )
             }
@@ -1836,17 +2390,46 @@ private fun decodeSampledBitmap(path: String, maxSide: Int): android.graphics.Bi
 private fun MenuSheet(
     sessions: List<SessionSummary>,
     currentId: String,
-    runningSessionId: String,
+    runningSessionIds: Set<String>,
     onNew: () -> Unit,
     onOpen: (String) -> Unit,
     onDelete: (SessionSummary) -> Unit,
+    onRename: (SessionSummary) -> Unit,
+    onPin: (SessionSummary) -> Unit,
+    onFavorite: (SessionSummary) -> Unit,
+    onArchive: (SessionSummary) -> Unit,
+    onExport: (SessionSummary) -> Unit,
     onSettings: () -> Unit,
     onDismiss: () -> Unit
 ) {
+    var query by rememberSaveable { mutableStateOf("") }
+    var filter by rememberSaveable { mutableIntStateOf(0) }
+
+    val visible = remember(sessions, query, filter) {
+        val q = query.trim()
+        sessions.filter { s ->
+            val inTab = when (filter) {
+                0 -> !s.archived
+                1 -> s.pinned && !s.archived
+                2 -> s.favorite && !s.archived
+                else -> s.archived
+            }
+            inTab && (q.isEmpty() ||
+                s.title.contains(q, ignoreCase = true) ||
+                s.summary.contains(q, ignoreCase = true) ||
+                s.resultPreview.contains(q, ignoreCase = true))
+        }.sortedWith(
+            compareByDescending<SessionSummary> { it.pinned }
+                .thenByDescending { it.favorite }
+                .thenByDescending { it.updatedAt }
+        )
+    }
+
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
         containerColor = Color.White,
+        sheetMaxWidth = 640.dp,
         shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
         dragHandle = { Spacer(Modifier.height(10.dp)) }
     ) {
@@ -1854,6 +2437,8 @@ private fun MenuSheet(
             modifier = Modifier
                 .fillMaxWidth()
                 .statusBarsPadding()
+                .navigationBarsPadding()
+                .imePadding()
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = 20.dp)
                 .padding(bottom = 28.dp)
@@ -1885,15 +2470,62 @@ private fun MenuSheet(
             HorizontalDivider(Modifier.padding(vertical = 14.dp), color = Line)
             Text("历史会话", fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = Muted)
             Spacer(Modifier.height(8.dp))
-            if (sessions.isEmpty()) {
-                Text("还没有历史会话，发第一条消息后会自动保存。", fontSize = 10.5.sp, color = Muted)
+            OutlinedTextField(
+                value = query,
+                onValueChange = { query = it },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+                placeholder = { Text("搜索标题、摘要或结果…", fontSize = 11.sp, color = Color(0xFF9CA3AF)) },
+                leadingIcon = {
+                    Icon(Icons.Rounded.Search, null, tint = Muted, modifier = Modifier.size(17.dp))
+                },
+                shape = RoundedCornerShape(14.dp),
+                textStyle = TextStyle(fontSize = 12.sp, color = Ink),
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedBorderColor = Ink,
+                    unfocusedBorderColor = Line,
+                    focusedContainerColor = Color.White,
+                    unfocusedContainerColor = Color.White,
+                    cursorColor = Ink
+                )
+            )
+            Spacer(Modifier.height(8.dp))
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(Color(0xFFF3F4F6))
+                    .padding(3.dp)
+            ) {
+                listOf("最近", "置顶", "收藏", "归档").forEachIndexed { idx, label ->
+                    SettingsTab(label, filter == idx, Modifier.weight(1f)) { filter = idx }
+                }
             }
-            sessions.forEach { s ->
+            Spacer(Modifier.height(8.dp))
+            if (visible.isEmpty()) {
+                Text(
+                    when {
+                        query.isNotBlank() -> "没有匹配的会话。"
+                        filter == 3 -> "没有已归档的会话。"
+                        filter == 1 -> "还没有置顶会话。"
+                        filter == 2 -> "还没有收藏会话。"
+                        else -> "还没有历史会话，发第一条消息后会自动保存。"
+                    },
+                    fontSize = 10.5.sp,
+                    color = Muted
+                )
+            }
+            visible.forEach { s ->
                 SessionRow(
                     summary = s,
                     selected = s.id == currentId,
-                    running = s.id == runningSessionId,
+                    running = s.id in runningSessionIds,
                     onClick = { onOpen(s.id) },
+                    onPin = { onPin(s) },
+                    onFavorite = { onFavorite(s) },
+                    onArchive = { onArchive(s) },
+                    onRename = { onRename(s) },
+                    onExport = { onExport(s) },
                     onDelete = { onDelete(s) }
                 )
                 Spacer(Modifier.height(7.dp))
@@ -1910,7 +2542,7 @@ private fun MenuSheet(
                 Icon(Icons.Rounded.Settings, null, tint = Ink, modifier = Modifier.size(18.dp))
                 Spacer(Modifier.width(9.dp))
                 Text("Settings", fontSize = 13.sp, color = Ink, modifier = Modifier.weight(1f))
-                Text("模型 / 日志", fontSize = 9.5.sp, color = Muted)
+                Text("模型 / 日志 / 记忆 / 统计", fontSize = 9.5.sp, color = Muted)
             }
         }
     }
@@ -1922,11 +2554,18 @@ private fun SessionRow(
     selected: Boolean,
     running: Boolean,
     onClick: () -> Unit,
+    onPin: () -> Unit,
+    onFavorite: () -> Unit,
+    onArchive: () -> Unit,
+    onRename: () -> Unit,
+    onExport: () -> Unit,
     onDelete: () -> Unit
 ) {
     val time = remember(summary.updatedAt) {
         SimpleDateFormat("MM-dd HH:mm", Locale.getDefault()).format(Date(summary.updatedAt))
     }
+    var menuOpen by remember { mutableStateOf(false) }
+
     Surface(
         modifier = Modifier
             .fillMaxWidth()
@@ -1936,7 +2575,7 @@ private fun SessionRow(
         border = BorderStroke(1.dp, if (selected) Accent.copy(alpha = 0.3f) else Line)
     ) {
         Row(
-            modifier = Modifier.padding(11.dp),
+            modifier = Modifier.padding(horizontal = 11.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Box(
@@ -1951,6 +2590,18 @@ private fun SessionRow(
             Spacer(Modifier.width(9.dp))
             Column(Modifier.weight(1f)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (summary.pinned) {
+                        Icon(Icons.Rounded.PushPin, "已置顶", tint = Accent, modifier = Modifier.size(11.dp))
+                        Spacer(Modifier.width(4.dp))
+                    }
+                    if (summary.favorite) {
+                        Icon(Icons.Rounded.Star, "已收藏", tint = Warning, modifier = Modifier.size(11.dp))
+                        Spacer(Modifier.width(4.dp))
+                    }
+                    if (summary.archived) {
+                        Icon(Icons.Rounded.Archive, "已归档", tint = Muted, modifier = Modifier.size(11.dp))
+                        Spacer(Modifier.width(4.dp))
+                    }
                     Text(
                         summary.title,
                         fontSize = 12.sp,
@@ -1966,6 +2617,16 @@ private fun SessionRow(
                         Text("running", fontSize = 8.sp, color = Success)
                     }
                 }
+                if (summary.summary.isNotBlank()) {
+                    Text(
+                        summary.summary,
+                        fontSize = 9.5.sp,
+                        color = Muted,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.padding(top = 1.dp)
+                    )
+                }
                 Text(
                     "$time · ${formatCount(summary.totalTokens)} tok · " +
                         "${formatCount(summary.contextChars)} ctx" +
@@ -1980,16 +2641,55 @@ private fun SessionRow(
                     overflow = TextOverflow.Ellipsis
                 )
             }
-            IconButton(
-                onClick = onDelete,
-                modifier = Modifier.size(30.dp)
-            ) {
-                Icon(
-                    Icons.Rounded.DeleteOutline,
-                    contentDescription = "删除会话",
-                    tint = Color(0xFF9CA3AF),
-                    modifier = Modifier.size(16.dp)
-                )
+            Box {
+                IconButton(
+                    onClick = { menuOpen = true },
+                    modifier = Modifier.size(30.dp)
+                ) {
+                    Icon(
+                        Icons.Rounded.MoreVert,
+                        contentDescription = "会话操作",
+                        tint = Color(0xFF9CA3AF),
+                        modifier = Modifier.size(17.dp)
+                    )
+                }
+                DropdownMenu(
+                    expanded = menuOpen,
+                    onDismissRequest = { menuOpen = false }
+                ) {
+                    DropdownMenuItem(
+                        text = { Text(if (summary.pinned) "取消置顶" else "置顶", fontSize = 12.sp) },
+                        leadingIcon = { Icon(Icons.Rounded.PushPin, null, modifier = Modifier.size(16.dp)) },
+                        onClick = { menuOpen = false; onPin() }
+                    )
+                    DropdownMenuItem(
+                        text = { Text(if (summary.favorite) "取消收藏" else "收藏", fontSize = 12.sp) },
+                        leadingIcon = { Icon(Icons.Rounded.Star, null, modifier = Modifier.size(16.dp)) },
+                        onClick = { menuOpen = false; onFavorite() }
+                    )
+                    DropdownMenuItem(
+                        text = { Text(if (summary.archived) "恢复" else "归档", fontSize = 12.sp) },
+                        leadingIcon = { Icon(Icons.Rounded.Archive, null, modifier = Modifier.size(16.dp)) },
+                        onClick = { menuOpen = false; onArchive() }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("重命名", fontSize = 12.sp) },
+                        leadingIcon = { Icon(Icons.Rounded.Edit, null, modifier = Modifier.size(16.dp)) },
+                        onClick = { menuOpen = false; onRename() }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("导出 Markdown", fontSize = 12.sp) },
+                        leadingIcon = { Icon(Icons.Rounded.Share, null, modifier = Modifier.size(16.dp)) },
+                        onClick = { menuOpen = false; onExport() }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("删除", fontSize = 12.sp, color = Danger) },
+                        leadingIcon = {
+                            Icon(Icons.Rounded.DeleteOutline, null, tint = Danger, modifier = Modifier.size(16.dp))
+                        },
+                        onClick = { menuOpen = false; onDelete() }
+                    )
+                }
             }
         }
     }
@@ -2000,12 +2700,20 @@ private fun SessionRow(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun SettingsSheet(
+    sessions: List<SessionSummary>,
     baseUrl: String,
     onBaseUrl: (String) -> Unit,
     apiKey: String,
     onApiKey: (String) -> Unit,
     model: String,
     onModel: (String) -> Unit,
+    models: List<String>,
+    modelsLoading: Boolean,
+    rootGranted: Boolean?,
+    overlayEnabled: Boolean,
+    overlayGranted: Boolean,
+    onOverlayEnabled: (Boolean) -> Unit,
+    onRequestOverlay: () -> Unit,
     testResult: String,
     onSaveModel: () -> Unit,
     onTestModel: () -> Unit,
@@ -2024,10 +2732,33 @@ private fun SettingsSheet(
     onTestLog: () -> Unit,
     onDismiss: () -> Unit
 ) {
+    val scrollState = rememberScrollState()
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var tab by rememberSaveable { mutableIntStateOf(0) }
+    var memoryEntries by remember { mutableStateOf<List<AppMemory.MemoryEntry>>(emptyList()) }
+    var editingMemory by remember { mutableStateOf<AppMemory.MemoryEntry?>(null) }
+    var memoryDraft by remember { mutableStateOf("") }
+    val price = remember { UsageSettings.load(context) }
+    var priceIn by remember { mutableStateOf(price.inputPerMillion.toString()) }
+    var priceOut by remember { mutableStateOf(price.outputPerMillion.toString()) }
+
+    fun reloadMemory() {
+        scope.launch {
+            memoryEntries = withContext(Dispatchers.IO) { AppMemory.listEntries(context) }
+        }
+    }
+
+    LaunchedEffect(tab) {
+        scrollState.scrollTo(0)
+        if (tab == 2) reloadMemory()
+    }
+
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
         containerColor = Color.White,
+        sheetMaxWidth = 640.dp,
         shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
         dragHandle = { Spacer(Modifier.height(10.dp)) }
     ) {
@@ -2035,56 +2766,68 @@ private fun SettingsSheet(
             modifier = Modifier
                 .fillMaxWidth()
                 .statusBarsPadding()
-                .verticalScroll(rememberScrollState())
+                .navigationBarsPadding()
+                .verticalScroll(scrollState)
                 .padding(horizontal = 20.dp)
                 .padding(bottom = 32.dp)
                 .imePadding()
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    "Settings",
+                    "设置",
                     fontSize = 20.sp,
                     fontWeight = FontWeight.SemiBold,
                     color = Ink,
                     modifier = Modifier.weight(1f)
                 )
+                RootBadge(rootGranted)
+                Spacer(Modifier.width(6.dp))
                 IconButton(onClick = onDismiss) {
                     Icon(Icons.Rounded.Close, "关闭", tint = Muted)
                 }
             }
-            Text("模型接入与远程日志。所有配置仅保存在本机。", fontSize = 12.sp, color = Muted)
+            Text(
+                when (tab) {
+                    0 -> "配置模型接口和可用模型。"
+                    1 -> "配置远程日志上报与接入凭证。"
+                    2 -> "管理每个 App 的简短操作记忆。"
+                    else -> "查看会话 token、上下文和耗时。"
+                },
+                fontSize = 12.sp,
+                color = Muted
+            )
+            Spacer(Modifier.height(14.dp))
 
-            SectionLabel("Model")
-            StudioField("Base URL", baseUrl, onBaseUrl, "https://api.example.com/v1")
-            StudioField("API Key", apiKey, onApiKey, "sk-...", mono = true)
-            StudioField("Model", model, onModel, "deepseek-v4.1-flash", mono = true)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(
-                    onClick = onSaveModel,
-                    modifier = Modifier.weight(1f),
-                    shape = RoundedCornerShape(14.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = Ink)
-                ) { Text("Save", fontSize = 12.sp) }
-                OutlinedButton(
-                    onClick = onTestModel,
-                    modifier = Modifier.weight(1f),
-                    shape = RoundedCornerShape(14.dp),
-                    border = BorderStroke(1.dp, Line)
-                ) { Text("Test", fontSize = 12.sp, color = Ink) }
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(Color(0xFFF3F4F6))
+                    .padding(3.dp)
+            ) {
+                SettingsTab("模型", tab == 0, Modifier.weight(1f)) { tab = 0 }
+                SettingsTab("日志", tab == 1, Modifier.weight(1f)) { tab = 1 }
+                SettingsTab("记忆", tab == 2, Modifier.weight(1f)) { tab = 2 }
+                SettingsTab("统计", tab == 3, Modifier.weight(1f)) { tab = 3 }
             }
-            if (testResult.isNotBlank()) {
-                Text(testResult, fontSize = 11.sp, color = Muted)
+            Spacer(Modifier.height(10.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                CapabilityChip("无障碍", UiObserverService.instance != null)
+                CapabilityChip("ROOT", rootGranted == true)
+                CapabilityChip("悬浮窗", overlayGranted)
             }
-
-            HorizontalDivider(Modifier.padding(vertical = 18.dp), color = Line)
+            Spacer(Modifier.height(10.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
-                    Text("Remote trace", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = Ink)
-                    Text("把每一步的输入/输出上报到日志系统", fontSize = 11.sp, color = Muted)
+                    Text("显示悬浮状态窗", fontSize = 13.sp, fontWeight = FontWeight.Medium, color = Ink)
+                    Text(
+                        "在其他 App 上显示步骤、阶段和耗时；默认关闭，截图/OCR 可能看到它。",
+                        fontSize = 9.5.sp, color = Muted, lineHeight = 14.sp
+                    )
                 }
                 Switch(
-                    checked = logEnabled,
-                    onCheckedChange = onLogEnabled,
+                    checked = overlayEnabled && overlayGranted,
+                    onCheckedChange = { onOverlayEnabled(it) },
                     colors = SwitchDefaults.colors(
                         checkedThumbColor = Color.White,
                         checkedTrackColor = Ink,
@@ -2094,59 +2837,764 @@ private fun SettingsSheet(
                     )
                 )
             }
-            Spacer(Modifier.height(10.dp))
-            StudioField("Log Base URL", logBase, onLogBase, LogSettings.DEFAULT_BASE_URL)
-            StudioField(
-                "Agent Token", logToken, onLogToken,
-                "粘贴 JWT，或在下方用 6 位校验码换取",
-                mono = true, minLines = 2
-            )
-            Row(
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                StudioField(
-                    "6 位校验码", logCode, onLogCode, "000000",
-                    mono = true, modifier = Modifier.weight(1f)
+            if (!overlayGranted) {
+                TextButton(
+                    onClick = onRequestOverlay,
+                    contentPadding = PaddingValues(0.dp)
+                ) {
+                    Text("授予悬浮窗权限", fontSize = 10.5.sp, color = Accent)
+                }
+            }
+            Spacer(Modifier.height(14.dp))
+
+            if (tab == 0) {
+                Text(
+                    "接口",
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = Muted,
+                    modifier = Modifier.padding(bottom = 8.dp)
                 )
-                Button(
-                    onClick = onExchange,
-                    enabled = logCode.trim().length == 6,
+                StudioField("Base URL", baseUrl, onBaseUrl, "https://api.example.com/v1")
+                StudioField("API Key", apiKey, onApiKey, "sk-...", mono = true)
+                StudioField("模型 ID", model, onModel, "deepseek-v4.1-flash", mono = true)
+                OutlinedButton(
+                    onClick = onTestModel,
+                    enabled = !modelsLoading,
+                    modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(14.dp),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = Ink,
-                        disabledContainerColor = Color(0xFFE5E7EB),
+                    border = BorderStroke(1.dp, Line),
+                    colors = ButtonDefaults.outlinedButtonColors(
+                        contentColor = Ink,
                         disabledContentColor = Color(0xFF9CA3AF)
                     )
-                ) { Text("Exchange", fontSize = 12.sp) }
-            }
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                TextButton(onClick = onTestLog, contentPadding = PaddingValues(0.dp)) {
-                    Text("Test token", fontSize = 11.sp, color = Accent)
+                ) {
+                    Text(if (modelsLoading) "拉取中…" else "拉取模型列表", fontSize = 12.sp)
                 }
-                Spacer(Modifier.weight(1f))
-                TextButton(onClick = onSaveLog, contentPadding = PaddingValues(0.dp)) {
-                    Text("Save trace config", fontSize = 11.sp, color = Muted)
+                if (testResult.isNotBlank()) {
+                    val failed = testResult.startsWith("连接失败") || testResult.contains("失败:")
+                    Text(
+                        testResult,
+                        fontSize = 11.sp,
+                        color = if (failed) Danger else Muted,
+                        lineHeight = 16.sp,
+                        modifier = Modifier.padding(top = 8.dp)
+                    )
+                }
+                Button(
+                    onClick = onSaveModel,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 12.dp),
+                    shape = RoundedCornerShape(14.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = Ink)
+                ) { Text("保存模型配置", fontSize = 12.sp) }
+
+                if (models.isNotEmpty()) {
+                    Spacer(Modifier.height(14.dp))
+                    Text(
+                        "可用模型",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = Muted,
+                        modifier = Modifier.padding(bottom = 8.dp)
+                    )
+                    ModelPicker(models, model) { id ->
+                        onModel(id)
+                        onSaveModel()
+                    }
+                    Text(
+                        "点击模型即可切换并保存。",
+                        fontSize = 10.sp,
+                        color = Color(0xFF9CA3AF),
+                        modifier = Modifier.padding(top = 6.dp)
+                    )
+                } else {
+                    Text(
+                        "拉取后会在这里列出模型，可直接点击选择。",
+                        fontSize = 10.sp,
+                        color = Color(0xFF9CA3AF),
+                        modifier = Modifier.padding(top = 8.dp)
+                    )
+                }
+            } else if (tab == 1) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("远程日志", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = Ink)
+                        Text("把每一步的输入/输出上报到日志系统", fontSize = 11.sp, color = Muted)
+                    }
+                    Switch(
+                        checked = logEnabled,
+                        onCheckedChange = onLogEnabled,
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = Color.White,
+                            checkedTrackColor = Ink,
+                            uncheckedThumbColor = Color.White,
+                            uncheckedTrackColor = Color(0xFFD1D5DB),
+                            uncheckedBorderColor = Color.Transparent
+                        )
+                    )
+                }
+                Spacer(Modifier.height(14.dp))
+                Text(
+                    "接入配置",
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = Muted,
+                    modifier = Modifier.padding(bottom = 8.dp)
+                )
+                StudioField("Log Base URL", logBase, onLogBase, LogSettings.DEFAULT_BASE_URL)
+                StudioField(
+                    "Agent Token", logToken, onLogToken,
+                    "粘贴 JWT，或用下方校验码换取",
+                    mono = true, minLines = 2
+                )
+
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(16.dp),
+                    color = Color(0xFFFAFBFC),
+                    border = BorderStroke(1.dp, Line)
+                ) {
+                    Column(Modifier.padding(12.dp)) {
+                        Text("校验码换取", fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = Ink)
+                        Text(
+                            "在日志系统「接入凭证」生成 6 位一次性校验码",
+                            fontSize = 10.sp,
+                            color = Muted,
+                            lineHeight = 15.sp,
+                            modifier = Modifier.padding(top = 2.dp)
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        Row(
+                            verticalAlignment = Alignment.Bottom,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            StudioField(
+                                "6 位校验码", logCode, onLogCode, "000000",
+                                mono = true, modifier = Modifier.weight(1f)
+                            )
+                            Button(
+                                onClick = onExchange,
+                                enabled = logCode.trim().length == 6,
+                                modifier = Modifier.padding(bottom = 8.dp),
+                                shape = RoundedCornerShape(14.dp),
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = Ink,
+                                    disabledContainerColor = Color(0xFFE5E7EB),
+                                    disabledContentColor = Color(0xFF9CA3AF)
+                                )
+                            ) { Text("换取", fontSize = 12.sp) }
+                        }
+                    }
+                }
+
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    TextButton(onClick = onTestLog, contentPadding = PaddingValues(0.dp)) {
+                        Text("测试连接", fontSize = 11.sp, fontWeight = FontWeight.Medium, color = Ink)
+                    }
+                    Spacer(Modifier.weight(1f))
+                    TextButton(onClick = onSaveLog, contentPadding = PaddingValues(0.dp)) {
+                        Text("保存日志配置", fontSize = 11.sp, color = Muted)
+                    }
+                }
+
+                if (logProject.isNotBlank() || logStatus.isNotBlank()) {
+                    Surface(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(14.dp),
+                        color = Color(0xFFFAFBFC),
+                        border = BorderStroke(1.dp, Line)
+                    ) {
+                        Column(Modifier.padding(10.dp)) {
+                            if (logProject.isNotBlank()) {
+                                Text(
+                                    "已绑定 · $logProject",
+                                    fontSize = 11.sp, color = Success, lineHeight = 16.sp
+                                )
+                            }
+                            if (logStatus.isNotBlank()) {
+                                Text(
+                                    logStatus,
+                                    fontSize = 11.sp, color = Muted, lineHeight = 16.sp,
+                                    modifier = Modifier.padding(top = if (logProject.isNotBlank()) 2.dp else 0.dp)
+                                )
+                            }
+                        }
+                    }
+                }
+                Text(
+                    "校验码一次性有效；换取成功后会自动启用上报。",
+                    fontSize = 10.sp, color = Color(0xFF9CA3AF), lineHeight = 15.sp,
+                    modifier = Modifier.padding(top = 8.dp)
+                )
+            } else if (tab == 2) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("App 记忆", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = Ink)
+                        Text(
+                            "每个 App 独立；Agent 只注入前 800 字，最多保存 ${AppMemory.MAX_WRITE} 字。",
+                            fontSize = 10.5.sp, color = Muted, lineHeight = 15.sp
+                        )
+                    }
+                    TextButton(onClick = { reloadMemory() }, contentPadding = PaddingValues(0.dp)) {
+                        Text("刷新", fontSize = 11.sp, color = Accent)
+                    }
+                }
+                Spacer(Modifier.height(10.dp))
+
+                val editing = editingMemory
+                if (editing != null) {
+                    Surface(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(16.dp),
+                        color = Color(0xFFFAFBFC),
+                        border = BorderStroke(1.dp, Line)
+                    ) {
+                        Column(Modifier.padding(12.dp)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(
+                                    editing.pkg,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = Ink,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                TextButton(
+                                    onClick = { editingMemory = null },
+                                    contentPadding = PaddingValues(0.dp)
+                                ) { Text("返回列表", fontSize = 10.5.sp, color = Muted) }
+                            }
+                            Spacer(Modifier.height(6.dp))
+                            OutlinedTextField(
+                                value = memoryDraft,
+                                onValueChange = { if (it.length <= AppMemory.MAX_WRITE) memoryDraft = it },
+                                modifier = Modifier.fillMaxWidth(),
+                                minLines = 6,
+                                maxLines = 12,
+                                textStyle = TextStyle(fontSize = 12.sp, lineHeight = 18.sp, color = Ink),
+                                shape = RoundedCornerShape(14.dp),
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedBorderColor = Ink,
+                                    unfocusedBorderColor = Line,
+                                    focusedContainerColor = Color.White,
+                                    unfocusedContainerColor = Color.White,
+                                    cursorColor = Ink
+                                )
+                            )
+                            Text(
+                                "${memoryDraft.length}/${AppMemory.MAX_WRITE} 字",
+                                fontSize = 9.5.sp,
+                                color = if (memoryDraft.length >= AppMemory.MAX_WRITE) Warning else Muted,
+                                modifier = Modifier.padding(top = 4.dp)
+                            )
+                            Row(
+                                modifier = Modifier.padding(top = 10.dp),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Button(
+                                    onClick = {
+                                        scope.launch {
+                                            withContext(Dispatchers.IO) {
+                                                AppMemory.overwrite(context, editing.pkg, memoryDraft)
+                                            }
+                                            reloadMemory()
+                                            editingMemory = null
+                                        }
+                                    },
+                                    shape = RoundedCornerShape(14.dp),
+                                    colors = ButtonDefaults.buttonColors(containerColor = Ink)
+                                ) { Text("保存", fontSize = 12.sp) }
+                                OutlinedButton(
+                                    onClick = {
+                                        scope.launch {
+                                            withContext(Dispatchers.IO) {
+                                                AppMemory.delete(context, editing.pkg)
+                                            }
+                                            reloadMemory()
+                                            editingMemory = null
+                                        }
+                                    },
+                                    shape = RoundedCornerShape(14.dp),
+                                    border = BorderStroke(1.dp, Line)
+                                ) { Text("删除", fontSize = 12.sp, color = Danger) }
+                            }
+                        }
+                    }
+                } else {
+                    if (memoryEntries.isEmpty()) {
+                        Text(
+                            "暂无 App 记忆。Agent 完成后会自动写入，也可以在长任务中让它 memory_write。",
+                            fontSize = 10.5.sp, color = Muted, lineHeight = 16.sp
+                        )
+                    }
+                    memoryEntries.forEach { entry ->
+                        Surface(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    editingMemory = entry
+                                    memoryDraft = ""
+                                    scope.launch {
+                                        memoryDraft = withContext(Dispatchers.IO) {
+                                            AppMemory.readRaw(context, entry.pkg)
+                                        }
+                                    }
+                                },
+                            shape = RoundedCornerShape(14.dp),
+                            color = Color(0xFFFAFBFC),
+                            border = BorderStroke(1.dp, Line)
+                        ) {
+                            Column(Modifier.padding(horizontal = 11.dp, vertical = 9.dp)) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text(
+                                        entry.pkg,
+                                        fontSize = 11.5.sp,
+                                        fontWeight = FontWeight.Medium,
+                                        color = Ink,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    Text(
+                                        "${entry.chars}/${AppMemory.MAX_WRITE} 字",
+                                        fontSize = 9.sp,
+                                        color = Muted
+                                    )
+                                }
+                                if (entry.preview.isNotBlank()) {
+                                    Text(
+                                        entry.preview,
+                                        fontSize = 9.5.sp,
+                                        color = Muted,
+                                        maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.padding(top = 2.dp)
+                                    )
+                                }
+                            }
+                        }
+                        Spacer(Modifier.height(7.dp))
+                    }
+                }
+            } else {
+                val totalTokens = sessions.sumOf { it.totalTokens }
+                val totalPrompt = sessions.sumOf { it.promptTokens }
+                val totalCompletion = sessions.sumOf { it.completionTokens }
+                val totalDuration = sessions.sumOf { it.totalDurationMs }
+                val avgCtx = if (sessions.isEmpty()) 0 else sessions.sumOf { it.contextChars } / sessions.size
+                val priceInValue = priceIn.toDoubleOrNull() ?: 0.0
+                val priceOutValue = priceOut.toDoubleOrNull() ?: 0.0
+                val estimated = totalPrompt / 1_000_000.0 * priceInValue +
+                    totalCompletion / 1_000_000.0 * priceOutValue
+
+                Text("总览", fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = Muted)
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(16.dp),
+                    color = Color(0xFFFAFBFC),
+                    border = BorderStroke(1.dp, Line)
+                ) {
+                    Column(Modifier.padding(12.dp)) {
+                        UsageStatRow("会话数", sessions.size.toString())
+                        UsageStatRow("总 tokens", formatCount(totalTokens))
+                        UsageStatRow(
+                            "prompt / completion",
+                            "${formatCount(totalPrompt)} / ${formatCount(totalCompletion)}"
+                        )
+                        UsageStatRow("累计耗时", formatDuration(totalDuration))
+                        UsageStatRow("平均上下文", formatCount(avgCtx))
+                    }
+                }
+
+                Spacer(Modifier.height(14.dp))
+                Text("估算单价（每 1M tokens）", fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = Muted)
+                Spacer(Modifier.height(6.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    StudioField(
+                        "输入", priceIn, { priceIn = it.filter { c -> c.isDigit() || c == '.' } },
+                        "0", mono = true, modifier = Modifier.weight(1f)
+                    )
+                    StudioField(
+                        "输出", priceOut, { priceOut = it.filter { c -> c.isDigit() || c == '.' } },
+                        "0", mono = true, modifier = Modifier.weight(1f)
+                    )
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        "估算: ${String.format(Locale.US, "%.4f", estimated)}",
+                        fontSize = 11.sp, color = if (estimated > 0) Ink else Muted,
+                        modifier = Modifier.weight(1f)
+                    )
+                    TextButton(
+                        onClick = {
+                            UsageSettings.save(
+                                context,
+                                priceInValue,
+                                priceOutValue
+                            )
+                        },
+                        contentPadding = PaddingValues(0.dp)
+                    ) { Text("保存单价", fontSize = 10.5.sp, color = Accent) }
+                }
+
+                Spacer(Modifier.height(14.dp))
+                Text("按会话", fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = Muted)
+                Spacer(Modifier.height(6.dp))
+                sessions.sortedByDescending { it.totalTokens }.take(20).forEach { s ->
+                    Surface(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(12.dp),
+                        color = Color(0xFFFAFBFC),
+                        border = BorderStroke(1.dp, Line)
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(Modifier.weight(1f)) {
+                                Text(
+                                    s.title,
+                                    fontSize = 11.sp,
+                                    color = Ink,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                Text(
+                                    "${s.model.ifBlank { "默认模型" }} · ${formatCount(s.totalTokens)} tok · " +
+                                        formatDuration(s.totalDurationMs),
+                                    fontSize = 9.sp,
+                                    color = Muted
+                                )
+                            }
+                        }
+                    }
+                    Spacer(Modifier.height(5.dp))
                 }
             }
-            if (logProject.isNotBlank()) {
-                Text(
-                    "Bound project · $logProject",
-                    fontSize = 11.sp, color = Success, lineHeight = 16.sp
-                )
-            }
-            if (logStatus.isNotBlank()) {
-                Text(
-                    logStatus,
-                    fontSize = 11.sp, color = Muted, lineHeight = 16.sp,
-                    modifier = Modifier.padding(top = 2.dp)
-                )
-            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun MessageActionSheet(
+    message: ChatMessage,
+    onCopy: () -> Unit,
+    onQuote: () -> Unit,
+    onEdit: () -> Unit,
+    onRegenerate: () -> Unit,
+    onBranch: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        containerColor = Color.White,
+        sheetMaxWidth = 640.dp,
+        shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
+        dragHandle = { Spacer(Modifier.height(10.dp)) }
+    ) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .navigationBarsPadding()
+                .padding(horizontal = 20.dp)
+                .padding(bottom = 24.dp)
+        ) {
+            Text("消息操作", fontSize = 18.sp, fontWeight = FontWeight.SemiBold, color = Ink)
             Text(
-                "校验码在日志系统「接入凭证」生成，一次性有效；换取成功后会自动启用上报。",
-                fontSize = 10.sp, color = Color(0xFF9CA3AF), lineHeight = 15.sp,
-                modifier = Modifier.padding(top = 8.dp)
+                message.content.replace('\n', ' ').take(80),
+                fontSize = 10.5.sp,
+                color = Muted,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(top = 3.dp)
             )
+            Spacer(Modifier.height(10.dp))
+            MessageActionRow(Icons.Rounded.ContentCopy, "复制") { onCopy() }
+            MessageActionRow(Icons.Rounded.FormatQuote, "引用回复") { onQuote() }
+            if (message.role == "user") {
+                MessageActionRow(Icons.Rounded.Edit, "编辑并重新生成") { onEdit() }
+            } else {
+                MessageActionRow(Icons.Rounded.Refresh, "重新生成") { onRegenerate() }
+            }
+            MessageActionRow(Icons.Rounded.CallSplit, "从这里分支") { onBranch() }
+        }
+    }
+}
+
+@Composable
+private fun MessageActionRow(icon: ImageVector, label: String, onClick: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 8.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(icon, null, tint = Ink, modifier = Modifier.size(18.dp))
+        Spacer(Modifier.width(10.dp))
+        Text(label, fontSize = 13.sp, color = Ink)
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ModelSheet(
+    currentModel: String,
+    globalModel: String,
+    models: List<String>,
+    onSelect: (String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    val options = buildList {
+        add("" to "跟随全局默认（${globalModel.ifBlank { "未配置" }}）")
+        models.distinct().forEach { add(it to it) }
+        if (currentModel.isNotBlank() && models.none { it == currentModel }) {
+            add(currentModel to "$currentModel（当前）")
+        }
+    }
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        containerColor = Color.White,
+        sheetMaxWidth = 640.dp,
+        shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
+        dragHandle = { Spacer(Modifier.height(10.dp)) }
+    ) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .statusBarsPadding()
+                .navigationBarsPadding()
+                .padding(horizontal = 20.dp)
+                .padding(bottom = 28.dp)
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("本会话模型", fontSize = 18.sp, fontWeight = FontWeight.SemiBold, color = Ink)
+                    Text("只影响当前会话；全局默认在 设置 → 模型 修改。", fontSize = 10.5.sp, color = Muted)
+                }
+                IconButton(onClick = onDismiss) {
+                    Icon(Icons.Rounded.Close, "关闭", tint = Muted)
+                }
+            }
+            Spacer(Modifier.height(10.dp))
+            if (models.isEmpty()) {
+                Text(
+                    "还没有拉取模型列表。可以在 设置 → 模型 点「拉取模型列表」后回到这里切换。",
+                    fontSize = 10.5.sp,
+                    color = Muted,
+                    lineHeight = 16.sp
+                )
+                Spacer(Modifier.height(8.dp))
+            }
+            options.forEach { (value, label) ->
+                val selected = value == currentModel
+                Surface(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onSelect(value) },
+                    shape = RoundedCornerShape(14.dp),
+                    color = if (selected) Accent.copy(alpha = 0.05f) else Color.White,
+                    border = BorderStroke(1.dp, if (selected) Accent.copy(alpha = 0.25f) else Line)
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 11.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            label,
+                            fontSize = 12.sp,
+                            color = Ink,
+                            fontFamily = if (value.isBlank()) FontFamily.Default else FontFamily.Monospace,
+                            modifier = Modifier.weight(1f),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        if (selected) {
+                            Icon(Icons.Rounded.Check, null, tint = Accent, modifier = Modifier.size(16.dp))
+                        }
+                    }
+                }
+                Spacer(Modifier.height(6.dp))
+            }
+        }
+    }
+}
+
+@Composable
+private fun UsageStatRow(label: String, value: String) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 3.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(label, fontSize = 10.5.sp, color = Muted, modifier = Modifier.weight(1f))
+        Text(value, fontSize = 10.5.sp, color = Ink)
+    }
+}
+
+@Composable
+private fun CapabilityChip(label: String, ok: Boolean) {
+    Surface(
+        shape = RoundedCornerShape(50),
+        color = if (ok) Success.copy(alpha = 0.08f) else Color(0xFFF1F3F5),
+        border = BorderStroke(1.dp, if (ok) Success.copy(alpha = 0.22f) else Line)
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                Modifier
+                    .size(5.dp)
+                    .background(if (ok) Success else Color(0xFF9CA3AF), CircleShape)
+            )
+            Spacer(Modifier.width(4.dp))
+            Text(
+                "$label ${if (ok) "已就绪" else "未开启"}",
+                fontSize = 8.5.sp,
+                color = if (ok) Success else Muted
+            )
+        }
+    }
+}
+
+@Composable
+private fun RootBadge(granted: Boolean?) {
+    val active = granted == true
+    val label = when (granted) {
+        true -> "已 ROOT"
+        false -> "未 ROOT"
+        null -> "检测中"
+    }
+    Surface(
+        shape = RoundedCornerShape(50),
+        color = if (active) Success.copy(alpha = 0.10f) else Color(0xFFF1F3F5),
+        border = BorderStroke(1.dp, if (active) Success.copy(alpha = 0.25f) else Line)
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                Modifier
+                    .size(5.dp)
+                    .background(if (active) Success else Color(0xFF9CA3AF), CircleShape)
+            )
+            Spacer(Modifier.width(5.dp))
+            Text(
+                label,
+                fontSize = 9.sp,
+                fontWeight = FontWeight.Medium,
+                color = if (active) Success else Muted,
+                maxLines = 1
+            )
+        }
+    }
+}
+
+@Composable
+private fun SettingsTab(
+    label: String,
+    selected: Boolean,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit
+) {
+    Box(
+        modifier = modifier
+            .height(34.dp)
+            .clip(RoundedCornerShape(11.dp))
+            .background(if (selected) Color.White else Color.Transparent)
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            label,
+            fontSize = 12.sp,
+            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+            color = if (selected) Ink else Muted
+        )
+    }
+}
+
+@Composable
+private fun ModelPicker(
+    models: List<String>,
+    selected: String,
+    onSelect: (String) -> Unit
+) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(16.dp),
+        color = Color(0xFFFAFBFC),
+        border = BorderStroke(1.dp, Line)
+    ) {
+        Column {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 9.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("${models.size} 个模型", fontSize = 10.sp, color = Muted)
+                Spacer(Modifier.weight(1f))
+                Text("点击选择", fontSize = 9.5.sp, color = Color(0xFF9CA3AF))
+            }
+            HorizontalDivider(color = Line.copy(alpha = 0.7f))
+            models.forEachIndexed { index, id ->
+                val isSelected = id == selected
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onSelect(id) }
+                        .padding(horizontal = 12.dp, vertical = 11.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(16.dp)
+                            .clip(CircleShape)
+                            .background(if (isSelected) Accent else Color.Transparent)
+                            .border(
+                                1.dp,
+                                if (isSelected) Accent else Color(0xFFD1D5DB),
+                                CircleShape
+                            ),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        if (isSelected) {
+                            Icon(
+                                Icons.Rounded.Check,
+                                contentDescription = null,
+                                tint = Color.White,
+                                modifier = Modifier.size(11.dp)
+                            )
+                        }
+                    }
+                    Spacer(Modifier.width(10.dp))
+                    Text(
+                        id,
+                        fontSize = 12.sp,
+                        color = Ink,
+                        fontFamily = FontFamily.Monospace,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f)
+                    )
+                    if (isSelected) {
+                        Text("当前", fontSize = 9.sp, color = Accent)
+                    }
+                }
+                if (index != models.lastIndex) {
+                    HorizontalDivider(
+                        modifier = Modifier.padding(start = 38.dp),
+                        color = Line.copy(alpha = 0.6f)
+                    )
+                }
+            }
         }
     }
 }
@@ -2213,17 +3661,19 @@ private fun typeLabel(type: String): String = when (type) {
     "error" -> "Error"
     "todo" -> "Plan"
     "system" -> "System"
+    "conflict" -> "Conflict"
     else -> type
 }
 
 private fun typeColor(type: String): Color = when (type) {
-    "think" -> Accent
-    "tool" -> Warning
+    "think" -> Muted
+    "tool" -> Ink
     "result" -> Color(0xFF64748B)
     "done" -> Success
     "error" -> Danger
     "todo" -> Violet
-    "system" -> Color(0xFFEA580C)
+    "system" -> Muted
+    "conflict" -> Warning
     else -> Muted
 }
 

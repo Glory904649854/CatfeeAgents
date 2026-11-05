@@ -9,6 +9,7 @@
 ## 核心能力
 
 - **统一对话**：同一个输入框里聊天、问答、分析附件或让它操作手机，不需要先选 Chat/Agent 模式。
+- **多会话并发**：聊天会话可以同时运行，切换会话不会打断另一个聊天；Agent（设备操作）全局同一时间只允许一个，冲突时给出提示和「重试进入手机模式」按钮，聊天仍可继续。
 - **流式输出**：SSE 流式返回，边生成边显示；带思考过程、打字机光标和动效。
 - **附件分析**：
   - 支持一次上传多张图片/多个文件；
@@ -17,9 +18,11 @@
   - 不支持格式会明确提示，不会假装读过。
 - **附件预览**：已发送图片可点开全屏遮罩预览，支持双指缩放/旋转、双击还原、多图左右滑动；文件用系统应用打开。
 - **耗时统计**：每条助手回复显示本轮耗时（含附件解析/工具调用），会话累计总耗时。
+- **Agent 状态可见**：Agent 运行时通知栏显示「第 N 步 · 等待模型/操作中/等待确认」、运行时长和最后更新时间，可一键停止或回到会话；设置里可开启可选悬浮状态条（需要悬浮窗权限，默认关闭，可能出现在截图/OCR 中）。
 - **手机操作确认**：首次需要读取/控制手机时，在聊天框内弹一次确认卡；允许后本会话不再询问。
 - **ReAct Agent**：OpenAI 兼容 function calling，循环执行「观察 → 思考 → 动作 → 校验」。
-- **通用原子工具**：点击、长按、滑动、输入、启动 App、读无障碍树、截图、OCR、等待、校验、记忆、计划等。
+- **按模式加载工具**：聊天默认不发送设备工具；模型判断需要操作手机时先调用 `enter_agent_mode`，授权后才加载设备工具。设备模式默认只发核心工具，长截图/视觉/答题/文件/shell 等高级能力用 `load_tools` 按组加载，避免几十个 schema 干扰模型。
+- **通用原子工具**：点击、长按、滑动、输入、启动 App、读无障碍树、截图、OCR、等待、校验、记忆、计划等；高级工具组仍可通过 `load_tools(all)` 全部加载，不会丢失能力。
 - **本地 OCR**：
   - ML Kit 中文识别；
   - PP-OCRv3 ONNX（det + rec）本地推理；
@@ -28,7 +31,10 @@
 - **通用答题/表单**：`answer_form` 自动读题、三模型独立作答投票、逐题像素核对、跨屏按选项字母确认，全部答完才提交。
 - **按 App 隔离的记忆**：`files/memory/<package>.md`，每轮自动注入当前前台 App 的简短记忆；任务完成后会自动整理稳定入口/控件/坑，写入该 App 的记忆。
 - **远程步骤日志**：可选接入 `clouddream-server` 的 `/logReport`，按任务/步骤上报输入输出，便于排查与优化。
-- **会话与统计**：历史会话可继续、可删除；每个会话显示累计 tokens、上下文长度、消息数/步骤数、累计耗时。
+- **会话与统计**：历史会话可继续、重命名、置顶、收藏、归档、搜索、导出 Markdown；每个会话显示累计 tokens、上下文长度、消息数/步骤数、累计耗时；新会话会根据首轮对话自动生成短标题和摘要。
+- **消息操作**：长按消息可复制、引用、编辑并重新生成、重新生成助手回复，或从该消息分支出新会话。
+- **记忆中心**：设置 → 记忆，可查看、编辑、删除按 App 隔离的简短记忆；统计页可看 token/上下文/耗时并配置每 1M token 单价估算费用。
+- **按会话模型**：点击输入框下方模型名可切换本会话模型，不影响其他会话和全局默认。
 - **Markdown 输出**：标题、列表、加粗、行内代码、代码块；代码块带语言和复制按钮，整条消息也可复制。
 
 ## 统一对话 / 会话
@@ -39,7 +45,7 @@
   - 允许后写入当前会话 `phone_allowed`，本会话后续设备操作不再询问；
   - 拒绝则本次不执行，下一次仍会询问。
 - 每条会话持久化消息、附件元数据、Agent 步骤、结果、token/上下文/累计耗时；
-  菜单 →「历史会话」可回到旧会话继续，菜单 →「新建会话」可开新会话，会话行右侧可删除。
+  菜单 →「历史会话」可回到旧会话继续，菜单 →「新建会话」可开新会话；会话行右侧 `⋮` 可置顶/收藏/归档/重命名/导出/删除。
 - 已发送的图片可点击全屏预览（缩放/旋转/多图左右切换）；文件点击用系统应用打开。
 - 切换会话后继续发消息：最近 4 条历史消息和附件解析摘要会作为 `priorContext` 带入新任务。
 
@@ -92,14 +98,16 @@ adb shell settings put secure accessibility_enabled 1
 
 ### 4. 配置 LLM
 
-打开 App 右上角菜单 → **Settings**：
+打开 App 右上角菜单 → **设置**，设置页分为「模型」「日志」两个分类：
 
+- 设置页标题右侧会显示当前 App 的 ROOT 状态：已授权为绿色「已 ROOT」，未授权/无 ROOT 为灰色「未 ROOT」；只查询授权状态，不会主动弹 root 请求；
 - `Base URL`：OpenAI 兼容地址，填到 `/v1` 或只填域名；
 - `API Key`；
-- `Model`：例如 `deepseek-v4.1-flash`；
-- 点 `Save` 保存，或 `Test` 拉取模型列表验证连通性。
+- `模型 ID`：例如 `deepseek-v4.1-flash`；
+- 点 **拉取模型列表** 会显示接口返回的全部模型名称，点击任意模型即可切换并自动保存；
+- 也可以手动填写模型 ID 后点 **保存模型配置**。
 
-首次使用请在 Settings 里填写自己的 BaseUrl / API Key / 模型；仓库不包含真实 Key。
+首次使用请在「设置 → 模型」里填写自己的 BaseUrl / API Key / 模型；仓库不包含真实 Key。
 
 ### 5. 执行任务
 
@@ -156,11 +164,11 @@ D <选项>
 
 1. 打开日志系统 →「日志报告」→「接入凭证」；
 2. 选择项目节点，生成 6 位一次性校验码；
-3. App 菜单 → Settings → **Remote trace**：
+3. App 菜单 → 设置 → **日志** 分类：
    - `Log Base URL` 默认 `https://api.catfee.cn`；
    - 输入校验码 → `Exchange`；
    - 成功后自动填入 Agent JWT、显示绑定项目并打开开关；
-   - 点 `Save trace config`。
+   - 点「保存日志配置」。
 
 也可以直接粘贴已有的 Agent Token 并打开开关。
 
@@ -211,7 +219,7 @@ Content-Type: application/json
 | 类别 | 工具示例 |
 | --- | --- |
 | 观察 | `observe`、`read_page`、`screenshot`、`ocr`、`long_ocr`、`find_text`、`get_activity`、`app_info`、`get_prop`、`list_packages` |
-| 操作 | `tap`、`double_tap`、`long_press`、`swipe`、`swipe_direction`、`key`、`input_text`、`clear_text`、`set_text_id`、`tap_text`、`tap_id`、`tap_desc`、`launch_app`、`launch_activity`、`stop_app`、`open_url`、`settings_get`、`settings_put`、`shell` |
+| 操作 | `tap`、`tap_node`、`double_tap`、`long_press`、`swipe`、`swipe_direction`、`key`、`input_text`、`clear_text`、`set_text_id`、`launch_app`、`launch_activity`、`stop_app`、`open_url`、`settings_get`、`settings_put`、`shell` |
 | 等待/校验 | `wait`、`wait_for_text`、`verify_text`、`verify_option`、`verify_question`、`verify_changed`、`scroll_to_text` |
 | 表单/答题 | `answer_form`、`list_options` |
 | 记忆/计划 | `memory_read`、`memory_write`、`memory_list`、`note`、`todo_write`、`todo_read` |
@@ -219,7 +227,7 @@ Content-Type: application/json
 | 文件 | `file_list`、`file_read`、`file_write` |
 | 控制 | `finish`、`tool_list` |
 
-工具清单以 `AgentTools.definitions()` 为准。
+工具清单以 `AgentTools.definitions(session)` 为准：聊天模式只有 `enter_agent_mode`；设备模式为 21 个核心工具 + `load_tools`，高级组按需加载，`all` 可恢复完整工具集。
 
 ---
 
@@ -271,12 +279,15 @@ magisk/                          # Magisk 模块相关文件
 - 便签/计划分别限制 4K/3K 字符，防止长任务自己把上下文撑爆；
 - 连续重复调用、连续无界面变化、只观察不动作时，会注入硬提醒（user 消息）；
 - 动作类工具完全相同的调用连续出现 3 次会被拒绝，6 次会终止任务；滚动/等待类不受此限制；
-- tap/long_press/double_tap/swipe 会校验坐标必须在当前屏幕内，越界直接拒绝并返回屏幕尺寸；
+- tap/long_press/double_tap/swipe 使用**当前显示方向**坐标（横屏时宽高互换），越界直接拒绝；注入 uinput 前自动转换为设备 natural 坐标；
+- `observe` 第一行会同时给出 `Screen: 宽x高 rotation=角度`；`see_screen` 会同时给显示尺寸和图片尺寸，缩放时按比例换算；
+- `shell` 只允许只读查询，禁止 `input tap/swipe/keyevent`、`sendevent` 等 UI 注入，避免绕过坐标校验；
 - see_screen 发送原分辨率截图并要求绝对像素坐标；read_page/see_screen 对未变化页面做缓存，避免重复大结果；
 - 任务完成后自动整理 App 记忆（只用稳定入口/控件/坑，禁止题目答案和一次性数据）；
 - 动作后默认等待页面稳定再读取，减少读到旧界面的概率；
 - 优先使用无障碍读页面，读不到时降级到 OCR/截图；
-- 所有页面操作使用屏幕绝对坐标，滚动后重新识别坐标，不复用旧值；
+- 所有页面操作使用当前显示方向坐标，滚动/旋转后重新识别坐标，不复用旧值；
+- 宽屏/横屏下消息区限制最大宽度并居中，底部弹层限制宽度并补导航栏 inset，避免气泡被拉成窄条或按钮贴边被裁切；
 - 长等待（`wait` / `wait_for_text`）单次最长 5 分钟，每 15 秒发一条进度；LLM 请求超过 20 秒也会发心跳和上下文规模。
 
 ---
@@ -294,7 +305,7 @@ magisk/                          # Magisk 模块相关文件
 
 - 上下文现在按 60 条 / 40K 字符双预算裁剪，单条工具结果最多 10K 字符；
 - 任务目标每轮固定在 system，不会因为裁剪丢失；旧会话目标只作参考，当前目标优先；
-- 动作类工具连续重复会被拒绝，tap 坐标越界也会直接报错并给出屏幕尺寸；
+- 动作类工具连续重复会被拒绝，tap 坐标越界也会直接报错并给出当前显示尺寸/rotation；
 - `wait` / `wait_for_text` 单次最长 5 分钟，每 15 秒发进度；需要更久时 Agent 会重新发起；
 - LLM 请求超过 20 秒会显示心跳和当前上下文规模；
 - 远程日志的 `context.chars`、`context.messages`、`llm_ms` 可以直接定位是否是上下文过大。
@@ -305,7 +316,7 @@ magisk/                          # Magisk 模块相关文件
 手机所连 Wi‑Fi 可能被强制门户拦截。先完成该 Wi‑Fi 认证，或换网络。App 允许 cleartext HTTP，但强制门户仍会拦截。
 
 **远程日志没有出现？**
-- Settings 里 Remote trace 是否打开；
+- 设置 → 日志里「远程日志」是否打开；
 - 是否显示绑定项目和「上报成功」状态；
 - 日志系统筛选的项目/时间范围是否正确；
 - JWT 是否被吊销（吊销后重新生成校验码）。

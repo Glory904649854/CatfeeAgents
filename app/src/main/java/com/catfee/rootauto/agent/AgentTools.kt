@@ -7,6 +7,7 @@ import com.catfee.rootauto.llm.LlmSettings
 import com.catfee.rootauto.ocr.LongOcr
 import com.catfee.rootauto.root.DaemonClient
 import com.catfee.rootauto.root.RootShell
+import com.catfee.rootauto.root.ScreenGeometry
 import com.catfee.rootauto.root.ScreenVision
 import org.json.JSONArray
 import org.json.JSONObject
@@ -45,13 +46,158 @@ object AgentTools {
     /** observe 之后等待界面稳定的默认时间, 太短会读到旧界面 */
     const val DEFAULT_SETTLE_MS = 800L
 
+    /** 单次任务内的工具可见性状态, 不跨任务共享 */
+    class Session {
+        var agentMode: Boolean = false
+        var agentBlocked: Boolean = false
+        val activeGroups: MutableSet<String> = mutableSetOf()
+    }
+
+    /**
+     * 设备模式的核心工具: 覆盖观察、点击、输入、等待、校验、记忆和结束。
+     * 其余能力放在 GROUP_TOOLS 里按需加载, 避免每轮给模型塞 50+ 个 schema。
+     */
+    private val CORE_TOOLS = setOf(
+        "observe", "tap", "tap_node", "swipe", "input_text", "key",
+        "launch_app", "open_url", "wait", "wait_for_text",
+        "find_text", "scroll_to_text", "get_activity", "ocr",
+        "verify_text", "verify_changed", "note", "todo_write",
+        "memory_read", "memory_write", "finish"
+    )
+
+    private val GROUP_TOOLS: Map<String, Set<String>> = mapOf(
+        "inspect" to setOf("read_page", "screenshot", "long_ocr", "see_screen"),
+        "form" to setOf(
+            "list_options", "verify_option", "verify_question",
+            "answer_form", "ask_llm", "second_opinion"
+        ),
+        "input" to setOf(
+            "long_press", "double_tap", "swipe_direction",
+            "clear_text", "set_text_id"
+        ),
+        "apps" to setOf(
+            "launch_activity", "stop_app", "list_packages", "app_info", "get_prop"
+        ),
+        "system" to setOf("shell", "settings_get", "settings_put"),
+        "files" to setOf("file_list", "file_read", "file_write"),
+        "memory" to setOf("memory_list", "todo_read")
+    )
+
+    /** 按任务目标自动加载常用高级组; 模型仍可用 load_tools 手动补 */
+    fun activateForGoal(session: Session, goal: String) {
+        val text = goal.lowercase()
+        fun hit(vararg keys: String) = keys.any { text.contains(it) }
+
+        if (hit("答题", "题目", "考试", "测验", "问卷", "作业", "表单", "选项", "提交", "填空")) {
+            session.activeGroups.add("form")
+            session.activeGroups.add("inspect")
+        }
+        if (hit("视频", "图片", "截图", "ocr", "识别", "长页", "长截图", "画面", "视觉", "看看", "看一下")) {
+            session.activeGroups.add("inspect")
+        }
+        if (hit("长按", "双击", "清空", "输入框", "方向滑动", "滑动方向")) {
+            session.activeGroups.add("input")
+        }
+        if (hit("包名", "activity", "应用信息", "卸载", "安装", "停止应用", "启动activity", "属性")) {
+            session.activeGroups.add("apps")
+        }
+        if (hit("shell", "设置", "权限", "系统", "adb")) {
+            session.activeGroups.add("system")
+        }
+        if (hit("文件", "目录", "路径", "读写", "保存到")) {
+            session.activeGroups.add("files")
+        }
+        if (hit("记忆", "计划", "清单")) {
+            session.activeGroups.add("memory")
+        }
+        if (hit("全部工具", "所有工具", "高级工具")) {
+            session.activeGroups.add("all")
+        }
+    }
+
+    /** 当前会话是否允许调用某个工具 (防止模型幻觉出未加载的工具) */
+    fun isToolEnabled(session: Session, name: String): Boolean {
+        if (session.agentBlocked) return false
+        if (name == "enter_agent_mode" || name == "load_tools") return true
+        if (!session.agentMode) return false
+        if (name in CORE_TOOLS) return true
+        if ("all" in session.activeGroups) {
+            return GROUP_TOOLS.values.any { name in it }
+        }
+        return session.activeGroups.any { name in GROUP_TOOLS[it].orEmpty() }
+    }
+
+    /** 处理 load_tools 的参数, 返回给模型的结果 */
+    fun loadGroups(session: Session, csv: String): String {
+        val names = csv.split(',', '，', ' ', '\n')
+            .map { it.trim().lowercase() }
+            .filter { it.isNotEmpty() }
+        if (names.isEmpty()) return "load_tools 需要 groups, 例如 inspect,form 或 all"
+        if ("all" in names) {
+            session.activeGroups.add("all")
+            return "已加载全部高级工具组, 下一轮生效。"
+        }
+        val known = GROUP_TOOLS.keys
+        val loaded = names.filter { it in known }.toSet()
+        val unknown = names.filter { it !in known }
+        session.activeGroups.addAll(loaded)
+        return buildString {
+            if (loaded.isNotEmpty()) append("已加载工具组: ").append(loaded.joinToString(", ")).append("; 下一轮生效。")
+            if (unknown.isNotEmpty()) {
+                if (loaded.isNotEmpty()) append(' ')
+                append("未知工具组: ").append(unknown.joinToString(", "))
+                    .append("。可用: ").append(known.joinToString(", ")).append(", all")
+            }
+        }
+    }
+
+    /**
+     * 功能: 生成当前模式/已加载组对应的工具定义
+     * 参数: session 本次任务的工具可见性
+     * 返回: JSONArray, 可直接放入请求体 tools 字段
+     */
+    fun definitions(session: Session): JSONArray {
+        if (session.agentBlocked) return JSONArray()
+        if (!session.agentMode) {
+            return JSONArray().put(enterAgentModeDefinition())
+        }
+        val allowed = HashSet(CORE_TOOLS)
+        if ("all" in session.activeGroups) {
+            GROUP_TOOLS.values.forEach { allowed.addAll(it) }
+        } else {
+            session.activeGroups.forEach { allowed.addAll(GROUP_TOOLS[it].orEmpty()) }
+        }
+        val out = JSONArray()
+        for (i in 0 until allDefinitions.length()) {
+            val item = allDefinitions.optJSONObject(i) ?: continue
+            val name = item.optJSONObject("function")?.optString("name").orEmpty()
+            if (name in allowed) out.put(item)
+        }
+        out.put(loadToolsDefinition())
+        return out
+    }
+
+    private fun enterAgentModeDefinition(): JSONObject = tool(
+        "enter_agent_mode",
+        "当用户明确要求查看或操作手机时调用。调用后 App 会请求一次授权, 并加载设备工具; 普通聊天/问答不要调用。",
+        obj()
+    )
+
+    private fun loadToolsDefinition(): JSONObject = tool(
+        "load_tools",
+        "加载当前任务需要的高级工具组, 下一轮生效。组: inspect(完整页面/截图/长截图/视觉), form(答题/选项/校验/子模型), input(长按/双击/方向滑动/清空/按id输入), apps(Activity/停止App/包名/应用信息/属性), system(shell/设置读写), files(文件读写), memory(记忆列表/计划读取), all(全部)。",
+        obj()
+            .put("groups", prop("string", "逗号分隔的组名, 如 inspect,form; 或 all"))
+            .also { it.put("required", JSONArray().put("groups")) }
+    )
+
     /**
      * 功能: 生成全部工具定义 (OpenAI function 格式)
      * 参数: 无
-     * 返回: JSONArray, 可直接放入请求体 tools 字段
-     * 使用场景: 每轮 ReAct 请求都带上
+     * 返回: JSONArray
+     * 使用场景: 由 definitions(session) 过滤后发给模型
      */
-    fun definitions(): JSONArray = JSONArray()
+    private fun buildAllDefinitions(): JSONArray = JSONArray()
         .put(tool("observe", "获取当前屏幕的界面元素列表。每次操作后都应调用它确认结果。", obj()))
         .put(
             tool(
@@ -69,6 +215,16 @@ object AgentTools {
                     .put("text", prop("string", "控件上显示的文字或描述, 支持部分匹配"))
                     .put("exact", prop("boolean", "true=完全相等, 默认 false 表示包含匹配"))
                     .also { it.put("required", JSONArray().put("text")) }
+            )
+        )
+        .put(
+            tool(
+                "tap_node", "按文字/描述/id 点击控件, 比坐标点击稳定。",
+                obj()
+                    .put("target", prop("string", "要匹配的文字/描述/id 后缀"))
+                    .put("by", prop("string", "text=文字(默认), desc=描述, id=resource-id 后缀"))
+                    .put("exact", prop("boolean", "仅 by=text 时生效"))
+                    .also { it.put("required", JSONArray().put("target")) }
             )
         )
         .put(
@@ -467,6 +623,9 @@ object AgentTools {
             )
         )
 
+    /** 全部工具只构建一次, 每轮按 Session 过滤 */
+    private val allDefinitions: JSONArray by lazy { buildAllDefinitions() }
+
     /** 构造一个 function 工具定义 */
     private fun tool(name: String, desc: String, params: JSONObject) = JSONObject()
         .put("type", "function")
@@ -607,6 +766,14 @@ object AgentTools {
                     args.optString("keyword"),
                     args.optLong("timeout_ms", 8000)
                 )
+                "tap_node" -> when (args.optString("by", "text").lowercase()) {
+                    "id" -> ToolRuntime.tapId(args.optString("target"))
+                    "desc" -> ToolRuntime.tapDesc(args.optString("target"))
+                    else -> ToolRuntime.tapText(
+                        args.optString("target"),
+                        args.optBoolean("exact", false)
+                    )
+                }
                 "tap_desc" -> ToolRuntime.tapDesc(args.optString("keyword"))
                 "tap_id" -> ToolRuntime.tapId(args.optString("id_suffix"))
                 "long_press" -> {
@@ -614,13 +781,20 @@ object AgentTools {
                     val y = args.optInt("y")
                     val bad = invalidCoord(x, y)
                     if (bad != null) bad
-                    else ToolRuntime.longPress(x, y, args.optInt("hold_ms", 800))
+                    else {
+                        val r = ToolRuntime.longPress(x, y, args.optInt("hold_ms", 800))
+                        if (r.startsWith("已长按")) "$r; 请确认界面变化" else r
+                    }
                 }
                 "double_tap" -> {
                     val x = args.optInt("x")
                     val y = args.optInt("y")
                     val bad = invalidCoord(x, y)
-                    if (bad != null) bad else ToolRuntime.doubleTap(x, y)
+                    if (bad != null) bad
+                    else {
+                        val r = ToolRuntime.doubleTap(x, y)
+                        if (r.startsWith("已双击")) "$r; 请确认界面变化" else r
+                    }
                 }
                 "swipe_direction" -> ToolRuntime.swipeDirection(
                     args.optString("direction", "up"),
@@ -672,7 +846,8 @@ object AgentTools {
                         args.optString("title"),
                         args.optInt("verify_times", 3),
                         args.optBoolean("submit", true),
-                        args.optBoolean("reset", true)
+                        args.optBoolean("reset", true),
+                        providerOverride = provider
                     ) { Log.i(TAG, it) }
                     "submitted=${r.submitted}, answered=${r.answered}, ${r.message}"
                 }
@@ -685,7 +860,8 @@ object AgentTools {
                         bad
                     } else {
                         val ok = DaemonClient.tap(x, y)
-                        if (ok) "已点击 ($x, $y)" else "点击失败: daemon 无响应"
+                        if (ok) "已发送点击 ($x,$y); 请用 observe/verify_changed 确认界面变化"
+                        else "点击失败: 坐标无法注入或 daemon 无响应"
                     }
                 }
                 "tap_text" -> ToolRuntime.tapText(
@@ -705,7 +881,7 @@ object AgentTools {
                             x1, y1, x2, y2,
                             args.optInt("duration_ms", 300)
                         )
-                        if (ok) "已滑动" else "滑动失败"
+                        if (ok) "已发送滑动; 请用 observe 确认页面变化" else "滑动失败"
                     }
                 }
                 "input_text" -> {
@@ -781,15 +957,13 @@ object AgentTools {
      * 返回: 紧凑文本
      * 使用场景: 列表扫描、找控件、比 observe 更全
      */
-    /** 坐标越界直接拒绝, 并把屏幕尺寸/换算方法告诉模型; 避免反复点屏幕外 */
+    /** 坐标越界直接拒绝, 并把当前显示方向/尺寸告诉模型; 避免反复点屏幕外 */
     private suspend fun invalidCoord(x: Int, y: Int): String? {
         val (w, h) = DaemonClient.screenSize()
-        if (x !in 0 until w || y !in 0 until h) {
-            return "坐标越界: ($x,$y), 当前屏幕 ${w}x${h}。tap 坐标必须是屏幕像素; " +
-                "如果来自 see_screen 的 0~1000 归一化坐标, 先换算为 " +
-                "x*${w}/1000, y*${h}/1000; 或者改用 tap_text / find_text / tap_id。越界坐标不会执行。"
-        }
-        return null
+        return ScreenGeometry.invalid(x, y) ?: if (x !in 0 until w || y !in 0 until h) {
+            "坐标越界: ($x,$y), 当前显示 ${w}x${h}。tap 坐标必须是当前显示方向像素; " +
+                "不要用 0~1000 归一化值。可改用 tap_node / find_text。越界坐标不会执行。"
+        } else null
     }
 
     private fun readPage(): String {
@@ -842,6 +1016,12 @@ object AgentTools {
             return "无障碍服务刚被重新拉起, 请稍后再次 observe。"
         }
         svc.cachedActivity = extractFocusTarget(focus)
+        // 先刷新一次 daemon 的 natural 尺寸, 让 snapshot 按当前 rotation 输出 display 坐标
+        try {
+            DaemonClient.screenSize()
+        } catch (e: Exception) {
+            Log.w(TAG, "刷新屏幕尺寸失败: ${e.message}")
+        }
         val snap = svc.snapshot()
         if (snap != null && snap.nodes.isNotEmpty()) {
             val text = snap.toPromptText()

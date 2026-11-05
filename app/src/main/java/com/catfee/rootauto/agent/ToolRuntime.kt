@@ -9,6 +9,7 @@ import com.catfee.rootauto.llm.LlmSettings
 import com.catfee.rootauto.ocr.OcrEngine
 import com.catfee.rootauto.root.DaemonClient
 import com.catfee.rootauto.root.RootShell
+import com.catfee.rootauto.root.ScreenGeometry
 import com.catfee.rootauto.root.ScreenVision
 import kotlinx.coroutines.delay
 import org.json.JSONArray
@@ -349,8 +350,13 @@ object ToolRuntime {
             if (exact) v == keyword else v.contains(keyword)
         } ?: return "未找到「$keyword」, 先用 find_text 看候选"
         val target = clickableAncestor(tree, node) ?: node
-        val ok = DaemonClient.tap(target.bounds.centerX(), target.bounds.centerY())
-        return if (ok) "已点击「$keyword」(${target.bounds.centerX()},${target.bounds.centerY()})" else "点击失败"
+        val cx = target.bounds.centerX()
+        val cy = target.bounds.centerY()
+        DaemonClient.screenSize()
+        ScreenGeometry.invalid(cx, cy)?.let { return "找到「$keyword」但 $it" }
+        val ok = DaemonClient.tap(cx, cy)
+        return if (ok) "已发送点击「$keyword」($cx,$cy); 请用 observe/verify_changed 确认界面是否变化"
+        else "点击失败: 坐标无法注入或 daemon 无响应"
     }
 
     /** 按 contentDescription 点击 */
@@ -360,8 +366,13 @@ object ToolRuntime {
         val node = tree.firstOrNull { it.desc.contains(keyword) }
             ?: return "未找到描述包含「$keyword」的节点"
         val target = clickableAncestor(tree, node) ?: node
-        val ok = DaemonClient.tap(target.bounds.centerX(), target.bounds.centerY())
-        return if (ok) "已点击描述「$keyword」" else "点击失败"
+        val cx = target.bounds.centerX()
+        val cy = target.bounds.centerY()
+        DaemonClient.screenSize()
+        ScreenGeometry.invalid(cx, cy)?.let { return "找到「$keyword」但 $it" }
+        val ok = DaemonClient.tap(cx, cy)
+        return if (ok) "已发送点击描述「$keyword」($cx,$cy); 请确认界面变化"
+        else "点击失败: 坐标无法注入或 daemon 无响应"
     }
 
     /** 按 resource-id 后缀点击 */
@@ -371,8 +382,13 @@ object ToolRuntime {
         val node = tree.firstOrNull { it.resourceId.endsWith(idSuffix) }
             ?: return "未找到 id 以「$idSuffix」结尾的节点"
         val target = clickableAncestor(tree, node) ?: node
-        val ok = DaemonClient.tap(target.bounds.centerX(), target.bounds.centerY())
-        return if (ok) "已点击 id=$idSuffix" else "点击失败"
+        val cx = target.bounds.centerX()
+        val cy = target.bounds.centerY()
+        DaemonClient.screenSize()
+        ScreenGeometry.invalid(cx, cy)?.let { return "找到 id=$idSuffix 但 $it" }
+        val ok = DaemonClient.tap(cx, cy)
+        return if (ok) "已发送点击 id=$idSuffix ($cx,$cy); 请确认界面变化"
+        else "点击失败: 坐标无法注入或 daemon 无响应"
     }
 
     suspend fun longPress(x: Int, y: Int, holdMs: Int): String =
@@ -464,8 +480,16 @@ object ToolRuntime {
         return if (r.ok && !r.stdout.contains("Error")) "已打开 $url" else "打开失败: ${(r.stdout + r.stderr).take(200)}"
     }
 
+    private val shellUiInject = Regex(
+        """(?i)\b(input\s+(tap|swipe|motionevent|keyevent|text)|sendevent)\b"""
+    )
+
     suspend fun shell(cmd: String): String {
         if (cmd.isBlank()) return "命令为空"
+        if (shellUiInject.containsMatchIn(cmd)) {
+            return "shell 禁止注入 UI 事件。请改用 tap / tap_node / swipe / key / input_text; " +
+                "shell 只用于只读查询。"
+        }
         val r = RootShell.exec(cmd, 20_000)
         val out = (r.stdout + if (r.stderr.isNotBlank()) "\n[stderr]\n" + r.stderr else "").trim()
         return out.take(4000).ifBlank { "命令执行完成, 无输出 (code=${r.code})" }

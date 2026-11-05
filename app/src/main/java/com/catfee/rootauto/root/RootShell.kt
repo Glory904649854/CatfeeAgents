@@ -85,4 +85,18 @@ object RootShell {
             false
         }
     }
+
+    /**
+     * 功能: 只查询 App 当前是否已被授予 root, 不主动申请/弹授权
+     * 返回: true=已授权, false/null=未授权或设备无 root
+     * 使用场景: 设置页的 ROOT 状态标志
+     */
+    fun appGrantedRoot(): Boolean? = try {
+        // isAppGrantedRoot() 在部分环境会返回 null; 回退到 getShell() 实际探测一次。
+        // 已授权的设备直接复用常驻 shell, 不会重复弹窗。
+        Shell.isAppGrantedRoot() ?: Shell.getShell().isRoot
+    } catch (e: Exception) {
+        Log.w(TAG, "查询 root 授权失败: ${e.message}")
+        false
+    }
 }

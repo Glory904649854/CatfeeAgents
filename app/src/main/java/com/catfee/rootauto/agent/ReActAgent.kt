@@ -73,7 +73,7 @@ object ReActAgent {
         "observe", "read_page", "screenshot", "ocr", "long_ocr", "see_screen",
         "get_activity", "find_text", "list_options", "scroll_to_text", "wait_for_text",
         "verify_text", "verify_option", "verify_question", "verify_changed",
-        "tap", "tap_text", "tap_id", "tap_desc", "double_tap", "long_press",
+        "tap", "tap_text", "tap_node", "tap_id", "tap_desc", "double_tap", "long_press",
         "swipe", "swipe_direction", "key", "input_text", "clear_text", "set_text_id",
         "launch_app", "launch_activity", "stop_app", "open_url",
         "settings_get", "settings_put", "shell",
@@ -83,7 +83,7 @@ object ReActAgent {
 
     /** 完全相同且连续重复时大概率是卡死的动作类工具; 滚动/等待类不在此列 */
     private val REPEAT_BLOCK_TOOLS = setOf(
-        "tap", "tap_text", "tap_id", "tap_desc", "double_tap", "long_press",
+        "tap", "tap_text", "tap_node", "tap_id", "tap_desc", "double_tap", "long_press",
         "input_text", "clear_text", "set_text_id"
     )
 
@@ -105,74 +105,53 @@ object ReActAgent {
      * 说明: 刻意写得短而硬, 手机上步骤多, 提示词越短每轮 token 越省, 决策也越不容易跑偏。
      */
     private val SYSTEM_PROMPT = """
-        最高优先级: 你同时是通用聊天助手和手机操作 Agent。
-        - 普通聊天、问答、解释、分析用户上传的图片/文件: 直接用自然语言回答,
-          不要调用任何工具, 不要调用 observe, 也不要调用 finish。
-        - 只有用户明确要求查看/操作手机 (点击、输入、打开 App、做任务) 时, 才使用下面的手机操作规则。
-          首次设备操作会由 App 弹确认卡, 用户允许后本会话不再询问。
-        - 用户上传的图片已经由 App 本地 OCR, 文件已经本地解析; 解析文本会附在用户消息里,
-          直接基于这些文字回答, 不要假装看到了原始图片。
-        - 当前任务目标优先于历史会话和 App 记忆。历史里的旧目标只作参考, 不要因为旧记忆/旧会话
-          切回答题、刷课等旧任务; 用户现在让你看视频就只看视频。
-        - tap 坐标必须是当前屏幕像素; 先确认 x < 屏幕宽, y < 屏幕高。
-          see_screen 返回的是绝对像素; 如果拿到的是 0~1000 归一化值, 先换算再点。
-          越界坐标会被直接拒绝, 不要反复重试同一个越界坐标。
+        你叫 CatfeeAgents, 同时是聊天助手和 Android 操作 Agent。
 
-        你是一个通用的 Android 手机操作 Agent。你通过工具直接控制这台真机, 可以操作任意 App 完成用户目标。
-        工具覆盖: 观察(无障碍/OCR/截图/视觉)、点击(坐标/文字/描述/id/长按/双击)、滑动、输入、
-        查找与等待、滚动找文字、启停应用、Activity 跳转、shell/属性/设置/文件、LLM 子问答。
+        【聊天模式】
+        - 普通问答、解释、附件分析: 直接回答, 不调用工具, 不 observe, 不 finish。
+        - 用户明确要求查看/操作手机时, 先调用 enter_agent_mode; 授权后设备工具才会出现。
+        - 图片/文件已由 App 本地 OCR/解析, 解析文本附在用户消息里; 直接基于文本回答,
+          不要假装看到了原始图片。
+        - 回答简洁; 用户没有要求长篇时, 控制在几句话内。
 
-        工作方式:
-        1. 先 observe 或 get_activity 确认当前界面; 每次操作后重新确认, 不要凭想象连续操作。
-        2. 点击优先 tap_text / tap_desc / tap_id; 只有拿不到文本时才用 tap 坐标。
-        3. 无障碍读不到内容 (WebView / iframe / 自绘控件) 时, 调用 ocr 看文字+坐标;
-           需要理解题目/图片时调用 see_screen 让视觉模型读屏。
-        4. 列表内容需要滚动才能看全: 用 swipe_direction 或 scroll_to_text, 再重新观察。
-        5. 看到题目、进度、数量、选项等关键信息, 用 note 记录下来; 最后用 finish 汇总。
-        6. 连续两轮界面没有变化, 换一种做法 (返回、刷新、换入口、用 OCR/视觉)。
-        7. 做测验/表单/问卷时, 必须一题一题做, 不要一把梭:
-           - 先用 todo_write 把每道题列成清单项 (pending)
-           - 每题: ocr 读全题干和选项 -> ask_llm 作答 (不确定时用 second_opinion 问第二个模型)
-             -> 用 list_options 拿选项的当前坐标和选中状态 (滚动后必须重新调用, 不要复用旧坐标)
-             -> tap 选项
-             -> 连续调用 list_options 3 次核对本题所有选项的选中态, 3 次结果一致才通过
-           - 如果 list_options 找不到选项节点 (纯画布/iframe), 才退回 verify_question 连续 3 次
-           - 本题 3 次核对一致后, 再把 todo 该项标为 completed
-           - 全部题目完成后, 从头逐题再复查一遍 (重新 ocr + list_options 三次), 确认没有漏题/错选
-           - 最后才 verify_text 确认提交按钮/弹窗, 提交
-        8. 关键或不可逆操作 (提交、支付、删除、发送、答题、改设置) 前后必须验证:
-           至少两种独立证据 (文字 + 像素/视觉), 重要操作至少检查两次;
-           两次证据冲突时不要继续, 重新读页面再判断。
-        9. 多步骤任务先用 todo_write 列清单, 每完成一项更新状态; 清单会每轮注入上下文。
-        10. list_options 优先 (无障碍 checked/已选择, 最可靠);
-            verify_option/verify_question 是像素兜底, 页面没有无障碍选项节点时才用;
-            verify_text 确认文字/弹窗, verify_changed 判断动作是否真的改变了界面;
-            不要用 see_screen 猜复选框状态。
-        11. 不要连续 observe/ocr 超过 2 次; 如果结果提示"界面未变化/OCR 未变化",
-            换 find_text / verify_changed / 直接操作, 不要重复。
-        12. 操作前先核对页面身份: 用 get_activity / read_page 看标题和 Activity,
-            确认是目标任务再操作; 不是目标就先返回列表定位, 不要在错误页面里继续做。
-        13. 要进入列表中的某一项 (聊天/商品/设置项等) 时, 先回到上层列表,
-            用 find_text / scroll_to_text 定位后点击; 不要用「下一节/上一节」逐页翻找目标。
-        14. 遇到「未保存/未提交/确认退出」弹窗, 先处理弹窗 (保存/提交/确定/取消),
-            处理完再继续导航; 不要无视弹窗继续点。
-        15. 已执行超过 15 步仍没接近目标时, 停下来用 todo_write 重新规划, 或 finish 说明障碍。
-        16. 任务完成或确实无法继续时, 必须调用 finish, 在 summary 写清已完成什么、关键数据和障碍。
-        17. 每轮会注入「当前 App 记忆」(按包名隔离, 很短)。先按记忆里的入口/按钮/坑操作,
-            不要重新摸索; 记忆与当前页面不一致时, 以 observe/OCR 为准, 并顺手更新记忆。
-        18. 完成一个 App 的任务后, 用 memory_write 把本次发现的稳定入口/关键控件/易错点
-            写成简洁记忆 (≤600 字, 按包名隔离); 不要记题目答案或一次性数据。
-        19. 看视频等长时间等待用 wait_for_text("已完成", 300000), 超时后先 OCR/verify_text
-            看是否暂停或弹窗, 处理后再继续等; 不要用大量 wait 小步空转。
-        20. 整页选项式测验/表单: 先让题目显示在当前页, 调用 answer_form(title, verify_times=3, submit=true);
-            它内部让 deepseek-v4.1-flash、glm-5.3-flash、kimi-k2.6 各自独立作答并投票,
-            每题 3 次核对、整页复查后提交。失败再按第 7 条手动逐题做。
-        21. 题目/列表长于一屏时, 先用 long_ocr 滚动拼接识别整页, 再分析/作答;
-            不要只靠单屏 ocr, 否则滚到下面可能只看到选项、看不到题干。
-
-        注意:
-        - 坐标是像素, 屏幕尺寸在 observe 结果第一行。
-        - 不要执行与任务无关的操作; 不要 clear 应用数据、卸载应用、改系统设置。
+        【手机任务模式】
+        只有用户明确要求查看/操作手机时才进入。
+        - 当前目标优先于历史会话和 App 记忆; 不要执行旧会话里的旧任务。
+        - 每次只做一步。调用工具时 content 只写一句不超过 20 字的状态, 或直接留空;
+          不要复述计划、解释原因、输出步骤清单; 最终 finish summary 不超过 3 句。
+        - 坐标: observe 第一行给出 Screen: 宽x高 rotation=角度; tap/tap_node 一律用这个
+          当前显示坐标, 不要用截图缩放后的像素或 0~1000 归一化值; 越界会被拒绝。
+          see_screen 会同时给显示尺寸和图片尺寸, 按提示换算到显示坐标。
+        - 工具返回“已发送点击”只代表注入成功, 不代表页面响应; 点击后必须
+          observe/verify_changed 验证; 没变化就换 tap_node/find_text/ocr/坐标, 不要重复同一调用。
+        - 同一控件或子目标连续 2 次无效就换方法; 3 次仍失败标记 blocked 并继续下一项;
+          不要在一个按钮/一个弹窗上耗超过 5 步。
+        - 长任务先盘点: 先列出可执行项/未完成项并 todo_write; 逐项处理,
+          每完成或失败都更新; 不要从上次页面直接假设当前任务。
+        - 用户明确排除的标记/颜色/项目不要执行, 不要自行反转用户意图;
+          指令含糊时按字面执行, 并在 finish 说明取捨。
+        - 列表角标、颜色、图标只是线索, 不能单独作为完成/选中状态。状态以页面明确文字,
+          进度条、已观看时长或选项 checked 为准; 视觉判断与页面文字冲突时以文字为准。
+        - 有“任务/进度/学习记录/筛选”等明确状态入口时, 优先用它盘点, 不要逐个点列表项猜测;
+          逐项执行后必须验证实际结果, 失败先换入口/换方法, 仍失败就标 blocked 继续下一项。
+        - 观察要省: 先 observe; read_page/screenshot/long_ocr/see_screen 只在需要时用;
+          同一页面连续 2 次无变化就禁止再观察, 改动作或 finish。
+        - shell 只做只读查询; 禁止 input/sendevent 等 UI 注入; 点击/滑动/按键必须用原子工具。
+        - 默认只有核心工具。需要长截图/视觉/答题/文件/shell 等高级能力时,
+          先 load_tools 加载对应组 (inspect/form/input/apps/system/files/memory/all),
+          不要因为工具不在列表就放弃; 不同 App 优先 tap_node(text/desc/id), 自绘/WebView 用 ocr,
+          选项用 list_options, 不假设某个 App 的固定控件。
+        - 表单/答题先 load_tools(form), 再优先 answer_form(title, verify_times=3, submit=true);
+          失败再逐题: ocr -> 作答 -> list_options(滚动后重新调用) -> 点选项
+          -> 连续 3 次核对; 全部复查后再提交。
+        - 提交/支付/删除/发送/改设置前后至少两种独立证据; 证据冲突就停下重读页面。
+        - 要进入列表某项, 先回列表用 find_text 或 scroll_to_text 定位, 不要逐页翻。
+        - 先处理弹窗; 单个子目标超过 15 步仍没接近就重新规划或标记 blocked,
+          继续其他子目标, 不要整单卡死。
+        - 完成、部分完成或无法继续都必须 finish; summary 写结果、关键数据、blocked 项, 不超过 3 句。
+        - 任务完成后用 memory_write 记稳定入口/控件/坑(不超过 300 字),
+          不记答案或一次性数据。
+        - 不要做无关操作; 不要清数据、卸载应用、改系统设置。
     """.trimIndent()
 
     /**
@@ -196,7 +175,9 @@ object ReActAgent {
         onStreamContent: (String) -> Unit = {},
         onStreamReasoning: (String) -> Unit = {},
         ensurePhonePermission: suspend (tool: String, args: String) -> Boolean =
-            { _, _ -> true }
+            { _, _ -> true },
+        claimAgentMode: () -> String? = { null },
+        onPhase: (phase: String, step: Int, detail: String) -> Unit = { _, _, _ -> }
     ): String {
         if (!provider.usable) {
             onEvent(Event("error", "LLM 配置不完整, 请先填写并保存 BaseUrl / Key / 模型名"))
@@ -223,14 +204,14 @@ object ReActAgent {
                 append("\n\n===== 之前会话的上下文 =====\n")
                 append(priorContext.take(6_000))
             }
-            append("\n请先观察屏幕, 然后开始。")
         }
         val messages = JSONArray().put(
             JSONObject().put("role", "system").put("content", SYSTEM_PROMPT)
         ).put(
             JSONObject().put("role", "user").put("content", firstUser)
         )
-        val tools = AgentTools.definitions()
+        // 工具可见性按任务阶段变化: 聊天 -> enter_agent_mode -> 核心工具/按需组
+        val toolSession = AgentTools.Session()
         // 长期便签: 历史消息会被裁剪, 但便签每轮都注入 system, 保证关键数据不丢
         val notes = StringBuilder()
         // 任务清单: 多步骤任务由 Agent 自己维护, 每轮注入, 防止漏项
@@ -249,10 +230,12 @@ object ReActAgent {
                 currentStep = step
                 val stepStart = System.currentTimeMillis()
                 if (System.currentTimeMillis() - started > TOTAL_TIMEOUT_MS) {
+                    onPhase("error", step, "任务总时长超时")
                     onEvent(Event("error", "任务总时长超过 $TOTAL_TIMEOUT_MS ms, 已中断"))
                     AgentTrace.finish(context, false, "超时中断", step)
                     return "超时中断"
                 }
+                onPhase("waiting_llm", step, "")
                 trimHistory(messages)
                 val hints = StringBuilder()
                 if (todo.isNotEmpty()) {
@@ -263,10 +246,18 @@ object ReActAgent {
                 }
                 if (noChangeCount >= 2) {
                     hints.append("\n\n[系统提醒] 最近 $noChangeCount 个动作没有改变界面, 上一步可能无效; " +
-                        "用 verify_changed 确认, 或 find_text/read_page 重新定位, 换一种做法。")
+                        "用 verify_changed 确认, 或 find_text 重新定位, 换一种做法。")
+                }
+                if (noChangeCount >= 4) {
+                    hints.append("\n\n[系统提醒] 当前子目标已连续 $noChangeCount 次无变化, 很可能点不到/控件不可用。 " +
+                        "禁止继续重复同一个控件; 返回上层、换入口, 或标记 blocked 后继续其他子目标。")
                 }
                 if (observationOnly >= 3) {
                     hints.append("\n\n[系统提醒] 你已经连续观察 $observationOnly 次, 请给出实际动作或 finish, 不要只观察。")
+                }
+                if (observationOnly >= 5) {
+                    hints.append("\n\n[系统提醒] 连续观察 $observationOnly 次仍未动作, 当前页面信息已经足够; " +
+                        "立即执行一个动作, 或 finish 说明障碍。")
                 }
                 // 按当前前台 App 注入它的简短记忆 (入口/关键控件/坑)
                 val fgPkg = AppMemory.currentPackage()
@@ -295,6 +286,7 @@ object ReActAgent {
                     ?.optString("content").orEmpty()
                 val ctxChars = messages.toString().length
                 val ctxMsgs = messages.length()
+                val tools = AgentTools.definitions(toolSession)
                 onContext(ctxMsgs, ctxChars)
                 var r = chatWithHeartbeat(
                     provider, messages, tools, step, ctxChars, onEvent,
@@ -302,6 +294,7 @@ object ReActAgent {
                 )
                 var attempt = 1
                 while (!r.ok && attempt < 3) {
+                    onPhase("waiting_llm", step, "请求失败, 第 ${attempt + 1} 次重试")
                     val retryMsg = "LLM 请求失败(第 $attempt 次): ${r.error}; 5 秒后重试"
                     onEvent(Event("system", retryMsg))
                     AgentTrace.event(context, "warn", "LLM 重试 · Step $step", retryMsg)
@@ -313,6 +306,7 @@ object ReActAgent {
                     )
                 }
                 if (!r.ok) {
+                    onPhase("error", step, "LLM 请求失败")
                     onEvent(Event("error", "第 $step 轮请求失败(已重试 2 次): ${r.error}"))
                     AgentTrace.finish(context, false, "LLM 请求失败: ${r.error}", step)
                     return "LLM 请求失败: ${r.error}"
@@ -339,6 +333,16 @@ object ReActAgent {
                         AgentTrace.finish(context, true, r.content, step)
                         return r.content
                     }
+                    if (toolSession.agentBlocked) {
+                        if (step <= 2) {
+                            messages.put(
+                                JSONObject().put("role", "user")
+                                    .put("content", "当前不能进入手机操作模式, 请直接用文字回答用户, 并提示稍后点重试。")
+                            )
+                            continue
+                        }
+                        return "当前不能进入手机操作模式：另一个会话的 Agent 正在操作手机。请稍后重试。"
+                    }
                     if (step == 1) {
                         messages.put(
                             JSONObject().put("role", "user")
@@ -357,6 +361,7 @@ object ReActAgent {
                 val toolTraces = ArrayList<AgentTrace.ToolTrace>()
                 for (call in r.toolCalls) {
                     val t0 = System.currentTimeMillis()
+                    onPhase("operating", step, call.name)
                     onEvent(Event("tool", call.arguments, tool = call.name))
                     val callSig = call.name + "|" + call.arguments
                     if (callSig == lastCallSig) {
@@ -379,6 +384,98 @@ object ReActAgent {
                         }
                         continue
                     }
+                    if (!toolSession.agentMode && call.name != "enter_agent_mode") {
+                        val blocked = "聊天模式没有设备工具。需要查看/操作手机时先调用 enter_agent_mode。"
+                        onEvent(Event("system", blocked))
+                        toolTraces.add(
+                            AgentTrace.ToolTrace(
+                                call.name, call.arguments, blocked,
+                                System.currentTimeMillis() - t0
+                            )
+                        )
+                        messages.put(toolMessage(call.id, blocked))
+                        continue
+                    }
+                    if (!AgentTools.isToolEnabled(toolSession, call.name)) {
+                        val blocked = "工具 ${call.name} 当前未加载。需要高级能力时先 load_tools " +
+                            "加载对应组 (inspect/form/input/apps/system/files/memory/all)。"
+                        onEvent(Event("system", blocked))
+                        toolTraces.add(
+                            AgentTrace.ToolTrace(
+                                call.name, call.arguments, blocked,
+                                System.currentTimeMillis() - t0
+                            )
+                        )
+                        messages.put(toolMessage(call.id, blocked))
+                        continue
+                    }
+                    if (call.name == "enter_agent_mode") {
+                        if (toolSession.agentMode) {
+                            val already = "已经在手机操作模式, 直接继续任务。"
+                            onEvent(Event("system", already))
+                            toolTraces.add(
+                                AgentTrace.ToolTrace(
+                                    call.name, call.arguments, already,
+                                    System.currentTimeMillis() - t0
+                                )
+                            )
+                            messages.put(toolMessage(call.id, already))
+                            continue
+                        }
+                        val denied = claimAgentMode()
+                        if (denied != null) {
+                            toolSession.agentBlocked = true
+                            val blocked = "$denied 本次没有进入手机操作模式。不要继续调用 enter_agent_mode, " +
+                                "请直接用文字回答用户, 并提示他/她稍后点重试。"
+                            onEvent(Event("conflict", blocked, tool = call.name))
+                            toolTraces.add(
+                                AgentTrace.ToolTrace(
+                                    call.name, call.arguments, blocked,
+                                    System.currentTimeMillis() - t0
+                                )
+                            )
+                            messages.put(toolMessage(call.id, blocked))
+                            continue
+                        }
+                        if (!phoneGranted) {
+                            val allowed = ensurePhonePermission(call.name, call.arguments)
+                            if (!allowed) {
+                                AgentTrace.finish(context, false, "用户未允许控制手机", step)
+                                return "用户未允许控制手机"
+                            }
+                            phoneGranted = true
+                        }
+                        toolSession.agentMode = true
+                        AgentTools.activateForGoal(toolSession, goal)
+                        val entered = "已进入手机操作模式, 核心工具已加载。先 observe 确认页面; " +
+                            "需要长截图/视觉/答题/文件/shell 等高级能力时调用 load_tools。"
+                        onEvent(Event("result", entered, tool = call.name))
+                        toolTraces.add(
+                            AgentTrace.ToolTrace(
+                                call.name, call.arguments, entered,
+                                System.currentTimeMillis() - t0
+                            )
+                        )
+                        messages.put(toolMessage(call.id, entered))
+                        continue
+                    }
+                    if (call.name == "load_tools") {
+                        val groups = try {
+                            JSONObject(call.arguments).optString("groups")
+                        } catch (e: Exception) {
+                            ""
+                        }
+                        val loaded = AgentTools.loadGroups(toolSession, groups)
+                        onEvent(Event("result", loaded, tool = call.name))
+                        toolTraces.add(
+                            AgentTrace.ToolTrace(
+                                call.name, call.arguments, loaded,
+                                System.currentTimeMillis() - t0
+                            )
+                        )
+                        messages.put(toolMessage(call.id, loaded))
+                        continue
+                    }
                     if (call.name in DEVICE_TOOLS) usedDeviceTool = true
                     if (call.name in DEVICE_TOOLS && !phoneGranted) {
                         val allowed = ensurePhonePermission(call.name, call.arguments)
@@ -389,6 +486,7 @@ object ReActAgent {
                         phoneGranted = true
                     }
                     if (call.name == "finish") {
+                        onPhase("done", step, "任务完成")
                         val summary = parseSummary(call.arguments)
                         toolTraces.add(
                             AgentTrace.ToolTrace(
@@ -526,7 +624,7 @@ object ReActAgent {
                         "observe", "read_page", "find_text", "ocr", "see_screen",
                         "get_activity", "screenshot", "wait", "verify_text",
                         "verify_option", "verify_changed", "ask_llm", "second_opinion",
-                        "tool_list", "note", "todo_read", "todo_write"
+                        "tool_list", "load_tools", "shell", "note", "todo_read", "todo_write"
                     )
                     if (readOnly) observationOnly++ else observationOnly = 0
                     val sig = call.name + "|" + call.arguments

@@ -77,6 +77,11 @@ object DaemonClient {
             if (!ok) {
                 Log.e(TAG, "daemon 握手失败: $probe")
                 closeQuietlyLocked()
+            } else {
+                val d = probe.optJSONObject("data")
+                val w = d?.optInt("w", 0) ?: 0
+                val h = d?.optInt("h", 0) ?: 0
+                ScreenGeometry.setNatural(w, h)
             }
             return ok
         } catch (e: Exception) {
@@ -184,21 +189,40 @@ object DaemonClient {
 
     // ---------------- 语义化封装 ----------------
 
-    /** 点击 [x,y], holdMs 按住时长(>=30ms 才稳定被识别) */
-    suspend fun tap(x: Int, y: Int, holdMs: Int = 40): Boolean =
-        call("tap", x, y, holdMs).optBoolean("ok", false)
+    /** 点击 [x,y], 入参是当前显示方向坐标, 发送 daemon 前转 natural */
+    suspend fun tap(x: Int, y: Int, holdMs: Int = 40): Boolean {
+        screenSize()
+        if (ScreenGeometry.current()?.contains(x, y) == false) return false
+        val (nx, ny) = ScreenGeometry.toNatural(x, y) ?: (x to y)
+        return call("tap", nx, ny, holdMs).optBoolean("ok", false)
+    }
 
     /** 长按 [x,y], 默认按住 800ms */
-    suspend fun longPress(x: Int, y: Int, holdMs: Int = 800): Boolean =
-        call("longpress", x, y, holdMs).optBoolean("ok", false)
+    suspend fun longPress(x: Int, y: Int, holdMs: Int = 800): Boolean {
+        screenSize()
+        if (ScreenGeometry.current()?.contains(x, y) == false) return false
+        val (nx, ny) = ScreenGeometry.toNatural(x, y) ?: (x to y)
+        return call("longpress", nx, ny, holdMs).optBoolean("ok", false)
+    }
 
     /** 双击 [x,y] */
-    suspend fun doubleTap(x: Int, y: Int): Boolean =
-        call("doubletap", x, y).optBoolean("ok", false)
+    suspend fun doubleTap(x: Int, y: Int): Boolean {
+        screenSize()
+        if (ScreenGeometry.current()?.contains(x, y) == false) return false
+        val (nx, ny) = ScreenGeometry.toNatural(x, y) ?: (x to y)
+        return call("doubletap", nx, ny).optBoolean("ok", false)
+    }
 
     /** 滑动: (x1,y1) → (x2,y2), durMs 总时长, 建议 200~600 */
-    suspend fun swipe(x1: Int, y1: Int, x2: Int, y2: Int, durMs: Int = 300): Boolean =
-        call("swipe", x1, y1, x2, y2, durMs).optBoolean("ok", false)
+    suspend fun swipe(x1: Int, y1: Int, x2: Int, y2: Int, durMs: Int = 300): Boolean {
+        screenSize()
+        if (ScreenGeometry.current()?.contains(x1, y1) == false ||
+            ScreenGeometry.current()?.contains(x2, y2) == false
+        ) return false
+        val (nx1, ny1) = ScreenGeometry.toNatural(x1, y1) ?: (x1 to y1)
+        val (nx2, ny2) = ScreenGeometry.toNatural(x2, y2) ?: (x2 to y2)
+        return call("swipe", nx1, ny1, nx2, ny2, durMs).optBoolean("ok", false)
+    }
 
     /** 物理按键, 参数为 Linux KEY_* 码 (BACK=158, HOME=102, APP_SWITCH=580) */
     suspend fun keyevent(keycode: Int): Boolean =
@@ -217,11 +241,17 @@ object DaemonClient {
         return Triple(true, d.optInt("w"), d.optInt("h"))
     }
 
-    /** 屏幕尺寸 (width, height), 失败回退 1080x2400 */
+    /**
+     * 当前显示方向尺寸 (width, height)。
+     * daemon 的 screen 返回 natural 尺寸; 这里缓存后交给 ScreenGeometry 按 rotation 换轴。
+     */
     suspend fun screenSize(): Pair<Int, Int> {
         val r = call("screen")
-        val d = r.optJSONObject("data") ?: return 1080 to 2400
-        return d.optInt("w", 1080) to d.optInt("h", 2400)
+        val d = r.optJSONObject("data")
+        val nw = d?.optInt("w", 0) ?: 0
+        val nh = d?.optInt("h", 0) ?: 0
+        if (nw > 0 && nh > 0) ScreenGeometry.setNatural(nw, nh)
+        return ScreenGeometry.displaySize()
     }
 
     /** daemon 是否可用 */

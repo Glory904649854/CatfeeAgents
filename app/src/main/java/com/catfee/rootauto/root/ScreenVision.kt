@@ -62,25 +62,40 @@ object ScreenVision {
         val elapsedMs: Long = 0
     )
 
+    /** 送给视觉模型的截图: base64 + 实际图片尺寸 */
+    data class JpegFrame(
+        val base64: String,
+        val width: Int,
+        val height: Int,
+        val error: String = ""
+    )
+
     /**
      * 功能: 截屏并转成可直接送模型的 base64 JPEG
-     * 参数: 无
-     * 返回: (base64 字符串, 失败原因); 失败时 base64 为空
+     * 返回: JpegFrame, 含缩放后的图片宽高 (用于给视觉模型说明坐标空间)
      * 使用场景: 视觉兜底、失败存证
      */
-    suspend fun captureBase64Jpeg(): Pair<String, String> = withContext(Dispatchers.IO) {
+    suspend fun captureJpegFrame(): JpegFrame = withContext(Dispatchers.IO) {
+        // 先缓存 natural 尺寸, 保证 see_screen 的 display 坐标和旋转一致
+        try {
+            DaemonClient.screenSize()
+        } catch (e: Exception) {
+            Log.w(TAG, "刷新屏幕尺寸失败: ${e.message}")
+        }
         val (bmp, err) = captureBitmap()
-        if (bmp == null) return@withContext "" to err
+        if (bmp == null) return@withContext JpegFrame("", 0, 0, err)
         try {
             val scaled = scaleDown(bmp)
+            val w = scaled.width
+            val h = scaled.height
             val out = ByteArrayOutputStream()
             scaled.compress(Bitmap.CompressFormat.JPEG, JPEG_QUALITY, out)
             if (scaled !== bmp) scaled.recycle()
             bmp.recycle()
-            Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP) to ""
+            JpegFrame(Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP), w, h)
         } catch (e: Exception) {
             Log.e(TAG, "截图转码失败: ${e.message}")
-            "" to (e.message ?: "未知错误")
+            JpegFrame("", 0, 0, e.message ?: "未知错误")
         }
     }
 
@@ -162,19 +177,28 @@ object ScreenVision {
         question: String = ""
     ): VisionResult = withContext(Dispatchers.IO) {
         val started = System.currentTimeMillis()
-        val (screenW, screenH) = DaemonClient.screenSize()
-        val prompt = buildString {
-            append("屏幕实际像素尺寸: ${screenW}x${screenH}。\n")
-            append(if (question.isBlank()) defaultQuestion() else question)
-            append(
-                "\n坐标要求: 所有控件坐标必须是这张截图的**绝对像素** " +
-                    "x∈[0,${screenW - 1}], y∈[0,${screenH - 1}], " +
-                    "不要输出 0~1000 归一化坐标, 也不要用超出屏幕的数字。"
+        val (displayW, displayH) = ScreenGeometry.displaySize()
+        val frame = captureJpegFrame()
+        if (frame.base64.isEmpty()) {
+            return@withContext VisionResult(
+                false, error = frame.error, elapsedMs = System.currentTimeMillis() - started
             )
         }
-        val (b64, err) = captureBase64Jpeg()
-        if (b64.isEmpty()) {
-            return@withContext VisionResult(false, error = err, elapsedMs = System.currentTimeMillis() - started)
+        val prompt = buildString {
+            append("当前显示坐标尺寸: ${displayW}x${displayH}, rotation=${ScreenGeometry.rotationLabel()}。\n")
+            append("这张截图的图片尺寸: ${frame.width}x${frame.height}。\n")
+            append(if (question.isBlank()) defaultQuestion() else question)
+            append(
+                "\n坐标要求: 输出**当前显示坐标** x∈[0,${displayW - 1}], y∈[0,${displayH - 1}], " +
+                    "不要输出 0~1000 归一化坐标。"
+            )
+            if (frame.width != displayW || frame.height != displayH) {
+                append(
+                    "\n注意: 截图被缩放过, 视觉估算的像素要按比例换算: " +
+                        "x * ${displayW}/${frame.width}, y * ${displayH}/${frame.height}。"
+                )
+            }
+            append("\n不要用超出显示尺寸的数字。")
         }
         try {
             val messages = JSONArray().put(
@@ -182,7 +206,7 @@ object ScreenVision {
                     "content", JSONArray()
                         .put(
                             JSONObject().put("type", "image_url")
-                                .put("image_url", JSONObject().put("url", "data:image/jpeg;base64,$b64"))
+                                .put("image_url", JSONObject().put("url", "data:image/jpeg;base64,${frame.base64}"))
                         )
                         .put(JSONObject().put("type", "text").put("text", prompt))
                 )
@@ -211,6 +235,8 @@ object ScreenVision {
         2) 所有可点击或可读的控件, 逐行按格式输出:
            名称 | 类型(按钮/输入框/文本/图标) | 中心坐标(x,y, 绝对像素)
         3) 如果当前页面有题目, 把题干与所有选项原文完整抄出来
+        4) 如果看到颜色、勾选、进度、禁用态等视觉状态, 描述具体证据
+           (看到什么文字/图标/形状/位置), 不要只给一个“已完成/未完成”的结论。
         只输出上述内容, 不要额外解释。
     """.trimIndent()
 }

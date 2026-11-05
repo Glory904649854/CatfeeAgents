@@ -77,9 +77,10 @@ object FormSolver {
         verifyTimes: Int = 3,
         onSubmit: Boolean = true,
         reset: Boolean = true,
+        providerOverride: LlmSettings.Provider? = null,
         onLog: (String) -> Unit = {}
     ): Result {
-        val provider = LlmSettings.active(context)
+        val provider = providerOverride ?: LlmSettings.active(context)
             ?: return Result(false, 0, "LLM 配置为空")
         if (!provider.usable) return Result(false, 0, "LLM 配置不完整")
         ctx = context.applicationContext
