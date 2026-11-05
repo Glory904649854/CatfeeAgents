@@ -6,6 +6,7 @@ import com.catfee.rootauto.a11y.UiObserverService
 import com.catfee.rootauto.llm.LlmSettings
 import com.catfee.rootauto.ocr.LongOcr
 import com.catfee.rootauto.root.DaemonClient
+import com.catfee.rootauto.root.InputDispatcher
 import com.catfee.rootauto.root.RootShell
 import com.catfee.rootauto.root.ScreenGeometry
 import com.catfee.rootauto.root.ScreenVision
@@ -60,6 +61,7 @@ object AgentTools {
     private val CORE_TOOLS = setOf(
         "observe", "tap", "tap_node", "swipe", "input_text", "key",
         "launch_app", "open_url", "wait", "wait_for_text",
+        "media_state", "media_speed", "wait_media",
         "find_text", "scroll_to_text", "get_activity", "ocr",
         "verify_text", "verify_changed", "note", "todo_write",
         "memory_read", "memory_write", "finish"
@@ -314,6 +316,31 @@ object AgentTools {
                     .put("keyword", prop("string", "关键字, 如 已完成"))
                     .put("timeout_ms", prop("integer", "超时毫秒, 默认 8000, 最大 300000 (5分钟)"))
                     .also { it.put("required", JSONArray().put("keyword")) }
+            )
+        )
+        .put(
+            tool(
+                "media_state",
+                "读取当前播放页的当前时间/总时长/倍速/播放状态, 以及时间文本、倍速控件坐标。视频/音频/课件播放页优先用它, 不要靠猜。",
+                obj()
+            )
+        )
+        .put(
+            tool(
+                "media_speed",
+                "切换当前播放器的倍速。会自动显示控制条、点“倍速/速度”控件并选择目标值; 视频任务优先用它设为 2.0, 不要自己猜倍速菜单坐标。",
+                obj()
+                    .put("speed", prop("number", "目标倍速, 如 2.0、1.5、1.0"))
+                    .also { it.put("required", JSONArray().put("speed")) }
+            )
+        )
+        .put(
+            tool(
+                "wait_media",
+                "按当前时间与总时长计算剩余时间并等待。视频页设置好倍速后用它等待; 页面要求看完 90% 就传 target_ratio=0.9, 否则默认等到结束。单次最长 5 分钟, 没到目标可再次调用。",
+                obj()
+                    .put("target_ratio", prop("number", "目标进度 0.1~1.0, 默认 1.0"))
+                    .put("max_wait_ms", prop("integer", "单次最长等待毫秒, 默认 300000"))
             )
         )
         .put(
@@ -766,6 +793,12 @@ object AgentTools {
                     args.optString("keyword"),
                     args.optLong("timeout_ms", 8000)
                 )
+                "media_state" -> MediaState.describe()
+                "media_speed" -> MediaState.setSpeed(args.optDouble("speed", 2.0))
+                "wait_media" -> MediaState.waitMedia(
+                    args.optDouble("target_ratio", 1.0),
+                    args.optLong("max_wait_ms", 300_000L)
+                )
                 "tap_node" -> when (args.optString("by", "text").lowercase()) {
                     "id" -> ToolRuntime.tapId(args.optString("target"))
                     "desc" -> ToolRuntime.tapDesc(args.optString("target"))
@@ -859,7 +892,7 @@ object AgentTools {
                     if (bad != null) {
                         bad
                     } else {
-                        val ok = DaemonClient.tap(x, y)
+                        val ok = InputDispatcher.tap(x, y)
                         if (ok) "已发送点击 ($x,$y); 请用 observe/verify_changed 确认界面变化"
                         else "点击失败: 坐标无法注入或 daemon 无响应"
                     }
@@ -877,7 +910,7 @@ object AgentTools {
                     if (bad != null) {
                         bad
                     } else {
-                        val ok = DaemonClient.swipe(
+                        val ok = InputDispatcher.swipe(
                             x1, y1, x2, y2,
                             args.optInt("duration_ms", 300)
                         )
@@ -966,11 +999,21 @@ object AgentTools {
         } else null
     }
 
-    private fun readPage(): String {
+    private suspend fun readPage(): String {
         val svc = UiObserverService.instance ?: return "无障碍服务未连接"
+        // 先校准旋转, 否则横屏播放器的 2340x1080 坐标会被当成竖屏坐标
+        val (screenW, screenH) = try {
+            DaemonClient.screenSize()
+        } catch (e: Exception) {
+            ScreenGeometry.displaySize()
+        }
         val tree = svc.dumpTree(1000)
         if (tree.isEmpty()) return "当前页面没有可读节点"
         val text = buildString {
+            append("Screen: ${screenW}x${screenH} rotation=${ScreenGeometry.rotationLabel()}")
+            val act = svc.currentActivityName()
+            if (act.isNotBlank()) append(" | Activity: ").append(act)
+            append('\n')
             append("节点 ${tree.size} 个:\n")
             tree.take(300).forEach { n ->
                 if (n.text.isBlank() && n.desc.isBlank() && n.resourceId.isBlank()) return@forEach

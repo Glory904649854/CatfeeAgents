@@ -72,6 +72,7 @@ object ReActAgent {
     private val DEVICE_TOOLS = setOf(
         "observe", "read_page", "screenshot", "ocr", "long_ocr", "see_screen",
         "get_activity", "find_text", "list_options", "scroll_to_text", "wait_for_text",
+        "media_state", "media_speed", "wait_media",
         "verify_text", "verify_option", "verify_question", "verify_changed",
         "tap", "tap_text", "tap_node", "tap_id", "tap_desc", "double_tap", "long_press",
         "swipe", "swipe_direction", "key", "input_text", "clear_text", "set_text_id",
@@ -126,6 +127,13 @@ object ReActAgent {
           observe/verify_changed 验证; 没变化就换 tap_node/find_text/ocr/坐标, 不要重复同一调用。
         - 同一控件或子目标连续 2 次无效就换方法; 3 次仍失败标记 blocked 并继续下一项;
           不要在一个按钮/一个弹窗上耗超过 5 步。
+        - 视频/音频/课件播放页: 先用 media_state 读当前时间、总时长、倍速和播放状态;
+          能读到完整时长就用 wait_media 按剩余时间等待 (页面要求 90% 就传 target_ratio=0.9),
+          不要因为控制条隐藏/读不到就返回或重进。需要 2x 时直接调用 media_speed(2.0),
+          不要自己点倍速菜单坐标; 切换后再 media_state 确认, 然后 wait_media。
+          media_speed 找不到选项时也不要退出/重进, 直接 wait_media 按当前实测倍速等待。
+          播放器控制条/倍速菜单优先 tap_node/tap_text; 只有没有文字节点时才用坐标,
+          且坐标必须来自 media_state/observe。播放结束或任务点状态验证后才离开。
         - 长任务先盘点: 先列出可执行项/未完成项并 todo_write; 逐项处理,
           每完成或失败都更新; 不要从上次页面直接假设当前任务。
         - 用户明确排除的标记/颜色/项目不要执行, 不要自行反转用户意图;

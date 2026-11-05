@@ -1,6 +1,8 @@
 package com.catfee.rootauto.a11y
 
 import android.accessibilityservice.AccessibilityService
+import android.accessibilityservice.GestureDescription
+import android.graphics.Path
 import android.graphics.Rect
 import android.os.Bundle
 import android.util.Log
@@ -625,10 +627,119 @@ class UiObserverService : AccessibilityService() {
      */
     @Suppress("DEPRECATION")
     fun clickByText(keyword: String, exact: Boolean = false): Boolean {
+        return clickFirst { node ->
+            val text = node.text?.toString().orEmpty()
+            val desc = node.contentDescription?.toString().orEmpty()
+            if (exact) text == keyword || desc == keyword
+            else text.contains(keyword) || desc.contains(keyword)
+        }
+    }
+
+    /**
+     * 按文字找到节点后, 从父节点开始尝试 ACTION_CLICK。
+     * 某些播放器的文字节点自身 clickable=true, 但点击事件挂在父容器上;
+     * 直接点文字没有反应, 点父容器才会弹出倍速菜单。
+     */
+    @Suppress("DEPRECATION")
+    fun clickParentByText(keyword: String): Boolean {
         return try {
             val root = chooseRoot() ?: return false
-            val target = findNodes(root, keyword, exact, 0, 40).firstOrNull() ?: return false
-            // 自身不可点击时向上找可点击祖先
+            val target = findFirst(root, { node ->
+                node.text?.toString().orEmpty().contains(keyword) ||
+                    node.contentDescription?.toString().orEmpty().contains(keyword)
+            }, 0, 40) ?: return false
+            var n: AccessibilityNodeInfo? = target.parent
+            var depth = 0
+            while (n != null && depth < 5) {
+                if (n.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return true
+                n = n.parent
+                depth++
+            }
+            false
+        } catch (e: Exception) {
+            Log.e(TAG, "按父节点点击异常: ${e.message}")
+            false
+        }
+    }
+
+    /** 按 contentDescription 点击 (不匹配 text) */
+    @Suppress("DEPRECATION")
+    fun clickByDesc(keyword: String): Boolean {
+        return clickFirst { node ->
+            node.contentDescription?.toString().orEmpty().contains(keyword)
+        }
+    }
+
+    /** 按 resource-id 后缀点击 */
+    @Suppress("DEPRECATION")
+    fun clickByIdSuffix(suffix: String): Boolean {
+        return clickFirst { node ->
+            node.viewIdResourceName.orEmpty().endsWith(suffix)
+        }
+    }
+
+    /**
+     * 用无障碍手势在屏幕坐标点击。
+     *
+     * 为什么需要:
+     *   uinput 使用设备 natural 坐标, 而固定横屏 Activity (视频播放器) 的实际
+     *   触摸坐标系是 2340x1080; 各 ROM 的旋转/固定方向处理不一致时, 直接换算
+     *   会把点击送到错误位置。dispatchGesture 接收当前显示坐标, 由系统完成旋转,
+     *   横屏播放器/弹窗都能点准。
+     */
+    fun gestureTap(x: Int, y: Int, durationMs: Long = 50L): Boolean {
+        return try {
+            val path = Path().apply { moveTo(x.toFloat(), y.toFloat()) }
+            val stroke = GestureDescription.StrokeDescription(
+                path, 0L, durationMs.coerceIn(30L, 2_000L)
+            )
+            dispatchGesture(GestureDescription.Builder().addStroke(stroke).build(), null, null)
+        } catch (e: Exception) {
+            Log.w(TAG, "手势点击失败: ${e.message}")
+            false
+        }
+    }
+
+    /** 无障碍手势滑动, 坐标使用当前显示方向 */
+    fun gestureSwipe(x1: Int, y1: Int, x2: Int, y2: Int, durationMs: Long = 300L): Boolean {
+        return try {
+            val path = Path().apply {
+                moveTo(x1.toFloat(), y1.toFloat())
+                lineTo(x2.toFloat(), y2.toFloat())
+            }
+            val stroke = GestureDescription.StrokeDescription(
+                path, 0L, durationMs.coerceIn(80L, 5_000L)
+            )
+            dispatchGesture(GestureDescription.Builder().addStroke(stroke).build(), null, null)
+        } catch (e: Exception) {
+            Log.w(TAG, "手势滑动失败: ${e.message}")
+            false
+        }
+    }
+
+    /** 无障碍手势长按 */
+    fun gestureLongPress(x: Int, y: Int, holdMs: Long = 800L): Boolean {
+        return try {
+            val path = Path().apply { moveTo(x.toFloat(), y.toFloat()) }
+            val stroke = GestureDescription.StrokeDescription(
+                path, 0L, holdMs.coerceIn(300L, 10_000L)
+            )
+            dispatchGesture(GestureDescription.Builder().addStroke(stroke).build(), null, null)
+        } catch (e: Exception) {
+            Log.w(TAG, "手势长按失败: ${e.message}")
+            false
+        }
+    }
+
+    /**
+     * 用无障碍 ACTION_CLICK 点击节点或最近的可点击祖先。
+     * 比坐标注入更稳: 横屏/视频页/不同分辨率下都不依赖 uinput 坐标映射。
+     */
+    @Suppress("DEPRECATION")
+    private fun clickFirst(predicate: (AccessibilityNodeInfo) -> Boolean): Boolean {
+        return try {
+            val root = chooseRoot() ?: return false
+            val target = findFirst(root, predicate, 0, 40) ?: return false
             var n: AccessibilityNodeInfo? = target
             var depth = 0
             while (n != null && depth < 5) {
@@ -638,13 +749,34 @@ class UiObserverService : AccessibilityService() {
                 n = n.parent
                 depth++
             }
-            // 兜底: 用无障碍的坐标点击能力
+            // 兜底: 给节点焦点, 让调用方再尝试坐标点击
             target.performAction(AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS)
             false
         } catch (e: Exception) {
-            Log.e(TAG, "按文本点击异常: ${e.message}")
+            Log.e(TAG, "无障碍点击异常: ${e.message}")
             false
         }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun findFirst(
+        node: AccessibilityNodeInfo,
+        predicate: (AccessibilityNodeInfo) -> Boolean,
+        depth: Int,
+        limit: Int
+    ): AccessibilityNodeInfo? {
+        if (depth > limit) return null
+        try {
+            if (node.isVisibleToUser && predicate(node)) return node
+            for (i in 0 until node.childCount) {
+                val child = node.getChild(i) ?: continue
+                val hit = findFirst(child, predicate, depth + 1, limit)
+                if (hit != null) return hit
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "查找点击节点异常: ${e.message}")
+        }
+        return null
     }
 
     /** 查找命中关键字的节点 (最多 40 个, 供外部按需使用) */

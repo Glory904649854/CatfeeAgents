@@ -8,6 +8,7 @@ import com.catfee.rootauto.llm.LlmClient
 import com.catfee.rootauto.llm.LlmSettings
 import com.catfee.rootauto.ocr.OcrEngine
 import com.catfee.rootauto.root.DaemonClient
+import com.catfee.rootauto.root.InputDispatcher
 import com.catfee.rootauto.root.RootShell
 import com.catfee.rootauto.root.ScreenGeometry
 import com.catfee.rootauto.root.ScreenVision
@@ -354,7 +355,7 @@ object ToolRuntime {
         val cy = target.bounds.centerY()
         DaemonClient.screenSize()
         ScreenGeometry.invalid(cx, cy)?.let { return "找到「$keyword」但 $it" }
-        val ok = DaemonClient.tap(cx, cy)
+        val ok = InputDispatcher.tap(cx, cy)
         return if (ok) "已发送点击「$keyword」($cx,$cy); 请用 observe/verify_changed 确认界面是否变化"
         else "点击失败: 坐标无法注入或 daemon 无响应"
     }
@@ -370,7 +371,7 @@ object ToolRuntime {
         val cy = target.bounds.centerY()
         DaemonClient.screenSize()
         ScreenGeometry.invalid(cx, cy)?.let { return "找到「$keyword」但 $it" }
-        val ok = DaemonClient.tap(cx, cy)
+        val ok = InputDispatcher.tap(cx, cy)
         return if (ok) "已发送点击描述「$keyword」($cx,$cy); 请确认界面变化"
         else "点击失败: 坐标无法注入或 daemon 无响应"
     }
@@ -386,16 +387,16 @@ object ToolRuntime {
         val cy = target.bounds.centerY()
         DaemonClient.screenSize()
         ScreenGeometry.invalid(cx, cy)?.let { return "找到 id=$idSuffix 但 $it" }
-        val ok = DaemonClient.tap(cx, cy)
+        val ok = InputDispatcher.tap(cx, cy)
         return if (ok) "已发送点击 id=$idSuffix ($cx,$cy); 请确认界面变化"
         else "点击失败: 坐标无法注入或 daemon 无响应"
     }
 
     suspend fun longPress(x: Int, y: Int, holdMs: Int): String =
-        if (DaemonClient.longPress(x, y, holdMs.coerceIn(100, 10_000))) "已长按 ($x,$y)" else "长按失败"
+        if (InputDispatcher.longPress(x, y, holdMs.coerceIn(100, 10_000))) "已长按 ($x,$y)" else "长按失败"
 
     suspend fun doubleTap(x: Int, y: Int): String =
-        if (DaemonClient.doubleTap(x, y)) "已双击 ($x,$y)" else "双击失败"
+        if (InputDispatcher.doubleTap(x, y)) "已双击 ($x,$y)" else "双击失败"
 
     /** 按方向滑动; distance 为屏幕短边的比例 (0~1) */
     suspend fun swipeDirection(direction: String, distance: Float, durationMs: Int): String {
@@ -410,7 +411,7 @@ object ToolRuntime {
             "right" -> intArrayOf(cx - d / 2, cy, cx + d / 2, cy)
             else -> return "不支持的方向: $direction (up/down/left/right)"
         }
-        val ok = DaemonClient.swipe(x1, y1, x2, y2, durationMs.coerceIn(80, 3000))
+        val ok = InputDispatcher.swipe(x1, y1, x2, y2, durationMs.coerceIn(80, 3000))
         return if (ok) "已向 $direction 滑动" else "滑动失败"
     }
 
@@ -436,7 +437,7 @@ object ToolRuntime {
             if (tree.any { it.text.contains(keyword) || it.desc.contains(keyword) }) {
                 return "第 ${i + 1} 次滚动前已看到「$keyword」"
             }
-            DaemonClient.swipe(540, 1900, 540, 750, 420)
+                InputDispatcher.swipe(540, 1900, 540, 750, 420)
             delay(700)
         }
         val tree = UiObserverService.instance?.dumpTree(800).orEmpty()

@@ -251,6 +251,8 @@ object DaemonClient {
         val nw = d?.optInt("w", 0) ?: 0
         val nh = d?.optInt("h", 0) ?: 0
         if (nw > 0 && nh > 0) ScreenGeometry.setNatural(nw, nh)
+        // DisplayManager 在固定横屏 Activity 里可能谎报 0; 用 InputManager 的真实方向校准
+        ScreenGeometry.refreshRotation()
         return ScreenGeometry.displaySize()
     }
 

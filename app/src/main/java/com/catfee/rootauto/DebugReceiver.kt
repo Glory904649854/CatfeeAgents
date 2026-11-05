@@ -5,9 +5,12 @@ import android.content.Context
 import android.content.Intent
 import android.util.Log
 import com.catfee.rootauto.a11y.UiObserverService
+import com.catfee.rootauto.agent.MediaState
 import com.catfee.rootauto.agent.ToolRuntime
 import com.catfee.rootauto.ocr.OcrEngine
 import com.catfee.rootauto.ocr.PaddleOcrEngine
+import com.catfee.rootauto.root.DaemonClient
+import com.catfee.rootauto.root.ScreenGeometry
 import com.catfee.rootauto.root.ScreenVision
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -37,6 +40,32 @@ class DebugReceiver : BroadcastReceiver() {
         Log.i(TAG, "cmd=$cmd")
         when (cmd) {
             "dump" -> dumpTree()
+            "coords" -> scope.launch {
+                DaemonClient.screenSize()
+                Log.i(TAG, "===== COORDS =====\n" + ScreenGeometry.describe())
+            }
+            "media" -> scope.launch {
+                Log.i(TAG, "===== MEDIA =====\n" + MediaState.describe())
+            }
+            "mediaspeed" -> scope.launch {
+                Log.i(
+                    TAG,
+                    "===== MEDIASPEED =====\n" +
+                        MediaState.setSpeed(intent.getFloatExtra("speed", 2.0f).toDouble())
+                )
+            }
+            "waitmedia" -> scope.launch {
+                Log.i(
+                    TAG,
+                    "===== WAITMEDIA =====\n" + MediaState.waitMedia(
+                        intent.getFloatExtra(
+                            "ratio",
+                            intent.getDoubleExtra("ratio", 1.0).toFloat()
+                        ).toDouble(),
+                        intent.getLongExtra("max", 300_000L)
+                    )
+                )
+            }
             "ocr" -> scope.launch { runOcr() }
             "paddleocr" -> scope.launch { runPaddleOcr(context) }
             "longocr" -> scope.launch { runLongOcr(context) }

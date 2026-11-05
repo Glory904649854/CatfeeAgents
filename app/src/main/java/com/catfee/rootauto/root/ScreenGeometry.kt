@@ -3,6 +3,7 @@ package com.catfee.rootauto.root
 import android.content.Context
 import android.graphics.Point
 import android.hardware.display.DisplayManager
+import android.os.SystemClock
 import android.view.Display
 import android.view.Surface
 
@@ -22,8 +23,22 @@ object ScreenGeometry {
     @Volatile
     private var cachedNatural: Pair<Int, Int>? = null
 
+    /**
+     * 当前旋转。DisplayManager 在部分 ROM 的固定横屏 Activity 里会一直返回 0,
+     * 但实际画面和 uinput 轴已经转了 90°/270°。所以这里缓存一份,
+     * 由 refreshRotation() 用 dumpsys input 的 SurfaceOrientation 校准。
+     */
+    @Volatile
+    private var cachedRotation: Int = Surface.ROTATION_0
+
+    @Volatile
+    private var lastRotationCheck: Long = 0L
+
+    private const val ROTATION_TTL_MS = 2_000L
+
     fun init(context: Context) {
         appContext = context.applicationContext
+        cachedRotation = displayRotation()
     }
 
     /** daemon 的 wm size 是 natural 尺寸, 缓存起来作为 uinput 的坐标基准 */
@@ -61,13 +76,45 @@ object ScreenGeometry {
             "display=${width}x${height} rotation=${rotation * 90} natural=${naturalWidth}x${naturalHeight}"
     }
 
-    fun rotation(): Int {
+    fun rotation(): Int = cachedRotation
+
+    private fun displayRotation(): Int {
         val ctx = appContext ?: return Surface.ROTATION_0
         return try {
             val dm = ctx.getSystemService(DisplayManager::class.java)
             dm?.getDisplay(Display.DEFAULT_DISPLAY)?.rotation ?: Surface.ROTATION_0
         } catch (e: Exception) {
             Surface.ROTATION_0
+        }
+    }
+
+    /**
+     * 用 InputManager 的实际方向校准旋转。
+     *
+     * 为什么不用 DisplayManager:
+     *   学习通等 App 的播放页是固定横屏 Activity, 实际 surface 已经是 2340x1080,
+     *   但 DisplayManager 仍可能返回 ROTATION_0; 这会让 tap 校验按竖屏尺寸拒绝横屏坐标,
+     *   或把横屏点击坐标原样送给 uinput, 点到错误位置 (视频页反复被点退出)。
+     *   dumpsys input 的 SurfaceOrientation 与真实触摸轴一致。
+     *
+     * 2 秒缓存, 避免每次点击都 fork 一次 dumpsys。
+     */
+    suspend fun refreshRotation(force: Boolean = false) {
+        val now = SystemClock.elapsedRealtime()
+        if (!force && now - lastRotationCheck < ROTATION_TTL_MS) return
+        lastRotationCheck = now
+        val fromInput = try {
+            val out = RootShell.execText(
+                "dumpsys input 2>/dev/null | grep -m1 SurfaceOrientation"
+            )
+            Regex("""SurfaceOrientation:\s*([0-3])""")
+                .find(out)?.groupValues?.getOrNull(1)?.toIntOrNull()
+        } catch (e: Exception) {
+            null
+        }
+        cachedRotation = when (fromInput) {
+            0, 1, 2, 3 -> fromInput
+            else -> displayRotation()
         }
     }
 

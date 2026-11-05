@@ -142,7 +142,7 @@ flowchart LR
     I -- "完成" --> J["结果 + 记忆 + 远程上报"]
 ```
 
-- **工具门控**：聊天模式只发 `enter_agent_mode`；进入设备模式后发 21 个核心工具，其余能力用 `load_tools` 按组加载，避免几十个 schema 干扰模型。
+- **工具门控**：聊天模式只发 `enter_agent_mode`；进入设备模式后发 24 个核心工具，其余能力用 `load_tools` 按组加载，避免几十个 schema 干扰模型。
 - **先观察再动作**：动作后默认等待页面稳定再读取；点击结果只表示“已发送”，必须再用 `verify_*` / `observe` 验证。
 - **坐标统一**：所有工具使用当前**显示方向**坐标；注入前按 rotation 转成设备 natural 坐标，越界直接拒绝。
 - **上下文预算**：最多 60 条消息 / 40K 字符；单条工具结果最多 10K，便签 4K，计划 3K；当前任务目标固定在 system 中，不会被裁剪掉。
@@ -154,7 +154,8 @@ flowchart LR
 
 ```text
 observe  tap  tap_node  swipe  input_text  key  launch_app  open_url
-wait  wait_for_text  find_text  scroll_to_text  get_activity  ocr
+wait  wait_for_text  media_state  media_speed  wait_media
+find_text  scroll_to_text  get_activity  ocr
 verify_text  verify_changed  note  todo_write  memory_read  memory_write  finish
 ```
 
@@ -171,6 +172,15 @@ verify_text  verify_changed  note  todo_write  memory_read  memory_write  finish
 | `memory` | `memory_list` `todo_read` | 记忆与计划读取 |
 
 `load_tools("all")` 可一次性加载全部高级工具。`shell` 只允许只读查询，禁止 `input tap/swipe/keyevent`、`sendevent` 等 UI 注入，避免绕过坐标校验。
+
+### 视频 / 播放任务
+
+播放页不再靠猜“有没有播完”：
+
+- `media_state` 读取当前时间、总时长、倍速、播放状态和控件坐标；控制条自动隐藏后，会用上一次读到的时长补全，不会点画面导致暂停。
+- `media_speed(2.0)` 自动找“倍速/速度”控件并选择目标倍速，选项通过无障碍点击完成，避免横屏坐标偏移。
+- `wait_media(target_ratio)` 每 15 秒重新读一次进度：按 `(总时长 × 目标比例 - 当前时间) / 实测倍速` 计算等待，播放暂停/缓冲会提前返回，不会盲目等满 5 分钟。
+- 找不到倍速选项时不会退出播放页，直接用当前实测倍速继续等待；看完后再返回验证任务点状态。
 
 ## 会话、记忆与成本
 
@@ -262,7 +272,8 @@ magisk/                          # Magisk 模块
 | 主题 | 做法 |
 | --- | --- |
 | 页面读取 | 无障碍优先，空节点/画布降级到 OCR 和视觉模型；`read_page` / `see_screen` 对未变化页面做缓存 |
-| 坐标 | 工具坐标统一为显示坐标；横屏宽高互换；uinput 前按 rotation 转 natural；越界直接报错并给出当前尺寸 |
+| 坐标 | 工具坐标统一为显示坐标；用 `dumpsys input` 的 `SurfaceOrientation` 校准固定横屏；旋转时优先无障碍手势，竖屏走 uinput；越界直接报错并给出当前尺寸 |
+| 视频 | 读取播放时间/总时长/倍速；按实测倍速和剩余时长分段等待；控制条隐藏用缓存时长补全，不点画面、不退播放页 |
 | 稳定性 | 动作后默认 `800ms` 稳定等待；相同动作连续 3 次拒绝、6 次终止；滚动/等待不受限 |
 | 长任务 | 单次 `wait` 最长 5 分钟，每 15 秒报进度；LLM 超过 20 秒发心跳；最多 3000 步 / 8 小时 |
 | 流式 | SSE 增量输出；服务端不支持 `stream_options` 时自动回退普通请求 |
