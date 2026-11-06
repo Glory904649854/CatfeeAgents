@@ -1080,13 +1080,20 @@ object AgentTools {
         }
         svc.cachedActivity = extractFocusTarget(focus)
         // 先刷新一次 daemon 的 natural 尺寸, 让 snapshot 按当前 rotation 输出 display 坐标
-        try {
+        val (screenW, screenH) = try {
             DaemonClient.screenSize()
         } catch (e: Exception) {
             Log.w(TAG, "刷新屏幕尺寸失败: ${e.message}")
+            ScreenGeometry.displaySize()
         }
         val snap = svc.snapshot()
         if (snap != null && snap.nodes.isNotEmpty()) {
+            // 播放页的 observe 已看到当前/总时长时先缓存, 控制条隐藏后 wait_media 仍能算剩余
+            try {
+                MediaState.noteVisibleTimes(snap.nodes)
+            } catch (e: Exception) {
+                Log.w(TAG, "缓存媒体时间失败: ${e.message}")
+            }
             val text = snap.toPromptText()
             val hash = Integer.toHexString(text.hashCode())
             ToolRuntime.markObserved(hash)
@@ -1097,7 +1104,45 @@ object AgentTools {
             lastObserveHash = hash
             return "$text\nhash=$hash"
         }
-        // 无障碍读不到内容 (纯 WebView 画布 / Surface / 自绘控件) → 视觉降级
+        // snapshot 为空但完整树还有文字时, 用完整树降级, 不要直接走 40s 的视觉模型
+        val tree = svc.dumpTree(1000)
+        val labeled = tree.filter {
+            it.text.isNotBlank() || it.desc.isNotBlank() || it.resourceId.isNotBlank()
+        }.take(120)
+        if (labeled.isNotEmpty()) {
+            val text = buildString {
+                append("Screen: ${screenW}x${screenH} rotation=${ScreenGeometry.rotationLabel()}")
+                if (svc.currentActivityName().isNotBlank()) {
+                    append(" | Activity: ").append(svc.currentActivityName())
+                }
+                append('\n')
+                labeled.forEach { n ->
+                    append('[').append(n.index).append("] ").append(n.cls)
+                    if (n.text.isNotBlank()) append(" \"").append(n.text).append('"')
+                    if (n.desc.isNotBlank()) append(" desc=\"").append(n.desc).append('"')
+                    if (n.resourceId.isNotBlank()) {
+                        append(" id=").append(n.resourceId.substringAfterLast('/'))
+                    }
+                    if (n.clickable) append(" 可点击")
+                    val cx = n.bounds.centerX()
+                    val cy = n.bounds.centerY()
+                    append(" (").append(cx).append(',').append(cy).append(')')
+                    if (cx !in 0 until screenW || cy !in 0 until screenH) {
+                        append(" [屏外, 需先滑动]")
+                    }
+                    append('\n')
+                }
+            }
+            val hash = Integer.toHexString(text.hashCode())
+            ToolRuntime.markObserved(hash)
+            if (hash == lastObserveHash) {
+                return "界面未变化 (hash=$hash)。不要重复 observe; " +
+                    "需要定位用 find_text, 确认动作是否生效用 verify_changed。"
+            }
+            lastObserveHash = hash
+            return "$text\nhash=$hash"
+        }
+        // 完整树也没有可用文字 (纯画布 / Surface / 自绘控件) → 视觉降级
         if (provider == null || !provider.usable) {
             return "无障碍读到 0 个元素, 且未配置可用的视觉模型, 无法降级识别。"
         }

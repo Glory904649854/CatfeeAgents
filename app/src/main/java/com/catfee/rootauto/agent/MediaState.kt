@@ -76,8 +76,43 @@ object MediaState {
     @Volatile
     private var lastSpeedY: Int? = null
 
+    @Volatile
+    private var lastControlWakeAt: Long = 0L
+
     /** 当前屏幕的媒体状态; 只读, 不点击画面 */
     suspend fun read(): State = readOnce()
+
+    /**
+     * observe 的压缩树里已经看到“当前时间/总时长”时, 记到缓存。
+     * 播放器随后隐藏控制条, wait_media 仍能按这个总时长等待,
+     * 不必重新点画面或盲等。
+     */
+    fun noteVisibleTimes(nodes: List<UiObserverService.UiNode>) {
+        val hasPlayer = nodes.any { n ->
+            val s = (n.cls + " " + n.resourceId).lowercase()
+            s.contains("surfaceview") || s.contains("textureview") ||
+                s.contains("videoview") || s.contains("cvplayer") ||
+                s.contains("player")
+        }
+        val hasPlaybackControls = nodes.any { n ->
+            val label = (n.text + " " + n.desc).trim()
+            val id = n.resourceId.lowercase()
+            label.contains("倍速") || label.contains("播放") || label.contains("暂停") ||
+                id.contains("speed") || id.contains("play") || id.contains("start")
+        }
+        if (!hasPlayer && !hasPlaybackControls) return
+        val hits = ArrayList<TimeHit>()
+        for (n in nodes) {
+            val label = (n.text + " " + n.desc).trim()
+            if (!isPlainTimeLabel(label)) continue
+            parseTimes(label).forEach { sec ->
+                hits.add(TimeHit(sec, label, n.cx, n.cy, n.resourceId))
+            }
+        }
+        val pair = pickTimePair(hits, null) ?: return
+        lastPositionSec = pair.first
+        lastDurationSec = pair.second
+    }
 
     /** 读取一次, 不做任何点击 */
     private suspend fun readOnce(): State {
@@ -169,19 +204,48 @@ object MediaState {
     suspend fun describe(): String = read().details
 
     /**
+     * 控制条隐藏导致读不到任何时间时, 点一次画面中心把控制条叫出来再读。
+     * 只在 waitMedia 里用, 且 3 秒内不重复点; 若播放器把它当暂停, 下一段等待会发现无进度并返回。
+     */
+    private suspend fun wakeControlsAndRead(fallback: State): State {
+        val surface = fallback.surface ?: return fallback
+        val now = System.currentTimeMillis()
+        if (now - lastControlWakeAt < 3_000L) return fallback
+        lastControlWakeAt = now
+        return try {
+            InputDispatcher.tap(surface.centerX(), surface.centerY())
+            // 控制条有动画/布局延迟, 连续读三次, 不要 1 秒读不到就放弃
+            var last = fallback
+            for (i in 0 until 3) {
+                delay(1_000)
+                last = readOnce()
+                if (last.positionSec != null || last.durationSec != null) return last
+            }
+            last
+        } catch (_: Exception) {
+            fallback
+        }
+    }
+
+    /**
      * 按媒体进度等待。
      *
      * @param targetRatio 目标进度, 默认 1.0 (等到结束); 页面要求 90% 时传 0.9
      * @param maxWaitMs   单次最长等待, 默认 5 分钟; 没到目标可再次调用
      */
     suspend fun waitMedia(targetRatio: Double = 1.0, maxWaitMs: Long = 300_000L): String {
-        val before = read()
+        var before = read()
         if (!before.hasMedia) {
             return "未检测到媒体播放信息; 先 observe/media_state 确认当前确实是播放页。\n" +
                 before.details
         }
-        val pos = before.positionSec
-        val dur = before.durationSec
+        if (before.positionSec == null && before.durationSec == null) {
+            // 控制条隐藏且当前没读到: 点一次画面中心显示控制条, 再读一次
+            before = wakeControlsAndRead(before)
+        }
+        // 控制条隐藏时允许用上一次 media_state/observe 缓存的总时长和位置继续等待
+        val pos = before.positionSec ?: lastPositionSec
+        val dur = before.durationSec ?: lastDurationSec
         if (pos == null || dur == null || dur <= 0) {
             // 时长未知时只做一次短等待并重新采样, 不盲目等待
             val ms = maxWaitMs.coerceIn(1_000L, 300_000L).coerceAtMost(30_000L)
@@ -223,7 +287,11 @@ object MediaState {
             val chunk = minOf(15_000L, budget - waited)
             waitWithProgress(chunk)
             waited += chunk
-            val st = read()
+            var st = read()
+            if (st.positionSec == null) {
+                // 控制条在这 15 秒里自动隐藏了: 叫出来再读, 不要直接失败/让模型手动点
+                st = wakeControlsAndRead(st)
+            }
             val np = st.positionSec
             if (np == null) {
                 return "等待 ${waited / 1000}s 后读不到播放时间; " +
@@ -630,7 +698,8 @@ object MediaState {
         val p0 = before.positionSec ?: return null
         val t0 = System.currentTimeMillis()
         delay(2_500)
-        val after = read()
+        var after = read()
+        if (after.positionSec == null) after = wakeControlsAndRead(after)
         val p1 = after.positionSec ?: return null
         val elapsed = ((System.currentTimeMillis() - t0) / 1000.0).coerceAtLeast(1.0)
         val sp = (p1 - p0) / elapsed

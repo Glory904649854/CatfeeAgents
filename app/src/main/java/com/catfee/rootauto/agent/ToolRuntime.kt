@@ -342,18 +342,33 @@ object ToolRuntime {
 
     // ---------------- 点击 ----------------
 
+    /** 节点中心是否在当前显示区域内; WebView 会把屏幕外元素也放进无障碍树 */
+    private fun onScreen(n: UiObserverService.TreeNode, w: Int, h: Int): Boolean {
+        if (n.bounds.width() <= 0 || n.bounds.height() <= 0) return false
+        return n.bounds.centerX() in 0 until w && n.bounds.centerY() in 0 until h
+    }
+
+    private fun offscreenHint(label: String): String =
+        "「$label」命中节点在屏幕外; 先 swipe/scroll_to_text 滚动到可见区域, 再用新坐标/tap_node。"
+
     /** 按文字点击; 找不到时返回候选 */
     suspend fun tapText(keyword: String, exact: Boolean): String {
         val svc = UiObserverService.instance ?: return "无障碍服务未连接"
+        val (w, h) = DaemonClient.screenSize()
         val tree = svc.dumpTree(800)
-        val node = tree.firstOrNull {
+        val matches: (UiObserverService.TreeNode) -> Boolean = {
             val v = if (it.text.isNotBlank()) it.text else it.desc
             if (exact) v == keyword else v.contains(keyword)
-        } ?: return "未找到「$keyword」, 先用 find_text 看候选"
+        }
+        val node = tree.firstOrNull { matches(it) && onScreen(it, w, h) }
+        if (node == null) {
+            return if (tree.any(matches)) offscreenHint(keyword)
+            else "未找到「$keyword」, 先用 find_text 看候选"
+        }
         val target = clickableAncestor(tree, node) ?: node
         val cx = target.bounds.centerX()
         val cy = target.bounds.centerY()
-        DaemonClient.screenSize()
+        if (!onScreen(target, w, h)) return offscreenHint(keyword)
         ScreenGeometry.invalid(cx, cy)?.let { return "找到「$keyword」但 $it" }
         val ok = InputDispatcher.tap(cx, cy)
         return if (ok) "已发送点击「$keyword」($cx,$cy); 请用 observe/verify_changed 确认界面是否变化"
@@ -363,13 +378,18 @@ object ToolRuntime {
     /** 按 contentDescription 点击 */
     suspend fun tapDesc(keyword: String): String {
         val svc = UiObserverService.instance ?: return "无障碍服务未连接"
+        val (w, h) = DaemonClient.screenSize()
         val tree = svc.dumpTree(800)
-        val node = tree.firstOrNull { it.desc.contains(keyword) }
-            ?: return "未找到描述包含「$keyword」的节点"
+        val matches: (UiObserverService.TreeNode) -> Boolean = { it.desc.contains(keyword) }
+        val node = tree.firstOrNull { matches(it) && onScreen(it, w, h) }
+        if (node == null) {
+            return if (tree.any(matches)) offscreenHint(keyword)
+            else "未找到描述包含「$keyword」的节点"
+        }
         val target = clickableAncestor(tree, node) ?: node
         val cx = target.bounds.centerX()
         val cy = target.bounds.centerY()
-        DaemonClient.screenSize()
+        if (!onScreen(target, w, h)) return offscreenHint(keyword)
         ScreenGeometry.invalid(cx, cy)?.let { return "找到「$keyword」但 $it" }
         val ok = InputDispatcher.tap(cx, cy)
         return if (ok) "已发送点击描述「$keyword」($cx,$cy); 请确认界面变化"
@@ -379,13 +399,18 @@ object ToolRuntime {
     /** 按 resource-id 后缀点击 */
     suspend fun tapId(idSuffix: String): String {
         val svc = UiObserverService.instance ?: return "无障碍服务未连接"
+        val (w, h) = DaemonClient.screenSize()
         val tree = svc.dumpTree(800)
-        val node = tree.firstOrNull { it.resourceId.endsWith(idSuffix) }
-            ?: return "未找到 id 以「$idSuffix」结尾的节点"
+        val matches: (UiObserverService.TreeNode) -> Boolean = { it.resourceId.endsWith(idSuffix) }
+        val node = tree.firstOrNull { matches(it) && onScreen(it, w, h) }
+        if (node == null) {
+            return if (tree.any(matches)) offscreenHint("id=$idSuffix")
+            else "未找到 id 以「$idSuffix」结尾的节点"
+        }
         val target = clickableAncestor(tree, node) ?: node
         val cx = target.bounds.centerX()
         val cy = target.bounds.centerY()
-        DaemonClient.screenSize()
+        if (!onScreen(target, w, h)) return offscreenHint("id=$idSuffix")
         ScreenGeometry.invalid(cx, cy)?.let { return "找到 id=$idSuffix 但 $it" }
         val ok = InputDispatcher.tap(cx, cy)
         return if (ok) "已发送点击 id=$idSuffix ($cx,$cy); 请确认界面变化"
@@ -485,11 +510,18 @@ object ToolRuntime {
         """(?i)\b(input\s+(tap|swipe|motionevent|keyevent|text)|sendevent)\b"""
     )
 
+    /** shell 里不允许 sleep/长等待, 否则会占用 20s 超时并绕过播放进度等待 */
+    private val shellSleep = Regex("""(?i)\bsleep\b""")
+
     suspend fun shell(cmd: String): String {
         if (cmd.isBlank()) return "命令为空"
         if (shellUiInject.containsMatchIn(cmd)) {
             return "shell 禁止注入 UI 事件。请改用 tap / tap_node / swipe / key / input_text; " +
                 "shell 只用于只读查询。"
+        }
+        if (shellSleep.containsMatchIn(cmd)) {
+            return "shell 不允许 sleep/长等待。视频等待请用 wait_media 按播放进度等待; " +
+                "页面加载/缓冲用 wait(ms<=30000)。"
         }
         val r = RootShell.exec(cmd, 20_000)
         val out = (r.stdout + if (r.stderr.isNotBlank()) "\n[stderr]\n" + r.stderr else "").trim()

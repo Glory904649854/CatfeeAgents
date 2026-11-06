@@ -52,7 +52,11 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.isImeVisible
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -70,6 +74,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.Logout
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Archive
 import androidx.compose.material.icons.rounded.ArrowUpward
@@ -117,6 +122,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Shapes
+import androidx.compose.material3.SheetValue
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
@@ -140,6 +146,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
@@ -156,6 +163,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.AnnotatedString
@@ -168,6 +176,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import androidx.core.view.WindowCompat
@@ -328,13 +338,16 @@ private fun AppRoot(activity: ComponentActivity) {
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 private fun AgentConsole(activity: ComponentActivity) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val keyboard = LocalSoftwareKeyboardController.current
     val clipboard = LocalClipboardManager.current
+    val density = LocalDensity.current
+    val imeBottom = WindowInsets.ime.getBottom(density)
+    val imeVisible = WindowInsets.isImeVisible
 
     val current by SessionManager.current.collectAsState()
     val sessions by SessionManager.summaries.collectAsState()
@@ -357,6 +370,7 @@ private fun AgentConsole(activity: ComponentActivity) {
     var showMenu by remember { mutableStateOf(false) }
     var showSettings by remember { mutableStateOf(false) }
     var showModelSheet by remember { mutableStateOf(false) }
+    var showExitConfirm by remember { mutableStateOf(false) }
     var rootGranted by remember { mutableStateOf<Boolean?>(null) }
     var overlayEnabled by remember { mutableStateOf(DisplaySettings.overlayEnabled(activity)) }
     var overlayGranted by remember { mutableStateOf(Settings.canDrawOverlays(activity)) }
@@ -625,7 +639,9 @@ private fun AgentConsole(activity: ComponentActivity) {
         actionMessage = null
         scope.launch {
             val updated = SessionManager.truncateAfter(activity, session.id, anchor.id) ?: return@launch
-            val prior = buildPriorContext(updated.copy(messages = updated.messages.dropLast(1)))
+            val prior = buildPriorContext(
+                updated.copy(messages = updated.messages.dropLast(1))
+            )
             val goal = buildString {
                 if (retryHint) {
                     append("上次因另一个会话的 Agent 占用手机，未能进入手机操作模式。")
@@ -712,6 +728,21 @@ private fun AgentConsole(activity: ComponentActivity) {
                 listState.scrollToItem(count - 1, 1_000_000)
             } else {
                 listState.animateScrollToItem(count - 1, 1_000_000)
+            }
+        }
+    }
+
+    // 输入法弹起会压缩聊天区高度, 但 LazyColumn 不会自动重新贴底,
+    // 导致最后一条回复被输入框/键盘挡住。IME 高度变化后重新贴底;
+    // 布局会分几帧完成, 连续校正几次, 避免动画被下一次测量打断。
+    LaunchedEffect(imeBottom, imeVisible) {
+        if (imeBottom > 0 || imeVisible) {
+            repeat(4) {
+                delay(120)
+                val count = listState.layoutInfo.totalItemsCount
+                if (count > 0) {
+                    listState.scrollToItem(count - 1, 1_000_000)
+                }
             }
         }
     }
@@ -832,7 +863,17 @@ private fun AgentConsole(activity: ComponentActivity) {
                     (task.isNotBlank() || pendingAttachments.isNotEmpty()),
                 onSend = { send() },
                 onStop = { stop() },
-                hint = hint
+                hint = hint,
+                onFocused = {
+                    // 输入框获得焦点后键盘会分几帧弹起, 连续贴底, 避免最后一条回复被挡住
+                    scope.launch {
+                        repeat(4) {
+                            delay(150)
+                            val count = listState.layoutInfo.totalItemsCount
+                            if (count > 0) listState.scrollToItem(count - 1, 1_000_000)
+                        }
+                    }
+                }
             )
         }
     }
@@ -1145,11 +1186,187 @@ private fun AgentConsole(activity: ComponentActivity) {
             onClose = { previewImages = emptyList() }
         )
     }
+
+    val exitRunning = current?.let { AgentController.isSessionRunning(it.id) } == true
+    val exitOverlayOpen = showMenu || showSettings || showModelSheet ||
+        showExitConfirm || previewImages.isNotEmpty() ||
+        pendingDelete != null || pendingRename != null ||
+        actionMessage != null || editingMessage != null
+
+    // 主界面返回键/手势先确认, 避免误触直接退出; 弹层打开时交给弹层自己处理
+    BackHandler(enabled = !exitOverlayOpen) {
+        showExitConfirm = true
+    }
+
+    if (showExitConfirm) {
+        val tint = if (exitRunning) Warning else Danger
+        Dialog(
+            onDismissRequest = { showExitConfirm = false },
+            properties = DialogProperties(usePlatformDefaultWidth = false)
+        ) {
+            Surface(
+                modifier = Modifier
+                    .padding(horizontal = 28.dp)
+                    .widthIn(max = 360.dp)
+                    .fillMaxWidth(),
+                shape = RoundedCornerShape(26.dp),
+                color = Color.White,
+                border = BorderStroke(1.dp, Line.copy(alpha = 0.85f)),
+                shadowElevation = 18.dp
+            ) {
+                Column(Modifier.padding(24.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(44.dp)
+                                .background(tint.copy(alpha = 0.10f), RoundedCornerShape(14.dp)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Rounded.Logout,
+                                contentDescription = null,
+                                tint = tint,
+                                modifier = Modifier.size(21.dp)
+                            )
+                        }
+                        Spacer(Modifier.width(12.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                text = if (exitRunning) "任务还在运行" else "退出 CatfeeAgents",
+                                fontSize = 17.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = Ink
+                            )
+                            Text(
+                                text = if (exitRunning) "Agent 正在操作手机" else "Chat & phone agent",
+                                fontSize = 10.5.sp,
+                                color = Muted,
+                                modifier = Modifier.padding(top = 2.dp)
+                            )
+                        }
+                    }
+
+                    Spacer(Modifier.height(18.dp))
+                    Text(
+                        text = if (exitRunning) {
+                            "当前会话的 Agent 还在操作手机。退出会停止该任务，确定退出吗？"
+                        } else {
+                            "当前会话会保留，下次打开可以继续。确定退出吗？"
+                        },
+                        fontSize = 13.sp,
+                        color = Muted,
+                        lineHeight = 20.sp
+                    )
+
+                    if (exitRunning) {
+                        Spacer(Modifier.height(12.dp))
+                        Surface(
+                            shape = RoundedCornerShape(12.dp),
+                            color = Warning.copy(alpha = 0.08f),
+                            border = BorderStroke(1.dp, Warning.copy(alpha = 0.18f))
+                        ) {
+                            Text(
+                                text = "退出会停止当前会话任务",
+                                fontSize = 10.5.sp,
+                                color = Warning,
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
+                            )
+                        }
+                    }
+
+                    Spacer(Modifier.height(24.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.End,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        OutlinedButton(
+                            onClick = { showExitConfirm = false },
+                            shape = RoundedCornerShape(14.dp),
+                            border = BorderStroke(1.dp, Line),
+                            colors = ButtonDefaults.outlinedButtonColors(contentColor = Ink),
+                            contentPadding = PaddingValues(horizontal = 18.dp),
+                            modifier = Modifier.height(42.dp)
+                        ) {
+                            Text("取消", fontSize = 13.sp)
+                        }
+                        Spacer(Modifier.width(10.dp))
+                        Button(
+                            onClick = {
+                                showExitConfirm = false
+                                if (exitRunning) AgentController.stop(current?.id.orEmpty())
+                                SessionManager.flush(activity)
+                                activity.finish()
+                            },
+                            shape = RoundedCornerShape(14.dp),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = tint,
+                                contentColor = Color.White
+                            ),
+                            contentPadding = PaddingValues(horizontal = 20.dp),
+                            modifier = Modifier.height(42.dp)
+                        ) {
+                            Text("退出", fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
+/**
+ * 会话上下文：不再用“继续”关键词判断，而是每次都给一份紧凑检查点；
+ * 由模型结合当前用户消息做语义判断：新问题就处理新问题，追问/补充才沿用旧任务。
+ */
 private fun buildPriorContext(session: Session): String {
     val sb = StringBuilder()
-    // 只带最近 4 条: 旧目标/旧结果太多会让模型把历史任务当成当前任务
+    if (session.steps.isNotEmpty()) {
+        sb.append("===== 会话上下文 =====\n")
+        sb.append("说明: 以下来自同一会话之前, 只作参考, 不是本轮指令; 当前用户消息优先。\n")
+        sb.append(
+            "判断规则: 当前消息是新问题/新任务时, 直接处理新消息, 不要执行旧任务; " +
+                "当前消息是在追问、补充、省略主语的“继续”时, 才沿用下面的目标/清单/进度。\n"
+        )
+        if (session.running) {
+            sb.append("上次状态: 任务仍在运行或未正常结束\n")
+        } else if (session.result.isBlank()) {
+            sb.append("上次状态: 没有明确结束结果, 可能被停止/超时\n")
+        } else {
+            sb.append("上次状态: 已结束\n")
+        }
+        val originalGoal = session.messages
+            .firstOrNull { it.role == "user" && it.content.isNotBlank() }
+            ?.content
+            ?.replace('\n', ' ')
+            ?.take(800)
+        if (!originalGoal.isNullOrBlank()) {
+            sb.append("会话最初目标: ").append(originalGoal).append('\n')
+        }
+        val lastTodo = session.steps.lastOrNull {
+            it.type == "todo" || it.tool == "todo_write"
+        }?.text
+        if (!lastTodo.isNullOrBlank()) {
+            sb.append("上次任务清单:\n").append(lastTodo.take(1_000)).append('\n')
+        }
+        if (session.result.isNotBlank()) {
+            sb.append("上次结果: ").append(session.result.take(450)).append('\n')
+        }
+        val recent = session.steps
+            .filter { it.text.isNotBlank() && it.type in setOf("result", "system", "action", "error", "todo") }
+            .takeLast(4)
+        if (recent.isNotEmpty()) {
+            sb.append("最近执行:\n")
+            recent.forEach { s ->
+                sb.append("- [").append(s.type).append("] ")
+                    .append(s.text.replace('\n', ' ').take(200)).append('\n')
+            }
+        }
+    }
+    // 对话尾部始终带最近 4 条, 保证短问答/新问题的上下文连续
     session.messages.takeLast(4).forEach { m ->
         sb.append(if (m.role == "user") "用户: " else "助手: ")
         sb.append(m.content.replace('\n', ' ').take(300)).append('\n')
@@ -1158,10 +1375,10 @@ private fun buildPriorContext(session: Session): String {
                 .append(m.context.replace('\n', ' ').take(400)).append('\n')
         }
     }
-    if (session.result.isNotBlank()) {
+    if (session.steps.isEmpty() && session.result.isNotBlank()) {
         sb.append("最近一次结果: ").append(session.result.take(500)).append('\n')
     }
-    return sb.toString().take(2_000)
+    return sb.toString().take(4_000)
 }
 
 /* ---------------- Header / session line ---------------- */
@@ -1892,7 +2109,8 @@ private fun Composer(
     canSend: Boolean,
     onSend: () -> Unit,
     onStop: () -> Unit,
-    hint: String
+    hint: String,
+    onFocused: () -> Unit = {}
 ) {
     val focusSource = remember { MutableInteractionSource() }
     val focused by focusSource.collectIsFocusedAsState()
@@ -1963,7 +2181,8 @@ private fun Composer(
                             onValueChange = onTaskChange,
                             modifier = Modifier
                                 .weight(1f)
-                                .heightIn(min = 40.dp, max = 120.dp),
+                                .heightIn(min = 40.dp, max = 120.dp)
+                                .onFocusChanged { if (it.isFocused) onFocused() },
                             textStyle = TextStyle(fontSize = 15.sp, lineHeight = 22.sp, color = Ink),
                             cursorBrush = SolidColor(Accent),
                             maxLines = 4,
@@ -2427,7 +2646,12 @@ private fun MenuSheet(
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
-        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        sheetState = rememberModalBottomSheetState(
+            skipPartiallyExpanded = true,
+            // 会话列表很长时, 向下拖到顶再向上拖容易把整个菜单甩掉;
+            // 禁止手势隐藏, 关闭仍走右上角 X / 返回键。
+            confirmValueChange = { it != SheetValue.Hidden }
+        ),
         containerColor = Color.White,
         sheetMaxWidth = 640.dp,
         shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
@@ -2451,6 +2675,16 @@ private fun MenuSheet(
                     color = Ink,
                     modifier = Modifier.weight(1f)
                 )
+                // 设置固定在顶部, 会话再长也不用滚到底部找
+                TextButton(
+                    onClick = onSettings,
+                    shape = RoundedCornerShape(12.dp),
+                    contentPadding = PaddingValues(horizontal = 10.dp)
+                ) {
+                    Icon(Icons.Rounded.Settings, null, tint = Ink, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(5.dp))
+                    Text("设置", fontSize = 11.sp, color = Ink)
+                }
                 IconButton(onClick = onDismiss) {
                     Icon(Icons.Rounded.Close, "关闭", tint = Muted)
                 }
@@ -2529,20 +2763,6 @@ private fun MenuSheet(
                     onDelete = { onDelete(s) }
                 )
                 Spacer(Modifier.height(7.dp))
-            }
-            HorizontalDivider(Modifier.padding(vertical = 12.dp), color = Line)
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(14.dp))
-                    .clickable(onClick = onSettings)
-                    .padding(vertical = 10.dp, horizontal = 4.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Icon(Icons.Rounded.Settings, null, tint = Ink, modifier = Modifier.size(18.dp))
-                Spacer(Modifier.width(9.dp))
-                Text("Settings", fontSize = 13.sp, color = Ink, modifier = Modifier.weight(1f))
-                Text("模型 / 日志 / 记忆 / 统计", fontSize = 9.5.sp, color = Muted)
             }
         }
     }
