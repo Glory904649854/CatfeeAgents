@@ -932,6 +932,20 @@ object AgentTools {
                 "wait" -> {
                     // 单次最多 5 分钟; 分段等待并每 15 秒发进度, 避免界面长时间无反馈
                     val ms = args.optInt("ms", 1000).coerceIn(200, 300_000).toLong()
+                    // 播放页的长等待必须基于播放进度, 不能盲等 60s/300s。
+                    // 这里只拦截“长 wait”, 短 wait 仍可用于缓冲/加载。
+                    if (ms > 30_000L) {
+                        val media = try {
+                            MediaState.read()
+                        } catch (_: Exception) {
+                            null
+                        }
+                        if (media?.hasMedia == true) {
+                            return "检测到视频/播放页; 不要用长 wait 盲等。请用 wait_media " +
+                                "按当前时间/总时长分段等待到目标进度 (如 target_ratio=0.9), " +
+                                "它会在播放暂停/缓冲时提前返回。"
+                        }
+                    }
                     val start = System.currentTimeMillis()
                     var last = 0L
                     while (System.currentTimeMillis() - start < ms) {
@@ -995,7 +1009,8 @@ object AgentTools {
         val (w, h) = DaemonClient.screenSize()
         return ScreenGeometry.invalid(x, y) ?: if (x !in 0 until w || y !in 0 until h) {
             "坐标越界: ($x,$y), 当前显示 ${w}x${h}。tap 坐标必须是当前显示方向像素; " +
-                "不要用 0~1000 归一化值。可改用 tap_node / find_text。越界坐标不会执行。"
+                "不要用 0~1000 归一化值。该控件大概率在屏幕外, 先 swipe/scroll_to_text 滚动后再定位; " +
+                "可改用 tap_node / find_text。越界坐标不会执行。"
         } else null
     }
 
@@ -1022,7 +1037,12 @@ object AgentTools {
                 if (n.desc.isNotBlank()) append(" desc=\"").append(n.desc).append('"')
                 if (n.resourceId.isNotBlank()) append(" id=").append(n.resourceId.substringAfterLast('/'))
                 if (n.clickable) append(" 可点击")
-                append(" (").append(n.bounds.centerX()).append(',').append(n.bounds.centerY()).append(')')
+                val cx = n.bounds.centerX()
+                val cy = n.bounds.centerY()
+                append(" (").append(cx).append(',').append(cy).append(')')
+                if (cx !in 0 until screenW || cy !in 0 until screenH) {
+                    append(" [屏外, 需先 swipe/scroll_to_text]")
+                }
                 append('\n')
             }
         }

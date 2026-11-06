@@ -59,6 +59,9 @@ object MediaState {
     private val TIME_RE = Regex("""(?<!\d)(\d{1,2}):(\d{2})(?::(\d{2}))?(?!\d)""")
     private val SPEED_RE = Regex("""(?i)(\d+(?:\.\d+)?)\s*(?:x|×|倍)""")
 
+    /** 日期/日期时间, 这些不能当成视频时长 */
+    private val DATE_RE = Regex("""\d{4}\s*[/-]\s*\d{1,2}\s*[/-]\s*\d{1,2}""")
+
     // 播放器控制条会自动隐藏; 缓存最近一次读到的总时长/当前时间,
     // 之后只剩一个小计时器时也能算出剩余时间, 不再点画面 (点画面可能暂停视频)。
     @Volatile
@@ -112,13 +115,24 @@ object MediaState {
             // 控制条隐藏时通常只能读到当前时间 (或画面上的小计时器);
             // 用缓存的总时长补全, 不点击画面, 避免把播放暂停。
             val cachedDur = lastDurationSec
-            if (cachedDur != null) {
+            if (cachedDur != null && timeHits.isNotEmpty()) {
                 val all = timeHits.map { it.sec }
                 val current = all.filter { it in 1 until cachedDur }.maxOrNull()
                     ?: if (all.any { it >= cachedDur }) cachedDur else null
-                position = current ?: lastPositionSec
-                duration = cachedDur
-                if (position != null) lastPositionSec = position
+                val previous = lastPositionSec
+                // 新视频一般从 00:xx 开始; 当前时间突然远小于上一位置时清掉旧时长,
+                // 避免把上一个视频的 17:44 套到新视频上, 误判“已经播完”。
+                if (current != null && previous != null && current + 30 < previous) {
+                    lastDurationSec = null
+                    lastPositionSec = null
+                } else if (current != null && current > cachedDur + 30) {
+                    lastDurationSec = null
+                    lastPositionSec = null
+                } else {
+                    position = current ?: previous
+                    duration = cachedDur
+                    if (position != null) lastPositionSec = position
+                }
             }
         }
         val currentSpeed = pickCurrentSpeed(speedHits)
@@ -355,7 +369,7 @@ object MediaState {
         val out = ArrayList<TimeHit>()
         for (n in tree) {
             val label = (n.text + " " + n.desc).trim()
-            if (label.isBlank() || label.length > 40 || isOverlay(label)) continue
+            if (!isPlainTimeLabel(label) || isOverlay(label)) continue
             val values = parseTimes(label)
             if (values.isEmpty()) continue
             values.forEach { sec ->
@@ -426,11 +440,24 @@ object MediaState {
             val rows = OcrEngine.rowsOf(bmp)
             val times = ArrayList<TimeHit>()
             val speeds = ArrayList<SpeedHit>()
+            val imgW = bmp.width
+            val imgH = bmp.height
             rows.forEach { r ->
                 val label = r.text.trim()
-                if (label.isBlank() || label.length > 40 || isOverlay(label)) return@forEach
-                parseTimes(label).forEach { sec ->
-                    times.add(TimeHit(sec, label, r.box.centerX(), r.box.centerY(), ""))
+                if (label.isBlank() || label.length > 30 || isOverlay(label)) return@forEach
+                val cx = r.box.centerX()
+                val cy = r.box.centerY()
+                if (isPlainTimeLabel(label)) {
+                    val values = parseTimes(label)
+                    // 只认可画面底部的计时器: 当前时间在左/右边缘, 或一行里同时有当前/总时长。
+                    // 视频画面里的时间戳/日期 (如 "2024/7/24 17:19") 不能当时长。
+                    val bottom = cy > imgH * 0.60
+                    val atEdge = cx < imgW * 0.30 || cx > imgW * 0.70
+                    if (bottom && (atEdge || values.size >= 2)) {
+                        values.forEach { sec ->
+                            times.add(TimeHit(sec, label, cx, cy, ""))
+                        }
+                    }
                 }
                 val m = SPEED_RE.find(label)
                 val control = label.contains("倍速") || label.contains("speed", true)
@@ -449,6 +476,19 @@ object MediaState {
         } finally {
             bmp.recycle()
         }
+    }
+
+    /**
+     * 只接受“纯时间文本”或“时间/时间”这种控件文本。
+     * 视频画面里的 "2024/7/24 17:19"、题目里的 "01:04"、WPS 时间戳等都不算。
+     */
+    private fun isPlainTimeLabel(text: String): Boolean {
+        val t = text.trim()
+        if (t.isEmpty() || t.length > 24) return false
+        if (DATE_RE.containsMatchIn(t)) return false
+        val rest = TIME_RE.replace(t, "")
+            .replace(Regex("""[\s/|:：\-—~～]+"""), "")
+        return rest.isEmpty()
     }
 
     private fun parseTimes(text: String): List<Int> {

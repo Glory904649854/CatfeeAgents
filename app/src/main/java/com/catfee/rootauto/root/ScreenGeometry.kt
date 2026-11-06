@@ -92,7 +92,7 @@ object ScreenGeometry {
      * 用 InputManager 的实际方向校准旋转。
      *
      * 为什么不用 DisplayManager:
-     *   学习通等 App 的播放页是固定横屏 Activity, 实际 surface 已经是 2340x1080,
+     *   部分 App 的固定横屏播放页, 实际 surface 已经是 2340x1080,
      *   但 DisplayManager 仍可能返回 ROTATION_0; 这会让 tap 校验按竖屏尺寸拒绝横屏坐标,
      *   或把横屏点击坐标原样送给 uinput, 点到错误位置 (视频页反复被点退出)。
      *   dumpsys input 的 SurfaceOrientation 与真实触摸轴一致。
