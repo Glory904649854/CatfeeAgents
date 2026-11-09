@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://catfee.dev/schemas/device.schema.json",
+  "title": "Catfee device enrollment",
+  "type": "object",
+  "required": ["token", "name"],
+  "properties": {
+    "token": {
+      "type": "string",
+      "description": "控制台生成的一次性注册码，10 分钟有效"
+    },
+    "name": { "type": "string", "minLength": 1, "maxLength": 64 },
+    "model": { "type": "string", "maxLength": 120 },
+    "androidVersion": { "type": "string", "maxLength": 40 },
+    "agentVersion": { "type": "string", "maxLength": 40 },
+    "capabilities": {
+      "type": "array",
+      "maxItems": 64,
+      "items": { "type": "string", "maxLength": 64 }
+    }
+  },
+  "additionalProperties": false
+}

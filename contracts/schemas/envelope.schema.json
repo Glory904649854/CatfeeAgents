@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://catfee.dev/schemas/envelope.schema.json",
+  "title": "Catfee Agent message envelope",
+  "type": "object",
+  "required": ["type"],
+  "properties": {
+    "type": {
+      "type": "string",
+      "enum": [
+        "hello",
+        "hello_ack",
+        "heartbeat",
+        "heartbeat_ack",
+        "command",
+        "command_ack",
+        "task_state",
+        "event",
+        "error"
+      ]
+    },
+    "messageId": { "type": "string", "maxLength": 80 },
+    "deviceId": { "type": "string", "maxLength": 80 },
+    "taskId": { "type": "string", "maxLength": 80 },
+    "commandId": { "type": "string", "maxLength": 80 },
+    "runId": { "type": "string", "maxLength": 80 },
+    "sequence": { "type": "integer", "minimum": 0 },
+    "sentAt": { "type": "string", "format": "date-time" },
+    "payload": { "type": "object" }
+  },
+  "additionalProperties": true
+}

@@ -37,6 +37,24 @@
 | 🧭 | **按 App 记忆** | 每个包名一份简短记忆，自动注入当前前台 App 的上下文；任务结束后只沉淀稳定入口、控件和坑，不记录题目答案或一次性数据。 |
 | 📊 | **用量与成本** | 每个会话显示 tokens、上下文长度、消息/步骤数、累计耗时；可配置每 1M token 单价估算费用。 |
 | 📡 | **远程日志** | 可选接入 `clouddream-server` 的 `/logReport`，异步上报每一步输入、模型输出、工具参数与结果，便于回放和优化。 |
+| 🖥 | **Web 控制台** | 仓库内提供 Nuxt 单端口控制台：设备注册、任务下发、实时事件、暂停/继续/停止与审计。Agent 主动通过 WebSocket 接入，Web 端不直接操作设备。 |
+
+## Web 控制台
+
+[`web/console`](web/console) 是面向已授权设备的远程 Agent 管理端，与 APK 共用
+黑白红扁平设计。Nuxt 4 单端口同时承载页面、REST API、SSE 和 Agent WebSocket，
+数据存储在本地 SQLite。
+
+```bash
+cd web/console
+pnpm install
+pnpm dev        # http://localhost:3000
+```
+
+首次启动创建管理员 `admin / change-me`，可用环境变量覆盖。
+详见 [Web 控制台文档](docs/web-console.md)、
+[Agent 协议契约](contracts/README.md) 与 [OpenAPI](contracts/openapi.yaml)。
+
 
 ## 快速开始
 

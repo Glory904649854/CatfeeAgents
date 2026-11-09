@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://catfee.dev/schemas/task.schema.json",
+  "title": "Catfee task assignment",
+  "type": "object",
+  "required": ["protocolVersion", "taskId", "title", "type", "policy"],
+  "properties": {
+    "protocolVersion": { "type": "integer", "minimum": 1 },
+    "taskId": { "type": "string", "maxLength": 80 },
+    "title": { "type": "string", "minLength": 1, "maxLength": 120 },
+    "type": {
+      "type": "string",
+      "enum": ["agent.goal", "device.diagnostic", "app.flow"]
+    },
+    "goal": { "type": "string", "maxLength": 4000 },
+    "params": { "type": "object" },
+    "policy": {
+      "type": "object",
+      "required": ["allowScreenshot", "allowRoot", "timeoutMs"],
+      "properties": {
+        "allowScreenshot": { "type": "boolean" },
+        "allowRoot": { "type": "boolean" },
+        "timeoutMs": { "type": "integer", "minimum": 1000, "maximum": 3600000 }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": true
+}

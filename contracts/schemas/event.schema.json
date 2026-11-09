@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://catfee.dev/schemas/event.schema.json",
+  "title": "Catfee agent event",
+  "type": "object",
+  "required": ["event"],
+  "properties": {
+    "type": { "const": "event" },
+    "event": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "id": { "type": "string", "maxLength": 80 },
+        "taskId": { "type": ["string", "null"], "maxLength": 80 },
+        "runId": { "type": ["string", "null"], "maxLength": 80 },
+        "sequence": { "type": ["integer", "null"], "minimum": 0 },
+        "type": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "level": {
+          "type": "string",
+          "enum": ["debug", "info", "warn", "error", "security"]
+        },
+        "payload": { "type": "object" },
+        "occurredAt": { "type": "string", "format": "date-time" }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

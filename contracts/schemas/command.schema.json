@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://catfee.dev/schemas/command.schema.json",
+  "title": "Catfee control command",
+  "type": "object",
+  "required": ["type", "commandId", "taskId", "commandType"],
+  "properties": {
+    "type": { "const": "command" },
+    "commandId": { "type": "string", "maxLength": 80 },
+    "taskId": { "type": "string", "maxLength": 80 },
+    "commandType": {
+      "type": "string",
+      "enum": ["TASK_ASSIGN", "TASK_PAUSE", "TASK_RESUME", "TASK_STOP"]
+    },
+    "payload": { "type": "object" },
+    "sentAt": { "type": "string", "format": "date-time" }
+  },
+  "additionalProperties": true
+}

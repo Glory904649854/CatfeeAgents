@@ -1,0 +1,303 @@
+openapi: 3.1.0
+info:
+  title: Catfee Console API
+  version: 0.1.0
+  description: |
+    Catfee Web 控制台的 HTTP API。控制台、API、SSE 与 Agent WebSocket
+    由同一个 Nitro 进程和端口提供。
+servers:
+  - url: http://localhost:3000
+tags:
+  - name: auth
+  - name: devices
+  - name: tasks
+  - name: events
+  - name: system
+  - name: agent
+
+paths:
+  /api/health:
+    get:
+      tags: [system]
+      summary: 健康检查
+      security: []
+      responses:
+        '200':
+          description: OK
+
+  /api/auth/login:
+    post:
+      tags: [auth]
+      summary: 管理员登录
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password]
+              properties:
+                username: { type: string }
+                password: { type: string }
+      responses:
+        '200': { description: 登录成功，写入 HttpOnly 会话 Cookie }
+        '401': { description: 用户名或密码错误 }
+
+  /api/auth/me:
+    get:
+      tags: [auth]
+      summary: 当前登录用户
+      responses:
+        '200': { description: 当前用户 }
+        '401': { description: 未登录 }
+
+  /api/auth/logout:
+    post:
+      tags: [auth]
+      summary: 退出登录
+      responses:
+        '200': { description: 已退出 }
+
+  /api/overview:
+    get:
+      tags: [system]
+      summary: 概览统计、最近设备、任务与事件
+      responses:
+        '200': { description: 概览数据 }
+
+  /api/devices:
+    get:
+      tags: [devices]
+      summary: 设备列表
+      parameters:
+        - in: query
+          name: status
+          schema: { type: string, enum: [all, online, offline, pending, revoked] }
+        - in: query
+          name: q
+          schema: { type: string }
+      responses:
+        '200': { description: 设备列表与数量 }
+
+  /api/devices/enroll:
+    post:
+      tags: [devices]
+      summary: 生成一次性设备注册码
+      responses:
+        '200': { description: 注册码、过期时间与接入地址 }
+
+  /api/devices/{deviceId}:
+    get:
+      tags: [devices]
+      summary: 设备详情、最近任务、事件与指令
+      parameters:
+        - in: path
+          name: deviceId
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: 设备详情 }
+        '404': { description: 设备不存在 }
+
+  /api/devices/{deviceId}/revoke:
+    post:
+      tags: [devices]
+      summary: 撤销设备授权
+      parameters:
+        - in: path
+          name: deviceId
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: 已撤销 }
+        '409': { description: 设备已撤销 }
+
+  /api/tasks:
+    get:
+      tags: [tasks]
+      summary: 任务列表
+      parameters:
+        - in: query
+          name: status
+          schema: { type: string }
+        - in: query
+          name: deviceId
+          schema: { type: string }
+      responses:
+        '200': { description: 任务列表与状态计数 }
+    post:
+      tags: [tasks]
+      summary: 创建并下发任务
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [deviceId, title, type]
+              properties:
+                deviceId: { type: string }
+                title: { type: string, maxLength: 120 }
+                type:
+                  { type: string, enum: [agent.goal, device.diagnostic, app.flow] }
+                goal: { type: string, maxLength: 4000 }
+                params: { type: object }
+                policy:
+                  type: object
+                  properties:
+                    allowScreenshot: { type: boolean }
+                    allowRoot: { type: boolean }
+                    timeoutMs: { type: integer }
+      responses:
+        '200': { description: 任务已创建；设备离线时进入 waiting_device }
+        '404': { description: 设备不存在 }
+        '409': { description: 设备已撤销 }
+
+  /api/tasks/{taskId}:
+    get:
+      tags: [tasks]
+      summary: 任务详情、事件与指令
+      parameters:
+        - in: path
+          name: taskId
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: 任务详情 }
+
+  /api/tasks/{taskId}/{action}:
+    post:
+      tags: [tasks]
+      summary: 暂停 / 继续 / 停止任务
+      parameters:
+        - in: path
+          name: taskId
+          required: true
+          schema: { type: string }
+        - in: path
+          name: action
+          required: true
+          schema: { type: string, enum: [pause, resume, stop] }
+      responses:
+        '200': { description: 指令已下发或已排队 }
+        '409': { description: 当前状态不支持该操作 }
+
+  /api/events:
+    get:
+      tags: [events]
+      summary: 事件列表
+      parameters:
+        - in: query
+          name: level
+          schema: { type: string }
+        - in: query
+          name: type
+          schema: { type: string }
+        - in: query
+          name: deviceId
+          schema: { type: string }
+        - in: query
+          name: taskId
+          schema: { type: string }
+        - in: query
+          name: limit
+          schema: { type: integer, maximum: 500, default: 100 }
+      responses:
+        '200': { description: 事件列表 }
+
+  /api/stream:
+    get:
+      tags: [events]
+      summary: SSE 实时事件流
+      description: 事件名包括 `ready`、`agent-event` 与 `device-update`。
+      responses:
+        '200':
+          description: text/event-stream
+          content:
+            text/event-stream:
+              schema: { type: string }
+
+  /api/system/info:
+    get:
+      tags: [system]
+      summary: 控制台运行信息与 Agent 接入地址
+      responses:
+        '200': { description: 运行信息 }
+
+  /api/audit:
+    get:
+      tags: [system]
+      summary: 管理端审计日志
+      responses:
+        '200': { description: 审计记录 }
+
+  /api/agent/enroll:
+    post:
+      tags: [agent]
+      summary: Agent 使用一次性注册码接入
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token, name]
+              properties:
+                token: { type: string }
+                name: { type: string }
+                model: { type: string }
+                androidVersion: { type: string }
+                agentVersion: { type: string }
+                capabilities:
+                  type: array
+                  items: { type: string }
+      responses:
+        '200': { description: 返回 deviceId、deviceSecret 与 WebSocket 地址 }
+        '404': { description: 注册码无效 }
+        '409': { description: 注册码已使用或已过期 }
+
+  /api/agent/heartbeat:
+    post:
+      tags: [agent]
+      summary: 设备心跳（HTTP 备用通道）
+      security: []
+      parameters:
+        - in: header
+          name: x-device-id
+          required: true
+          schema: { type: string }
+        - in: header
+          name: x-device-secret
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: 心跳已记录 }
+
+  /api/agent/events:
+    post:
+      tags: [agent]
+      summary: 批量补传事件（HTTP 备用通道）
+      security: []
+      parameters:
+        - in: header
+          name: x-device-id
+          required: true
+          schema: { type: string }
+        - in: header
+          name: x-device-secret
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: 已接收的事件数量 }
+
+components:
+  securitySchemes:
+    consoleSession:
+      type: apiKey
+      in: cookie
+      name: catfee_session
+
+security:
+  - consoleSession: []
