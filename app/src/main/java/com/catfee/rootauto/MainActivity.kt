@@ -3,6 +3,7 @@ package com.catfee.rootauto
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.content.pm.PackageInfo
 import android.graphics.BitmapFactory
 import android.net.Uri
 import android.provider.Settings
@@ -97,6 +98,8 @@ import androidx.compose.material.icons.rounded.Info
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.Menu
 import androidx.compose.material.icons.rounded.MoreVert
+import androidx.compose.material.icons.rounded.Pause
+import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Psychology
 import androidx.compose.material.icons.rounded.PushPin
 import androidx.compose.material.icons.rounded.Search
@@ -675,6 +678,18 @@ private fun AgentConsole(activity: ComponentActivity) {
         hint = "已停止"
     }
 
+    fun togglePause() {
+        val sessionId = current?.id.orEmpty()
+        if (sessionId.isBlank()) return
+        val wasPaused = agent.paused
+        val changed = if (wasPaused) {
+            AgentController.resume(sessionId)
+        } else {
+            AgentController.pause(sessionId)
+        }
+        if (changed) hint = if (wasPaused) "已继续" else "已暂停"
+    }
+
     // 通知权限
     val notifLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -859,9 +874,11 @@ private fun AgentConsole(activity: ComponentActivity) {
                 },
                 onPickAttachments = { attachmentPicker.launch(arrayOf("*/*")) },
                 running = running,
+                paused = agent.paused,
                 canSend = !running &&
                     (task.isNotBlank() || pendingAttachments.isNotEmpty()),
                 onSend = { send() },
+                onPauseResume = { togglePause() },
                 onStop = { stop() },
                 hint = hint,
                 onFocused = {
@@ -2106,8 +2123,10 @@ private fun Composer(
     onRemoveAttachment: (String) -> Unit,
     onPickAttachments: () -> Unit,
     running: Boolean,
+    paused: Boolean,
     canSend: Boolean,
     onSend: () -> Unit,
+    onPauseResume: () -> Unit,
     onStop: () -> Unit,
     hint: String,
     onFocused: () -> Unit = {}
@@ -2204,6 +2223,8 @@ private fun Composer(
                         )
                         Spacer(Modifier.width(4.dp))
                         if (running) {
+                            PauseResumeButton(paused, onPauseResume)
+                            Spacer(Modifier.width(4.dp))
                             StopButton(onStop)
                         } else {
                             RunButton(canSend, onSend)
@@ -2301,6 +2322,33 @@ private fun RunButton(enabled: Boolean, onClick: () -> Unit) {
             Icons.Rounded.ArrowUpward,
             contentDescription = "发送",
             tint = if (enabled) Color.White else Color(0xFFB6BAC0),
+            modifier = Modifier.size(18.dp)
+        )
+    }
+}
+
+@Composable
+private fun PauseResumeButton(paused: Boolean, onClick: () -> Unit) {
+    val source = remember { MutableInteractionSource() }
+    val pressed by source.collectIsPressedAsState()
+    val scale by animateFloatAsState(if (pressed) 0.92f else 1f, tween(90), label = "pauseScale")
+    Box(
+        modifier = Modifier
+            .size(36.dp)
+            .scale(scale)
+            .clip(CircleShape)
+            .background(if (paused) Violet else Color(0xFF374151))
+            .clickable(
+                interactionSource = source,
+                indication = null,
+                onClick = onClick
+            ),
+        contentAlignment = Alignment.Center
+    ) {
+        Icon(
+            imageVector = if (paused) Icons.Rounded.PlayArrow else Icons.Rounded.Pause,
+            contentDescription = if (paused) "继续" else "暂停",
+            tint = Color.White,
             modifier = Modifier.size(18.dp)
         )
     }
@@ -2917,6 +2965,78 @@ private fun SessionRow(
 
 /* ---------------- Settings ---------------- */
 
+private data class AppAboutInfo(
+    val versionName: String,
+    val versionCode: String,
+    val applicationId: String
+)
+
+private fun loadAppAboutInfo(context: android.content.Context): AppAboutInfo {
+    val applicationId = context.packageName
+    return try {
+        val packageInfo: PackageInfo = context.packageManager.getPackageInfo(applicationId, 0)
+        val versionCode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            packageInfo.longVersionCode
+        } else {
+            @Suppress("DEPRECATION")
+            packageInfo.versionCode.toLong()
+        }
+        AppAboutInfo(
+            versionName = packageInfo.versionName.orEmpty().ifBlank { "未知" },
+            versionCode = versionCode.toString(),
+            applicationId = packageInfo.packageName.ifBlank { applicationId }
+        )
+    } catch (_: PackageManager.NameNotFoundException) {
+        AppAboutInfo("未知", "未知", applicationId)
+    }
+}
+
+@Composable
+private fun AboutInfoRow(label: String, value: String) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(label, fontSize = 10.5.sp, color = Muted, modifier = Modifier.weight(1f))
+        Text(
+            value,
+            fontSize = 10.5.sp,
+            color = Ink,
+            fontFamily = if (label == "Application ID") FontFamily.Monospace else FontFamily.Default,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+    }
+}
+
+@Composable
+private fun AboutCapabilityRow(label: String, description: String, enabled: Boolean) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 5.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(
+            Modifier
+                .size(7.dp)
+                .background(if (enabled) Success else Color(0xFFD1D5DB), CircleShape)
+        )
+        Spacer(Modifier.width(8.dp))
+        Column(Modifier.weight(1f)) {
+            Text(label, fontSize = 11.5.sp, fontWeight = FontWeight.Medium, color = Ink)
+            Text(description, fontSize = 9.5.sp, color = Muted, lineHeight = 14.sp)
+        }
+        Text(
+            if (enabled) "已就绪" else "未开启",
+            fontSize = 9.5.sp,
+            color = if (enabled) Success else Muted
+        )
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun SettingsSheet(
@@ -2962,6 +3082,7 @@ private fun SettingsSheet(
     val price = remember { UsageSettings.load(context) }
     var priceIn by remember { mutableStateOf(price.inputPerMillion.toString()) }
     var priceOut by remember { mutableStateOf(price.outputPerMillion.toString()) }
+    val aboutInfo = remember { loadAppAboutInfo(context) }
 
     fun reloadMemory() {
         scope.launch {
@@ -3011,7 +3132,8 @@ private fun SettingsSheet(
                     0 -> "配置模型接口和可用模型。"
                     1 -> "配置远程日志上报与接入凭证。"
                     2 -> "管理每个 App 的简短操作记忆。"
-                    else -> "查看会话 token、上下文和耗时。"
+                    3 -> "查看会话 token、上下文和耗时。"
+                    else -> "了解 CatfeeAgents、能力状态和隐私说明。"
                 },
                 fontSize = 12.sp,
                 color = Muted
@@ -3029,6 +3151,7 @@ private fun SettingsSheet(
                 SettingsTab("日志", tab == 1, Modifier.weight(1f)) { tab = 1 }
                 SettingsTab("记忆", tab == 2, Modifier.weight(1f)) { tab = 2 }
                 SettingsTab("统计", tab == 3, Modifier.weight(1f)) { tab = 3 }
+                SettingsTab("关于", tab == 4, Modifier.weight(1f)) { tab = 4 }
             }
             Spacer(Modifier.height(10.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -3041,7 +3164,7 @@ private fun SettingsSheet(
                 Column(Modifier.weight(1f)) {
                     Text("显示悬浮状态窗", fontSize = 13.sp, fontWeight = FontWeight.Medium, color = Ink)
                     Text(
-                        "在其他 App 上显示步骤、阶段和耗时；默认关闭，截图/OCR 可能看到它。",
+                        "在其他 App 上显示步骤、阶段、耗时和控制按钮；默认开启，截图/OCR 可能看到它。",
                         fontSize = 9.5.sp, color = Muted, lineHeight = 14.sp
                     )
                 }
@@ -3395,7 +3518,7 @@ private fun SettingsSheet(
                         Spacer(Modifier.height(7.dp))
                     }
                 }
-            } else {
+            } else if (tab == 3) {
                 val totalTokens = sessions.sumOf { it.totalTokens }
                 val totalPrompt = sessions.sumOf { it.promptTokens }
                 val totalCompletion = sessions.sumOf { it.completionTokens }
@@ -3488,6 +3611,72 @@ private fun SettingsSheet(
                         }
                     }
                     Spacer(Modifier.height(5.dp))
+                }
+            } else {
+                Text(
+                    "CatfeeAgents",
+                    fontSize = 22.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = Ink
+                )
+                Text(
+                    "通用 Agent 工作台",
+                    fontSize = 11.sp,
+                    color = Muted,
+                    modifier = Modifier.padding(top = 2.dp)
+                )
+                Spacer(Modifier.height(14.dp))
+
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(16.dp),
+                    color = Color(0xFFFAFBFC),
+                    border = BorderStroke(1.dp, Line)
+                ) {
+                    Column(Modifier.padding(12.dp)) {
+                        Text("应用信息", fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = Muted)
+                        Spacer(Modifier.height(5.dp))
+                        AboutInfoRow("版本", aboutInfo.versionName)
+                        AboutInfoRow("Version Code", aboutInfo.versionCode)
+                        AboutInfoRow("Application ID", aboutInfo.applicationId)
+                    }
+                }
+
+                Spacer(Modifier.height(14.dp))
+                Text("能力状态", fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = Muted)
+                Spacer(Modifier.height(6.dp))
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(16.dp),
+                    color = Color(0xFFFAFBFC),
+                    border = BorderStroke(1.dp, Line)
+                ) {
+                    Column(Modifier.padding(horizontal = 12.dp, vertical = 7.dp)) {
+                        AboutCapabilityRow("对话与模型", "通过已配置的 LLM 接口进行对话和任务规划。", model.isNotBlank())
+                        AboutCapabilityRow("无障碍操作", "读取界面并执行 Agent 规划的设备操作。", UiObserverService.instance != null)
+                        AboutCapabilityRow("ROOT 能力", "在设备已授权时执行需要 ROOT 的系统操作。", rootGranted == true)
+                        AboutCapabilityRow("悬浮状态窗", "在其他应用上显示任务步骤和运行状态。", overlayEnabled && overlayGranted)
+                        AboutCapabilityRow("本地会话与记忆", "在设备本地保存会话、附件摘要和 App 记忆。", true)
+                    }
+                }
+
+                Spacer(Modifier.height(14.dp))
+                Text("隐私说明", fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = Muted)
+                Surface(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 6.dp),
+                    shape = RoundedCornerShape(16.dp),
+                    color = Color(0xFFFAFBFC),
+                    border = BorderStroke(1.dp, Line)
+                ) {
+                    Text(
+                        "会话、附件解析结果和 App 记忆默认保存在本设备。仅当你配置并启用模型接口或远程日志时，相关请求/日志才会发送到对应服务；API Key 和日志凭证由你自行管理。ROOT、无障碍和悬浮窗能力均遵循系统授权状态。",
+                        fontSize = 10.5.sp,
+                        color = Muted,
+                        lineHeight = 16.sp,
+                        modifier = Modifier.padding(12.dp)
+                    )
                 }
             }
         }

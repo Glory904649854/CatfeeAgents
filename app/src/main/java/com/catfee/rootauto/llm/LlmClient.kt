@@ -37,8 +37,8 @@ object LlmClient {
 
     private const val TAG = "LlmClient"
 
-    /** 普通对话/工具调用超时, 推理模型首字较慢, 给足 120s */
-    private const val CHAT_TIMEOUT_MS = 120_000L
+    /** 普通对话/工具调用总超时; 与 OkHttp callTimeout 及 Agent 调用方保持一致。 */
+    private const val CHAT_TIMEOUT_MS = 180_000L
 
     /** 拉模型列表超时 */
     private const val MODELS_TIMEOUT_MS = 20_000L
@@ -51,6 +51,7 @@ object LlmClient {
             .connectTimeout(15, TimeUnit.SECONDS)
             .readTimeout(CHAT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
             .writeTimeout(30, TimeUnit.SECONDS)
+            .callTimeout(CHAT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
             .retryOnConnectionFailure(true)
             .build()
     }
@@ -138,7 +139,7 @@ object LlmClient {
      * 参数:
      *   provider   LLM 配置
      *   messages   已构造好的 OpenAI 消息数组
-     *   timeoutMs  超时, 默认 120s
+     *   timeoutMs  超时, 默认 180s
      * 返回: LlmResult
      * 使用场景: 截图降级识别 (把图片交给视觉模型读屏)
      */
@@ -233,7 +234,7 @@ object LlmClient {
         tools: JSONArray,
         onReasoning: (String) -> Unit = {},
         onContent: (String) -> Unit = {},
-        timeoutMs: Long = 180_000
+        timeoutMs: Long = CHAT_TIMEOUT_MS
     ): LlmResult = withContext(Dispatchers.IO) {
         val started = System.currentTimeMillis()
         val base = normalizeBase(provider.baseUrl)

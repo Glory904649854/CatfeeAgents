@@ -50,7 +50,10 @@ class AgentStatusService : Service() {
         private const val NOTIFICATION_ID = 1001
         private const val TAG = "AgentStatusService"
         private const val ACTION_STOP_AGENT = "com.catfee.rootauto.action.STOP_AGENT"
+        private const val ACTION_PAUSE_AGENT = "com.catfee.rootauto.action.PAUSE_AGENT"
+        private const val ACTION_RESUME_AGENT = "com.catfee.rootauto.action.RESUME_AGENT"
         private const val ACTION_REFRESH_OVERLAY = "com.catfee.rootauto.action.REFRESH_OVERLAY"
+        private const val EXTRA_SESSION_ID = "session_id"
 
         @Volatile private var alive = false
 
@@ -71,6 +74,7 @@ class AgentStatusService : Service() {
         }
 
         private fun phaseLabel(phase: String): String = when (phase) {
+            "paused" -> "已暂停"
             "waiting_llm" -> "等待模型"
             "operating" -> "操作中"
             "waiting_confirm" -> "等待确认"
@@ -82,6 +86,7 @@ class AgentStatusService : Service() {
         }
 
         private fun phaseColor(phase: String): Int = when (phase) {
+            "paused" -> Color.parseColor("#7C3AED")
             "waiting_llm" -> Color.parseColor("#D97706")
             "operating" -> Color.parseColor("#64748B")
             "waiting_confirm" -> Color.parseColor("#EA580C")
@@ -128,7 +133,7 @@ class AgentStatusService : Service() {
             AgentController.agentState
                 .distinctUntilChangedBy { s ->
                     if (s == null) emptyList<Any>() else listOf(
-                        s.running, s.phase, s.stepNumber, s.pendingConfirm?.tool,
+                        s.running, s.paused, s.phase, s.stepNumber, s.pendingConfirm?.tool,
                         s.terminalKind, s.lastEventText, s.result
                     )
                 }
@@ -204,8 +209,11 @@ class AgentStatusService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        val sessionId = intent?.getStringExtra(EXTRA_SESSION_ID).orEmpty()
         when (intent?.action) {
-            ACTION_STOP_AGENT -> AgentController.stopAgent()
+            ACTION_STOP_AGENT -> if (sessionId.isNotBlank()) AgentController.stopAgent(sessionId)
+            ACTION_PAUSE_AGENT -> if (sessionId.isNotBlank()) AgentController.pauseAgent(sessionId)
+            ACTION_RESUME_AGENT -> if (sessionId.isNotBlank()) AgentController.resumeAgent(sessionId)
             ACTION_REFRESH_OVERLAY -> {
                 lastState?.let { syncOverlay(it) }
             }
@@ -254,9 +262,19 @@ class AgentStatusService : Service() {
             this, 1, openIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
+        val sessionId = state.sessionId
+        val requestBase = 10_000 + (sessionId.hashCode() and 0x0FFF)
+        fun actionIntent(action: String) = Intent(this, AgentStatusService::class.java).apply {
+            setAction(action)
+            putExtra(EXTRA_SESSION_ID, sessionId)
+        }
         val stopPi = PendingIntent.getService(
-            this, 2,
-            Intent(this, AgentStatusService::class.java).setAction(ACTION_STOP_AGENT),
+            this, requestBase + 1, actionIntent(ACTION_STOP_AGENT),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        val pauseResumeAction = if (state.paused) ACTION_RESUME_AGENT else ACTION_PAUSE_AGENT
+        val pauseResumePi = PendingIntent.getService(
+            this, requestBase + 2, actionIntent(pauseResumeAction),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
         val useful = state.steps
@@ -306,7 +324,14 @@ class AgentStatusService : Service() {
             .setWhen(if (state.startedAtWall > 0) state.startedAtWall else System.currentTimeMillis())
             .setUsesChronometer(ongoing && state.startedAtWall > 0)
             .addAction(android.R.drawable.ic_menu_view, "打开", openPi)
-            .addAction(android.R.drawable.ic_menu_close_clear_cancel, "停止", stopPi)
+        if (ongoing) {
+            builder.addAction(
+                if (state.paused) android.R.drawable.ic_media_play else android.R.drawable.ic_media_pause,
+                if (state.paused) "继续" else "暂停",
+                pauseResumePi
+            )
+            builder.addAction(android.R.drawable.ic_menu_close_clear_cancel, "停止", stopPi)
+        }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             builder.setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
         }
@@ -353,7 +378,6 @@ class AgentStatusService : Service() {
                 WindowManager.LayoutParams.WRAP_CONTENT,
                 WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                    WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
                     WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
                 PixelFormat.TRANSLUCENT
             ).apply {
@@ -370,6 +394,16 @@ class AgentStatusService : Service() {
                 (200 * resources.displayMetrics.density).toInt()
             view.findViewById<TextView>(R.id.overlay_detail)?.maxWidth =
                 (200 * resources.displayMetrics.density).toInt()
+            view.findViewById<View>(R.id.overlay_pause)?.setOnClickListener {
+                val s = lastState ?: return@setOnClickListener
+                if (s.sessionId.isBlank()) return@setOnClickListener
+                if (s.paused) AgentController.resumeAgent(s.sessionId)
+                else AgentController.pauseAgent(s.sessionId)
+            }
+            view.findViewById<View>(R.id.overlay_stop)?.setOnClickListener {
+                val s = lastState ?: return@setOnClickListener
+                if (s.sessionId.isNotBlank()) AgentController.stopAgent(s.sessionId)
+            }
         } catch (e: Exception) {
             android.util.Log.w(TAG, "添加悬浮窗失败: ${e.message}")
             DisplaySettings.setOverlayEnabled(this, false)
@@ -381,6 +415,16 @@ class AgentStatusService : Service() {
         val view = overlayView ?: return
         view.findViewById<TextView>(R.id.overlay_title)?.text =
             "Step ${s.stepNumber} · ${phaseLabel(s.phase)} · ${elapsedText(s.startedAtElapsed)}"
+        view.findViewById<TextView>(R.id.overlay_pause)?.apply {
+            text = if (s.paused) "▶" else "Ⅱ"
+            contentDescription = if (s.paused) "继续" else "暂停"
+            isEnabled = s.running
+            alpha = if (s.running) 1f else 0.45f
+        }
+        view.findViewById<TextView>(R.id.overlay_stop)?.apply {
+            isEnabled = s.running
+            alpha = if (s.running) 1f else 0.45f
+        }
         val age = eventAgeSec(s)
         val detail = buildString {
             append(s.lastEventText.ifBlank { s.currentTool }.ifBlank { "运行中" }.take(60))

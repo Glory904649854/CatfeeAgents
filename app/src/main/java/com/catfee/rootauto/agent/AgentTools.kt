@@ -36,13 +36,7 @@ object AgentTools {
 
     private const val TAG = "AgentTools"
 
-    /** 上一次 observe 的界面文本哈希, 用于去重 */
-    @Volatile
-    private var lastObserveHash: String = ""
-    private var lastReadPageHash: String = ""
-    private var lastSeeHash: String = ""
-    private var lastSeeQuestion: String = ""
-    private var lastSeeText: String = ""
+    /** observe/read_page/see_screen 的去重状态必须按任务隔离, 不能让上一个会话污染当前会话。 */
 
     /** observe 之后等待界面稳定的默认时间, 太短会读到旧界面 */
     const val DEFAULT_SETTLE_MS = 800L
@@ -52,6 +46,16 @@ object AgentTools {
         var agentMode: Boolean = false
         var agentBlocked: Boolean = false
         val activeGroups: MutableSet<String> = mutableSetOf()
+
+        // 观察/验证/视觉缓存按一次 Agent run 隔离，避免跨会话返回过期结果。
+        // lastObservedHash 同时供 observe 去重和 verify_changed 做动作前后比对。
+        var lastObservedHash: String = ""
+        var lastOcrHash: String = ""
+        var lastReadPageHash: String = ""
+        var lastSeeHash: String = ""
+        var lastSeeQuestion: String = ""
+        var lastSeeText: String = ""
+        val mediaCache: MediaState.Cache = MediaState.Cache()
     }
 
     /**
@@ -267,7 +271,7 @@ object AgentTools {
         )
         .put(
             tool(
-                "wait", "等待一段时间, 用于视频缓冲、页面加载、动画结束。单次最长 5 分钟, 可重复调用。",
+                "wait", "等待一段时间, 用于页面加载、动画结束或用户明确要求的短暂等待。处理媒体播放时优先使用 wait_media。单次最长 5 分钟, 可重复调用。",
                 obj()
                     .put("ms", prop("integer", "等待毫秒数, 建议 1000~5000"))
                     .also { it.put("required", JSONArray().put("ms")) }
@@ -311,7 +315,7 @@ object AgentTools {
         )
         .put(
             tool(
-                "wait_for_text", "等待某个文字出现 (无障碍每秒 + OCR 每10秒)。等待视频/任务完成提示时用, 单次最长 5 分钟。",
+                "wait_for_text", "等待某个文字出现 (无障碍每秒 + OCR 每10秒), 适合等待页面状态或用户指定的结果。单次最长 5 分钟。",
                 obj()
                     .put("keyword", prop("string", "关键字, 如 已完成"))
                     .put("timeout_ms", prop("integer", "超时毫秒, 默认 8000, 最大 300000 (5分钟)"))
@@ -321,14 +325,14 @@ object AgentTools {
         .put(
             tool(
                 "media_state",
-                "读取当前播放页的当前时间/总时长/倍速/播放状态, 以及时间文本、倍速控件坐标。视频/音频/课件播放页优先用它, 不要靠猜。",
+                "读取当前媒体播放页的当前时间/总时长/倍速/播放状态, 以及时间文本和倍速控件坐标。仅在用户提出音视频相关需求时使用, 不要靠猜。",
                 obj()
             )
         )
         .put(
             tool(
                 "media_speed",
-                "切换当前播放器的倍速。会自动显示控制条、点“倍速/速度”控件并选择目标值; 视频任务优先用它设为 2.0, 不要自己猜倍速菜单坐标。",
+                "切换当前媒体播放器的倍速。会自动显示控制条、点“倍速/速度”控件并选择目标值; 仅按用户明确要求的目标倍速调用, 不要自己猜菜单坐标。",
                 obj()
                     .put("speed", prop("number", "目标倍速, 如 2.0、1.5、1.0"))
                     .also { it.put("required", JSONArray().put("speed")) }
@@ -337,7 +341,7 @@ object AgentTools {
         .put(
             tool(
                 "wait_media",
-                "按当前时间与总时长计算剩余时间并等待。视频页设置好倍速后用它等待; 页面要求看完 90% 就传 target_ratio=0.9, 否则默认等到结束。单次最长 5 分钟, 没到目标可再次调用。",
+                "按当前时间与总时长计算剩余时间并等待, 用于用户明确提出的媒体播放等待。target_ratio 仅在用户或当前页面明确给出目标比例时设置, 否则使用默认目标。单次最长 5 分钟, 没到目标可再次调用。",
                 obj()
                     .put("target_ratio", prop("number", "目标进度 0.1~1.0, 默认 1.0"))
                     .put("max_wait_ms", prop("integer", "单次最长等待毫秒, 默认 300000"))
@@ -687,8 +691,11 @@ object AgentTools {
         context: Context,
         provider: LlmSettings.Provider?,
         name: String,
-        argsJson: String
+        argsJson: String,
+        session: Session = Session(),
+        awaitIfPaused: suspend () -> Unit = {}
     ): String {
+        awaitIfPaused()
         // 模型偶尔会返回空串或非法 JSON, 统一兜底成空对象
         val args = try {
             if (argsJson.isBlank()) JSONObject() else JSONObject(argsJson)
@@ -698,16 +705,16 @@ object AgentTools {
         }
         return try {
             when (name) {
-                "observe" -> observe(context, provider)
-                "read_page" -> readPage()
+                "observe" -> observe(context, provider, session)
+                "read_page" -> readPage(session)
                 "see_screen" -> {
                     if (provider == null || !provider.usable) {
                         "视觉识别失败: LLM 配置不完整"
                     } else {
                         val q = args.optString("question").trim()
                         val screenHash = ToolRuntime.currentScreenHash()
-                        if (screenHash.isNotBlank() && screenHash == lastSeeHash &&
-                            q == lastSeeQuestion && lastSeeText.isNotBlank()
+                        if (screenHash.isNotBlank() && screenHash == session.lastSeeHash &&
+                            q == session.lastSeeQuestion && session.lastSeeText.isNotBlank()
                         ) {
                             "屏幕未变化 (hash=$screenHash), 不要重复 see_screen; " +
                                 "直接使用上一次视觉结果, 或用 ocr/find_text 定位。"
@@ -719,9 +726,9 @@ object AgentTools {
                             }
                             if (v.ok) {
                                 if (screenHash.isNotBlank()) {
-                                    lastSeeHash = screenHash
-                                    lastSeeQuestion = q
-                                    lastSeeText = v.text
+                                    session.lastSeeHash = screenHash
+                                    session.lastSeeQuestion = q
+                                    session.lastSeeText = v.text
                                 }
                                 "[视觉识别, ${v.elapsedMs}ms]\n${v.text}"
                             } else {
@@ -738,7 +745,7 @@ object AgentTools {
                 "verify_question" -> ToolRuntime.verifyQuestion(
                     args.optJSONArray("options") ?: JSONArray()
                 )
-                "verify_changed" -> ToolRuntime.verifyChanged()
+                "verify_changed" -> ToolRuntime.verifyChanged(session)
                 "second_opinion" -> {
                     if (provider == null || !provider.usable) {
                         "LLM 配置不完整"
@@ -774,7 +781,7 @@ object AgentTools {
                 "list_options" -> ToolRuntime.listOptions(args.optString("keyword"))
                 "get_activity" -> ToolRuntime.currentActivity()
                 "screenshot" -> ToolRuntime.screenshot()
-                "ocr" -> ToolRuntime.ocr()
+                "ocr" -> ToolRuntime.ocr(session)
                 "long_ocr" -> {
                     val scan = LongOcr.scan(
                         context, args.optInt("max_screens", 14)
@@ -791,13 +798,18 @@ object AgentTools {
                 }
                 "wait_for_text" -> ToolRuntime.waitForText(
                     args.optString("keyword"),
-                    args.optLong("timeout_ms", 8000)
+                    args.optLong("timeout_ms", 8000),
+                    awaitIfPaused
                 )
-                "media_state" -> MediaState.describe()
-                "media_speed" -> MediaState.setSpeed(args.optDouble("speed", 2.0))
+                "media_state" -> MediaState.describe(session.mediaCache)
+                "media_speed" -> MediaState.setSpeed(
+                    args.optDouble("speed", 2.0), session.mediaCache
+                )
                 "wait_media" -> MediaState.waitMedia(
                     args.optDouble("target_ratio", 1.0),
-                    args.optLong("max_wait_ms", 300_000L)
+                    args.optLong("max_wait_ms", 300_000L),
+                    awaitIfPaused,
+                    session.mediaCache
                 )
                 "tap_node" -> when (args.optString("by", "text").lowercase()) {
                     "id" -> ToolRuntime.tapId(args.optString("target"))
@@ -880,8 +892,10 @@ object AgentTools {
                         args.optInt("verify_times", 3),
                         args.optBoolean("submit", true),
                         args.optBoolean("reset", true),
-                        providerOverride = provider
-                    ) { Log.i(TAG, it) }
+                        providerOverride = provider,
+                        onLog = { Log.i(TAG, it) },
+                        awaitIfPaused = awaitIfPaused
+                    )
                     "submitted=${r.submitted}, answered=${r.answered}, ${r.message}"
                 }
                 "tool_list" -> ToolRuntime.catalog()
@@ -936,7 +950,7 @@ object AgentTools {
                     // 这里只拦截“长 wait”, 短 wait 仍可用于缓冲/加载。
                     if (ms > 30_000L) {
                         val media = try {
-                            MediaState.read()
+                            MediaState.read(session.mediaCache)
                         } catch (_: Exception) {
                             null
                         }
@@ -949,6 +963,7 @@ object AgentTools {
                     val start = System.currentTimeMillis()
                     var last = 0L
                     while (System.currentTimeMillis() - start < ms) {
+                        awaitIfPaused()
                         val remain = ms - (System.currentTimeMillis() - start)
                         kotlinx.coroutines.delay(minOf(1000L, remain).coerceAtLeast(50L))
                         val elapsed = System.currentTimeMillis() - start
@@ -1014,7 +1029,7 @@ object AgentTools {
         } else null
     }
 
-    private suspend fun readPage(): String {
+    private suspend fun readPage(session: Session): String {
         val svc = UiObserverService.instance ?: return "无障碍服务未连接"
         // 先校准旋转, 否则横屏播放器的 2340x1080 坐标会被当成竖屏坐标
         val (screenW, screenH) = try {
@@ -1047,11 +1062,11 @@ object AgentTools {
             }
         }
         val hash = Integer.toHexString(text.hashCode())
-        if (hash == lastReadPageHash) {
+        if (hash == session.lastReadPageHash) {
             return "页面未变化 (hash=$hash)。不要重复 read_page; " +
                 "需要定位用 find_text / scroll_to_text, 确认动作是否生效用 verify_changed。"
         }
-        lastReadPageHash = hash
+        session.lastReadPageHash = hash
         return text
     }
 
@@ -1061,7 +1076,11 @@ object AgentTools {
      * 返回: 界面描述文本
      * 使用场景: observe 工具
      */
-    private suspend fun observe(context: Context, provider: LlmSettings.Provider?): String {
+    private suspend fun observe(
+        context: Context,
+        provider: LlmSettings.Provider?,
+        session: Session
+    ): String {
         // 顺手刷新前台 Activity, 让模型知道自己在哪个界面
         // dumpsys 原始格式是 "mCurrentFocus=Window{4f4f213 u0 com.example.app/com.example.Activity}",
         // 直接整串塞给模型既费 token 又难读, 这里只取花括号内的 "包名/Activity" 部分
@@ -1090,18 +1109,17 @@ object AgentTools {
         if (snap != null && snap.nodes.isNotEmpty()) {
             // 播放页的 observe 已看到当前/总时长时先缓存, 控制条隐藏后 wait_media 仍能算剩余
             try {
-                MediaState.noteVisibleTimes(snap.nodes)
+                MediaState.noteVisibleTimes(snap.nodes, session.mediaCache)
             } catch (e: Exception) {
                 Log.w(TAG, "缓存媒体时间失败: ${e.message}")
             }
             val text = snap.toPromptText()
             val hash = Integer.toHexString(text.hashCode())
-            ToolRuntime.markObserved(hash)
-            if (hash == lastObserveHash) {
+            if (hash == session.lastObservedHash) {
                 return "界面未变化 (hash=$hash)。不要重复 observe; " +
                     "需要定位用 find_text, 需要完整树用 read_page, 确认动作是否生效用 verify_changed。"
             }
-            lastObserveHash = hash
+            session.lastObservedHash = hash
             return "$text\nhash=$hash"
         }
         // snapshot 为空但完整树还有文字时, 用完整树降级, 不要直接走 40s 的视觉模型
@@ -1134,12 +1152,11 @@ object AgentTools {
                 }
             }
             val hash = Integer.toHexString(text.hashCode())
-            ToolRuntime.markObserved(hash)
-            if (hash == lastObserveHash) {
+            if (hash == session.lastObservedHash) {
                 return "界面未变化 (hash=$hash)。不要重复 observe; " +
-                    "需要定位用 find_text, 确认动作是否生效用 verify_changed。"
+                    "需要定位用 find_text, 需要完整树用 read_page, 确认动作是否生效用 verify_changed。"
             }
-            lastObserveHash = hash
+            session.lastObservedHash = hash
             return "$text\nhash=$hash"
         }
         // 完整树也没有可用文字 (纯画布 / Surface / 自绘控件) → 视觉降级

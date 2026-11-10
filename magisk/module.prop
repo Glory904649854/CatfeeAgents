@@ -1,6 +1,6 @@
 id=catfee_root_auto
 name=CatfeeRootAuto 底层能力模块
-version=0.1.0
-versionCode=1
+version=1.0.0
+versionCode=10000
 author=CatfeeRootAuto
 description=为 CatfeeRootAuto App 提供内核级输入注入(uinput)、截图与 shell 能力。不修改目标 App, 不注入进程。

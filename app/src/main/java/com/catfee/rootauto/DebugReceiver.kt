@@ -81,8 +81,9 @@ class DebugReceiver : BroadcastReceiver() {
                     intent.getStringExtra("title").orEmpty(),
                     3,
                     true,
-                    intent.getBooleanExtra("reset", true)
-                ) { Log.i(TAG, it) }
+                    intent.getBooleanExtra("reset", true),
+                    onLog = { line -> Log.i(TAG, line) }
+                )
                 Log.i(TAG, "===== ANSWERFORM submitted=${r.submitted} answered=${r.answered} msg=${r.message} =====")
             }
             else -> Log.w(TAG, "未知调试命令: $cmd")

@@ -60,13 +60,14 @@ object ScreenGeometry {
         /**
          * display -> natural, 交给 uinput 前必须转。
          * ROTATION_90 表示屏幕相对自然方向逆时针转了 90°:
-         * 逻辑左上角对应自然右上角, 所以 x_n = naturalW - y, y_n = x。
+         * 逻辑左上角对应自然右上角, 所以 x_n = naturalW - 1 - y, y_n = x。
+         * 这里 x/y 是 viewport/display 坐标，不是长页面的 documentY。
          */
         fun toNatural(x: Int, y: Int): Pair<Int, Int> {
             val (nx, ny) = when (rotation) {
-                Surface.ROTATION_90 -> (naturalWidth - y) to x
-                Surface.ROTATION_180 -> (naturalWidth - x) to (naturalHeight - y)
-                Surface.ROTATION_270 -> y to (naturalHeight - x)
+                Surface.ROTATION_90 -> (naturalWidth - 1 - y) to x
+                Surface.ROTATION_180 -> (naturalWidth - 1 - x) to (naturalHeight - 1 - y)
+                Surface.ROTATION_270 -> y to (naturalHeight - 1 - x)
                 else -> x to y
             }
             return nx.coerceIn(0, naturalWidth - 1) to ny.coerceIn(0, naturalHeight - 1)

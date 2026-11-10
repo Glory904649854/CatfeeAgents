@@ -35,13 +35,10 @@ object ToolRuntime {
 
     private const val TAG = "ToolRuntime"
 
-    /** 上一次 observe 时的界面指纹, 用于 verify_changed */
-    @Volatile
-    private var lastObservedHash: String = ""
-
-    /** 上一次 OCR 文本的哈希, 用于去重 */
-    @Volatile
-    private var lastOcrHash: String = ""
+    /**
+     * 验证缓存由 AgentTools.Session 持有, 这里不再保留全局状态。
+     * 这样并行/连续会话不会互相污染 observe、ocr、verify_changed 的结果。
+     */
 
     // ---------------- 观察 ----------------
 
@@ -63,21 +60,22 @@ object ToolRuntime {
         return Integer.toHexString(sb.toString().hashCode())
     }
 
-    /** observe 时记录指纹, 供 verify_changed 比较 */
-    fun markObserved(hash: String) {
-        lastObservedHash = hash
-    }
-
     /**
-     * 功能: 验证界面相对上一次 observe 是否发生变化
+     * 功能: 验证界面相对当前 Agent 会话内上一次 observe 是否发生变化
      * 返回: 变化/未变化 + 新指纹
      * 使用场景: 点击/输入/滑动后确认动作是否真的生效
      */
-    fun verifyChanged(): String {
+    fun verifyChanged(session: AgentTools.Session): String {
         val now = currentScreenHash()
         if (now.isEmpty()) return "无法读取界面树, 不能判断变化"
-        val changed = now != lastObservedHash
-        return if (changed) "界面已变化 (hash=$now)" else "界面未变化 (hash=$now), 上一步可能无效"
+        val changed = session.lastObservedHash.isNotBlank() && now != session.lastObservedHash
+        return if (session.lastObservedHash.isBlank()) {
+            "没有可比较的 observe 指纹 (hash=$now), 请先 observe"
+        } else if (changed) {
+            "界面已变化 (hash=$now)"
+        } else {
+            "界面未变化 (hash=$now), 上一步可能无效"
+        }
     }
 
     /**
@@ -272,7 +270,7 @@ object ToolRuntime {
     }
 
     /** 本地 OCR 当前屏幕, 返回前 60 行文字与坐标 */
-    suspend fun ocr(): String {
+    suspend fun ocr(session: AgentTools.Session): String {
         val (bmp, err) = ScreenVision.captureBitmap()
         if (bmp == null) return "OCR 截图失败: $err"
         return try {
@@ -280,10 +278,10 @@ object ToolRuntime {
             if (rows.isEmpty()) return "OCR 未识别到文字"
             val full = rows.joinToString("\n") { "${it.text}@${it.box.centerX()},${it.box.centerY()}" }
             val hash = Integer.toHexString(full.hashCode())
-            if (hash == lastOcrHash) {
+            if (hash == session.lastOcrHash) {
                 return "OCR 内容未变化 (hash=$hash), 不要再重复 OCR; 需要定位请用 find_text 或直接操作"
             }
-            lastOcrHash = hash
+            session.lastOcrHash = hash
             buildString {
                 append("OCR ${rows.size} 行 (hash=").append(hash).append("):\n")
                 rows.take(60).forEach { r ->
@@ -301,13 +299,18 @@ object ToolRuntime {
      *   无障碍每秒查一次; OCR 每 10 秒补一次 (视频完成提示在 WebView 里, 无障碍可能读不到)。
      *   单次最长 5 分钟, 等待期间每 15 秒发一条进度, 避免界面长时间无反馈。
      */
-    suspend fun waitForText(keyword: String, timeoutMs: Long): String {
+    suspend fun waitForText(
+        keyword: String,
+        timeoutMs: Long,
+        awaitIfPaused: suspend () -> Unit = {}
+    ): String {
         if (keyword.isBlank()) return "keyword 为空"
         val start = System.currentTimeMillis()
         val timeout = timeoutMs.coerceIn(500, 300_000)
         var lastOcr = 0L
         var lastReport = 0L
         while (System.currentTimeMillis() - start < timeout) {
+            awaitIfPaused()
             val tree = UiObserverService.instance?.dumpTree(600).orEmpty()
             if (tree.any { it.text.contains(keyword) || it.desc.contains(keyword) }) {
                 return "已出现「$keyword」(无障碍), 耗时 ${System.currentTimeMillis() - start}ms"
@@ -336,6 +339,7 @@ object ToolRuntime {
                 )
             }
             delay(1000)
+            awaitIfPaused()
         }
         return "等待超时(${timeout}ms), 未出现「$keyword」"
     }
@@ -351,6 +355,42 @@ object ToolRuntime {
     private fun offscreenHint(label: String): String =
         "「$label」命中节点在屏幕外; 先 swipe/scroll_to_text 滚动到可见区域, 再用新坐标/tap_node。"
 
+    private data class ClickPick(
+        val target: UiObserverService.TreeNode?,
+        val ambiguous: List<UiObserverService.TreeNode> = emptyList()
+    )
+
+    /**
+     * 选择当前可见且最可能可点击的节点; 重复文案无法消歧时不盲点第一个。
+     */
+    private fun pickClickTarget(
+        tree: List<UiObserverService.TreeNode>,
+        w: Int,
+        h: Int,
+        matches: (UiObserverService.TreeNode) -> Boolean
+    ): ClickPick {
+        val candidates = tree.filter { matches(it) && it.visible && onScreen(it, w, h) }
+        if (candidates.isEmpty()) return ClickPick(null)
+        val ranked = candidates.map { node ->
+            val target = clickableAncestor(tree, node) ?: node
+            val score = (if (node.visible) 40 else 0) +
+                (if (node.clickable) 35 else 0) +
+                (if (target.clickable) 20 else 0) +
+                (if (node.cls.contains("Button", true)) 10 else 0) +
+                (if (node.text.isNotBlank()) 5 else 0)
+            Triple(node, target, score)
+        }.sortedByDescending { it.third }
+        val best = ranked.first()
+        val ties = ranked.filter { it.third == best.third }
+            .map { it.second }
+            .distinctBy { "${it.bounds.left},${it.bounds.top},${it.bounds.right},${it.bounds.bottom}" }
+        return if (ties.size > 1) ClickPick(null, ties) else ClickPick(best.second)
+    }
+
+    private fun ambiguousHint(label: String, nodes: List<UiObserverService.TreeNode>): String =
+        "找到多个「$label」候选, 未盲点; 请用 tap_node 的 index/id 或先滚动/观察区分: " +
+            nodes.take(5).joinToString("; ") { "#${it.index}@${it.bounds.centerX()},${it.bounds.centerY()}" }
+
     /** 按文字点击; 找不到时返回候选 */
     suspend fun tapText(keyword: String, exact: Boolean): String {
         val svc = UiObserverService.instance ?: return "无障碍服务未连接"
@@ -360,12 +400,13 @@ object ToolRuntime {
             val v = if (it.text.isNotBlank()) it.text else it.desc
             if (exact) v == keyword else v.contains(keyword)
         }
-        val node = tree.firstOrNull { matches(it) && onScreen(it, w, h) }
-        if (node == null) {
+        val picked = pickClickTarget(tree, w, h, matches)
+        if (picked.target == null) {
+            if (picked.ambiguous.isNotEmpty()) return ambiguousHint(keyword, picked.ambiguous)
             return if (tree.any(matches)) offscreenHint(keyword)
             else "未找到「$keyword」, 先用 find_text 看候选"
         }
-        val target = clickableAncestor(tree, node) ?: node
+        val target = picked.target
         val cx = target.bounds.centerX()
         val cy = target.bounds.centerY()
         if (!onScreen(target, w, h)) return offscreenHint(keyword)
@@ -381,12 +422,13 @@ object ToolRuntime {
         val (w, h) = DaemonClient.screenSize()
         val tree = svc.dumpTree(800)
         val matches: (UiObserverService.TreeNode) -> Boolean = { it.desc.contains(keyword) }
-        val node = tree.firstOrNull { matches(it) && onScreen(it, w, h) }
-        if (node == null) {
+        val picked = pickClickTarget(tree, w, h, matches)
+        if (picked.target == null) {
+            if (picked.ambiguous.isNotEmpty()) return ambiguousHint(keyword, picked.ambiguous)
             return if (tree.any(matches)) offscreenHint(keyword)
             else "未找到描述包含「$keyword」的节点"
         }
-        val target = clickableAncestor(tree, node) ?: node
+        val target = picked.target
         val cx = target.bounds.centerX()
         val cy = target.bounds.centerY()
         if (!onScreen(target, w, h)) return offscreenHint(keyword)
@@ -402,12 +444,13 @@ object ToolRuntime {
         val (w, h) = DaemonClient.screenSize()
         val tree = svc.dumpTree(800)
         val matches: (UiObserverService.TreeNode) -> Boolean = { it.resourceId.endsWith(idSuffix) }
-        val node = tree.firstOrNull { matches(it) && onScreen(it, w, h) }
-        if (node == null) {
+        val picked = pickClickTarget(tree, w, h, matches)
+        if (picked.target == null) {
+            if (picked.ambiguous.isNotEmpty()) return ambiguousHint("id=$idSuffix", picked.ambiguous)
             return if (tree.any(matches)) offscreenHint("id=$idSuffix")
             else "未找到 id 以「$idSuffix」结尾的节点"
         }
-        val target = clickableAncestor(tree, node) ?: node
+        val target = picked.target
         val cx = target.bounds.centerX()
         val cy = target.bounds.centerY()
         if (!onScreen(target, w, h)) return offscreenHint("id=$idSuffix")
@@ -462,7 +505,11 @@ object ToolRuntime {
             if (tree.any { it.text.contains(keyword) || it.desc.contains(keyword) }) {
                 return "第 ${i + 1} 次滚动前已看到「$keyword」"
             }
-                InputDispatcher.swipe(540, 1900, 540, 750, 420)
+            val (w, h) = DaemonClient.screenSize()
+            val startY = (h * 0.82f).toInt()
+            val endY = (h * 0.34f).toInt()
+            val moved = InputDispatcher.swipe(w / 2, startY, w / 2, endY, 420)
+            if (!moved) return "第 ${i + 1} 次滚动失败, 未找到「$keyword」"
             delay(700)
         }
         val tree = UiObserverService.instance?.dumpTree(800).orEmpty()
@@ -581,7 +628,7 @@ object ToolRuntime {
                 "你是一个严谨的答题与信息分析助手。先在心里逐步分析, 再给出简洁结论; 不确定时说明原因。"
             )
         ).put(JSONObject().put("role", "user").put("content", prompt))
-        val r = LlmClient.chat(p, messages, 120_000)
+        val r = LlmClient.chat(p, messages, 180_000)
         return if (r.ok) r.content else "LLM 调用失败: ${r.error}"
     }
 

@@ -48,13 +48,13 @@ object InputDispatcher {
 
     suspend fun doubleTap(x: Int, y: Int): Boolean {
         if (rotated()) {
-            val svc = UiObserverService.instance
-            if (svc != null) {
-                val a = svc.gestureTap(x, y)
-                delay(120)
-                val b = svc.gestureTap(x, y)
-                if (a && b) return true
-            }
+            val svc = UiObserverService.instance ?: return false
+            // 不要在一次手势部分成功后回退 daemon.doubleTap，否则会把已发送的
+            // 第一击再叠加成三击。旋转坐标系下两击必须整体由同一后端完成。
+            val first = svc.gestureTap(x, y)
+            if (!first) return false
+            delay(120)
+            return svc.gestureTap(x, y)
         }
         return DaemonClient.doubleTap(x, y)
     }

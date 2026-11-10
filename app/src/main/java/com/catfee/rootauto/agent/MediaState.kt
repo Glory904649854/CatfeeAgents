@@ -27,6 +27,17 @@ import kotlinx.coroutines.delay
  */
 object MediaState {
 
+    /** MediaState 的可变观察缓存按一次 Agent 会话隔离。 */
+    class Cache {
+        var lastDurationSec: Int? = null
+        var lastPositionSec: Int? = null
+        var lastSpeedX: Int? = null
+        var lastSpeedY: Int? = null
+        var lastControlWakeAt: Long = 0L
+    }
+
+    private val defaultCache = Cache()
+
     data class State(
         val hasMedia: Boolean,
         val playing: Boolean?,
@@ -64,30 +75,18 @@ object MediaState {
 
     // 播放器控制条会自动隐藏; 缓存最近一次读到的总时长/当前时间,
     // 之后只剩一个小计时器时也能算出剩余时间, 不再点画面 (点画面可能暂停视频)。
-    @Volatile
-    private var lastDurationSec: Int? = null
-
-    @Volatile
-    private var lastPositionSec: Int? = null
-
-    @Volatile
-    private var lastSpeedX: Int? = null
-
-    @Volatile
-    private var lastSpeedY: Int? = null
-
-    @Volatile
-    private var lastControlWakeAt: Long = 0L
-
     /** 当前屏幕的媒体状态; 只读, 不点击画面 */
-    suspend fun read(): State = readOnce()
+    suspend fun read(cache: Cache = defaultCache): State = readOnce(cache)
 
     /**
      * observe 的压缩树里已经看到“当前时间/总时长”时, 记到缓存。
      * 播放器随后隐藏控制条, wait_media 仍能按这个总时长等待,
      * 不必重新点画面或盲等。
      */
-    fun noteVisibleTimes(nodes: List<UiObserverService.UiNode>) {
+    fun noteVisibleTimes(
+        nodes: List<UiObserverService.UiNode>,
+        cache: Cache = defaultCache
+    ) {
         val hasPlayer = nodes.any { n ->
             val s = (n.cls + " " + n.resourceId).lowercase()
             s.contains("surfaceview") || s.contains("textureview") ||
@@ -110,12 +109,12 @@ object MediaState {
             }
         }
         val pair = pickTimePair(hits, null) ?: return
-        lastPositionSec = pair.first
-        lastDurationSec = pair.second
+        cache.lastPositionSec = pair.first
+        cache.lastDurationSec = pair.second
     }
 
     /** 读取一次, 不做任何点击 */
-    private suspend fun readOnce(): State {
+    private suspend fun readOnce(cache: Cache = defaultCache): State {
         try {
             // 先刷新横竖屏; 播放器页的坐标空间必须和 tap 一致
             DaemonClient.screenSize()
@@ -126,7 +125,7 @@ object MediaState {
         var source = "无障碍"
         var surface = findSurface(tree)
         var timeHits = collectTimeHits(tree)
-        var speedHits = collectSpeedHits(tree)
+        var speedHits = collectSpeedHits(tree, cache)
         var playing = detectPlaying(tree)
         var pair = pickTimePair(timeHits, surface)
 
@@ -144,44 +143,54 @@ object MediaState {
         var position = pair?.first
         var duration = pair?.second
         if (pair != null) {
-            lastPositionSec = position
-            lastDurationSec = duration
+            cache.lastPositionSec = position
+            cache.lastDurationSec = duration
         } else {
             // 控制条隐藏时通常只能读到当前时间 (或画面上的小计时器);
             // 用缓存的总时长补全, 不点击画面, 避免把播放暂停。
-            val cachedDur = lastDurationSec
+            val cachedDur = cache.lastDurationSec
             if (cachedDur != null && timeHits.isNotEmpty()) {
                 val all = timeHits.map { it.sec }
                 val current = all.filter { it in 1 until cachedDur }.maxOrNull()
                     ?: if (all.any { it >= cachedDur }) cachedDur else null
-                val previous = lastPositionSec
+                val previous = cache.lastPositionSec
                 // 新视频一般从 00:xx 开始; 当前时间突然远小于上一位置时清掉旧时长,
                 // 避免把上一个视频的 17:44 套到新视频上, 误判“已经播完”。
                 if (current != null && previous != null && current + 30 < previous) {
-                    lastDurationSec = null
-                    lastPositionSec = null
+                    cache.lastDurationSec = null
+                    cache.lastPositionSec = null
                 } else if (current != null && current > cachedDur + 30) {
-                    lastDurationSec = null
-                    lastPositionSec = null
+                    cache.lastDurationSec = null
+                    cache.lastPositionSec = null
                 } else {
                     position = current ?: previous
                     duration = cachedDur
-                    if (position != null) lastPositionSec = position
+                    if (position != null) cache.lastPositionSec = position
                 }
             }
         }
         val currentSpeed = pickCurrentSpeed(speedHits)
         val speedText = speedHits.map { it.text }.distinct().joinToString(", ")
 
-        val hasMedia = surface != null || speedHits.isNotEmpty() || playing != null ||
-            timeHits.size >= 2 ||
-            timeHits.any { it.id.contains("time", true) || it.id.contains("duration", true) }
+        // 单独的 Surface、"倍速" 文本或一个 MM:SS 都不足以证明当前是媒体页：
+        // 普通视频封面/课程列表/悬浮层也常带这些元素。至少需要时间对、
+        // 明确的播放器控件/状态，或带 time/duration 语义的节点和有效时间。
+        val hasTimePair = pair != null && position != null && duration != null && duration > position
+        val hasNamedTime = timeHits.any {
+            (it.id.contains("time", true) || it.id.contains("duration", true)) &&
+                it.sec > 0
+        }
+        val hasControls = speedHits.any { it.control } && (surface != null || hasTimePair)
+        val hasMedia = (hasTimePair &&
+            (surface != null || hasNamedTime || playing != null || speedHits.any { it.control })) ||
+            hasNamedTime ||
+            (playing != null && (surface != null || timeHits.isNotEmpty())) || hasControls
 
         if (!hasMedia) {
-            lastPositionSec = null
-            lastDurationSec = null
-            lastSpeedX = null
-            lastSpeedY = null
+            cache.lastPositionSec = null
+            cache.lastDurationSec = null
+            cache.lastSpeedX = null
+            cache.lastSpeedY = null
         }
 
         return State(
@@ -201,24 +210,24 @@ object MediaState {
     }
 
     /** 给模型的紧凑描述 */
-    suspend fun describe(): String = read().details
+    suspend fun describe(cache: Cache = defaultCache): String = read(cache).details
 
     /**
      * 控制条隐藏导致读不到任何时间时, 点一次画面中心把控制条叫出来再读。
      * 只在 waitMedia 里用, 且 3 秒内不重复点; 若播放器把它当暂停, 下一段等待会发现无进度并返回。
      */
-    private suspend fun wakeControlsAndRead(fallback: State): State {
+    private suspend fun wakeControlsAndRead(fallback: State, cache: Cache): State {
         val surface = fallback.surface ?: return fallback
         val now = System.currentTimeMillis()
-        if (now - lastControlWakeAt < 3_000L) return fallback
-        lastControlWakeAt = now
+        if (now - cache.lastControlWakeAt < 3_000L) return fallback
+        cache.lastControlWakeAt = now
         return try {
             InputDispatcher.tap(surface.centerX(), surface.centerY())
             // 控制条有动画/布局延迟, 连续读三次, 不要 1 秒读不到就放弃
             var last = fallback
             for (i in 0 until 3) {
                 delay(1_000)
-                last = readOnce()
+                last = readOnce(cache)
                 if (last.positionSec != null || last.durationSec != null) return last
             }
             last
@@ -233,24 +242,30 @@ object MediaState {
      * @param targetRatio 目标进度, 默认 1.0 (等到结束); 页面要求 90% 时传 0.9
      * @param maxWaitMs   单次最长等待, 默认 5 分钟; 没到目标可再次调用
      */
-    suspend fun waitMedia(targetRatio: Double = 1.0, maxWaitMs: Long = 300_000L): String {
-        var before = read()
+    suspend fun waitMedia(
+        targetRatio: Double = 1.0,
+        maxWaitMs: Long = 300_000L,
+        awaitIfPaused: suspend () -> Unit = {},
+        cache: Cache = defaultCache
+    ): String {
+        awaitIfPaused()
+        var before = read(cache)
         if (!before.hasMedia) {
             return "未检测到媒体播放信息; 先 observe/media_state 确认当前确实是播放页。\n" +
                 before.details
         }
         if (before.positionSec == null && before.durationSec == null) {
             // 控制条隐藏且当前没读到: 点一次画面中心显示控制条, 再读一次
-            before = wakeControlsAndRead(before)
+            before = wakeControlsAndRead(before, cache)
         }
         // 控制条隐藏时允许用上一次 media_state/observe 缓存的总时长和位置继续等待
-        val pos = before.positionSec ?: lastPositionSec
-        val dur = before.durationSec ?: lastDurationSec
+        val pos = before.positionSec ?: cache.lastPositionSec
+        val dur = before.durationSec ?: cache.lastDurationSec
         if (pos == null || dur == null || dur <= 0) {
             // 时长未知时只做一次短等待并重新采样, 不盲目等待
             val ms = maxWaitMs.coerceIn(1_000L, 300_000L).coerceAtMost(30_000L)
-            waitWithProgress(ms)
-            val after = read()
+            waitWithProgress(ms, awaitIfPaused)
+            val after = read(cache)
             return "未读到完整时长, 已等待 ${ms / 1000}s, 请根据新进度判断。\n" + after.details
         }
 
@@ -265,7 +280,7 @@ object MediaState {
         var speed = before.speed
         var measured = false
         if (speed == null) {
-            val probe = measureSpeed(before)
+            val probe = measureSpeed(before, cache, awaitIfPaused)
             if (probe == null) {
                 return "播放进度没有前进, 可能已暂停/缓冲/未开始; 先点播放按钮或检查播放器。\n" +
                     before.details
@@ -284,13 +299,14 @@ object MediaState {
         // 分 15 秒一段等待: 每段都重新读进度。
         // 连续两段没有前进才认为暂停/缓冲, 避免一次旧界面读数误判。
         while (waited < budget) {
+            awaitIfPaused()
             val chunk = minOf(15_000L, budget - waited)
-            waitWithProgress(chunk)
+            waitWithProgress(chunk, awaitIfPaused)
             waited += chunk
-            var st = read()
+            var st = read(cache)
             if (st.positionSec == null) {
                 // 控制条在这 15 秒里自动隐藏了: 叫出来再读, 不要直接失败/让模型手动点
-                st = wakeControlsAndRead(st)
+                st = wakeControlsAndRead(st, cache)
             }
             val np = st.positionSec
             if (np == null) {
@@ -323,7 +339,7 @@ object MediaState {
             if (observed in 0.2..4.0) usedSpeed = observed
         }
 
-        val st = read()
+        val st = read(cache)
         val np = st.positionSec ?: current
         val goal = ((st.durationSec ?: dur) * targetRatio.coerceIn(0.1, 1.0)).toInt()
         val left = ((goal - np) / usedSpeed).toLong().coerceAtLeast(0L)
@@ -348,9 +364,9 @@ object MediaState {
      *   4. 点目标选项并返回结果。
      * 不依赖具体 App 的控件 id。
      */
-    suspend fun setSpeed(target: Double): String {
+    suspend fun setSpeed(target: Double, cache: Cache = defaultCache): String {
         val want = target.coerceIn(0.5, 4.0)
-        val first = read()
+        val first = read(cache)
         if (!first.hasMedia) {
             return "未检测到媒体播放信息; 先 observe/media_state 确认当前是播放页。\n" + first.details
         }
@@ -359,15 +375,15 @@ object MediaState {
         }
 
         var tree = UiObserverService.instance?.dumpTree(1000).orEmpty()
-        var hits = collectSpeedHits(tree)
+        var hits = collectSpeedHits(tree, cache)
         var control = hits.firstOrNull { it.control && it.value == null }
             ?: hits.firstOrNull { it.control }
         var options = hits.filter { it.value != null }
 
         // 控制条已隐藏: 用上一次读到的倍速控件坐标直接点, 不点画面中心 (避免暂停)
         if (control == null && options.isEmpty()) {
-            val sx = lastSpeedX
-            val sy = lastSpeedY
+            val sx = cache.lastSpeedX
+            val sy = cache.lastSpeedY
             if (sx == null || sy == null) {
                 return "播放器控制条已隐藏, 读不到倍速控件。不要退出/重进; " +
                     "保持播放并用 wait_media 按当前倍速等待。"
@@ -375,7 +391,7 @@ object MediaState {
             InputDispatcher.tap(sx, sy)
             delay(600)
             tree = UiObserverService.instance?.dumpTree(1000).orEmpty()
-            hits = collectSpeedHits(tree)
+            hits = collectSpeedHits(tree, cache)
             control = hits.firstOrNull { it.control && it.value == null }
                 ?: hits.firstOrNull { it.control }
             options = hits.filter { it.value != null }
@@ -386,7 +402,7 @@ object MediaState {
             InputDispatcher.tap(control.x, control.y)
             delay(700)
             tree = UiObserverService.instance?.dumpTree(1000).orEmpty()
-            hits = collectSpeedHits(tree)
+            hits = collectSpeedHits(tree, cache)
             options = hits.filter { it.value != null }
         }
 
@@ -418,7 +434,7 @@ object MediaState {
         // 选完后菜单通常还开着, 点菜单左侧的视频空白处关闭它;
         // 菜单会消费这次外部点击, 一般不会触发播放/暂停。
         val afterTree = UiObserverService.instance?.dumpTree(1000).orEmpty()
-        val stillOptions = collectSpeedHits(afterTree).filter { it.value != null }
+        val stillOptions = collectSpeedHits(afterTree, cache).filter { it.value != null }
         if (stillOptions.isNotEmpty()) {
             val surface = first.surface
             val x = surface?.let { it.left + it.width() / 3 } ?: 800
@@ -447,7 +463,10 @@ object MediaState {
         return out
     }
 
-    private fun collectSpeedHits(tree: List<UiObserverService.TreeNode>): List<SpeedHit> {
+    private fun collectSpeedHits(
+        tree: List<UiObserverService.TreeNode>,
+        cache: Cache = defaultCache
+    ): List<SpeedHit> {
         val out = ArrayList<SpeedHit>()
         for (n in tree) {
             val label = (n.text + " " + n.desc).trim()
@@ -459,8 +478,8 @@ object MediaState {
             val sx = n.bounds.centerX()
             val sy = n.bounds.centerY()
             if (control) {
-                lastSpeedX = sx
-                lastSpeedY = sy
+                cache.lastSpeedX = sx
+                cache.lastSpeedY = sy
             }
             out.add(
                 SpeedHit(
@@ -694,22 +713,33 @@ object MediaState {
         if (v == v.toInt().toDouble()) "${v.toInt()}x" else String.format("%.2fx", v)
 
     /** 用 2.5 秒的播放进度差估算实际倍速; 暂停/缓冲/跳转时返回 null */
-    private suspend fun measureSpeed(before: State): Double? {
+    private suspend fun measureSpeed(
+        before: State,
+        cache: Cache,
+        awaitIfPaused: suspend () -> Unit = {}
+    ): Double? {
         val p0 = before.positionSec ?: return null
         val t0 = System.currentTimeMillis()
-        delay(2_500)
-        var after = read()
-        if (after.positionSec == null) after = wakeControlsAndRead(after)
+        var elapsed = 0L
+        while (elapsed < 2_500L) {
+            awaitIfPaused()
+            val chunk = minOf(500L, 2_500L - elapsed)
+            delay(chunk)
+            elapsed += chunk
+        }
+        var after = read(cache)
+        if (after.positionSec == null) after = wakeControlsAndRead(after, cache)
         val p1 = after.positionSec ?: return null
-        val elapsed = ((System.currentTimeMillis() - t0) / 1000.0).coerceAtLeast(1.0)
-        val sp = (p1 - p0) / elapsed
+        val seconds = ((System.currentTimeMillis() - t0) / 1000.0).coerceAtLeast(1.0)
+        val sp = (p1 - p0) / seconds
         return if (sp in 0.2..4.0) sp else null
     }
 
-    private suspend fun waitWithProgress(ms: Long) {
+    private suspend fun waitWithProgress(ms: Long, awaitIfPaused: suspend () -> Unit = {}) {
         val start = System.currentTimeMillis()
         var last = 0L
         while (System.currentTimeMillis() - start < ms) {
+            awaitIfPaused()
             val remain = ms - (System.currentTimeMillis() - start)
             delay(remain.coerceIn(50L, 1_000L))
             val elapsed = System.currentTimeMillis() - start

@@ -12,7 +12,7 @@
 ##########################################################################
 
 param(
-    [string]$Version = "0.1.0"
+    [string]$Version = "1.0.0"
 )
 
 $ErrorActionPreference = "Stop"

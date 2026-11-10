@@ -12,6 +12,7 @@ import com.catfee.rootauto.session.ChatMessage
 import com.catfee.rootauto.session.SessionManager
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
@@ -68,7 +69,8 @@ object AgentController {
         val phaseStartedAtElapsed: Long = 0L,
         val lastEventText: String = "",
         val terminalKind: String = "",
-        val sessionTitle: String = ""
+        val sessionTitle: String = "",
+        val paused: Boolean = false
     )
 
     private class Run(
@@ -80,6 +82,9 @@ object AgentController {
     ) {
         var job: Job? = null
         @Volatile var confirm: CompletableDeferred<Boolean>? = null
+        @Volatile var pauseGate: CompletableDeferred<Unit>? = null
+        @Volatile var paused: Boolean = false
+        @Volatile var pausePhase: String = "waiting_llm"
         @Volatile var agentClaimed: Boolean = false
         @Volatile var conflictReason: String = ""
     }
@@ -141,10 +146,11 @@ object AgentController {
             it.copy(
                 steps = it.steps + step,
                 currentTool = if (tool.isNotBlank()) tool else it.currentTool,
-                phase = nextPhase,
-                phaseStartedAtElapsed = if (nextPhase != it.phase) now else it.phaseStartedAtElapsed,
+                phase = if (run.paused) "paused" else nextPhase,
+                paused = run.paused,
+                phaseStartedAtElapsed = if (run.paused || nextPhase != it.phase) now else it.phaseStartedAtElapsed,
                 lastEventAtElapsed = now,
-                lastEventText = text.take(160)
+                lastEventText = if (run.paused) "已暂停, 等待继续" else text.take(160)
             )
         }
         publishState(run)
@@ -154,13 +160,22 @@ object AgentController {
     private fun updatePhase(run: Run, phase: String, step: Int, detail: String) {
         val now = SystemClock.elapsedRealtime()
         run.state.update {
-            it.copy(
-                phase = phase,
-                stepNumber = if (step > 0) step else it.stepNumber,
-                phaseStartedAtElapsed = if (phase != it.phase) now else it.phaseStartedAtElapsed,
-                lastEventAtElapsed = now,
-                lastEventText = detail.ifBlank { it.lastEventText }.take(160)
-            )
+            if (run.paused) {
+                it.copy(
+                    paused = true,
+                    lastEventAtElapsed = now,
+                    lastEventText = "已暂停, 等待继续"
+                )
+            } else {
+                it.copy(
+                    paused = false,
+                    phase = phase,
+                    stepNumber = if (step > 0) step else it.stepNumber,
+                    phaseStartedAtElapsed = if (phase != it.phase) now else it.phaseStartedAtElapsed,
+                    lastEventAtElapsed = now,
+                    lastEventText = detail.ifBlank { it.lastEventText }.take(160)
+                )
+            }
         }
         publishState(run)
     }
@@ -246,8 +261,10 @@ object AgentController {
         }
 
         try {
+            awaitIfPaused(sessionId)
             var effectiveGoal = goal
             if (attachments.isNotEmpty()) {
+                awaitIfPaused(sessionId)
                 trace("tool", "开始解析 ${attachments.size} 个附件", "analyze_resources")
                 val attachmentContext = try {
                     AttachmentAnalyzer.analyzeAll(appContext, attachments) { progress ->
@@ -352,7 +369,8 @@ object AgentController {
                     claimAgentMode = { claimAgentMode(run) },
                     onPhase = { phase, step, detail ->
                         updatePhase(run, phase, step, detail)
-                    }
+                    },
+                    awaitIfPaused = { awaitIfPaused(sessionId) }
                 )
             } catch (e: kotlinx.coroutines.CancellationException) {
                 "已停止"
@@ -392,6 +410,7 @@ object AgentController {
                     blockedReason = run.conflictReason,
                     phase = terminal,
                     terminalKind = terminal,
+                    paused = false,
                     lastEventAtElapsed = endElapsed
                 )
             }
@@ -556,15 +575,100 @@ object AgentController {
         targets.forEach { stopRun(it) }
     }
 
-    /** 通知栏/悬浮窗停止按钮: 只停 Agent owner, 不影响其他 chat */
-    fun stopAgent() {
+    /** 暂停指定会话; 不取消 Job, 也不释放 Agent owner。 */
+    fun pause(sessionId: String = ""): Boolean {
+        val run = runs[keyOf(sessionId)] ?: return false
+        synchronized(run) {
+            if (!run.state.value.running || run.paused) return false
+            run.paused = true
+            run.pausePhase = run.state.value.phase
+            run.pauseGate = CompletableDeferred()
+        }
+        val now = SystemClock.elapsedRealtime()
+        run.state.update {
+            it.copy(
+                paused = true,
+                phase = "paused",
+                phaseStartedAtElapsed = now,
+                lastEventAtElapsed = now,
+                lastEventText = "已暂停, 等待继续"
+            )
+        }
+        publishState(run)
+        return true
+    }
+
+    /** 继续指定会话; 不创建新 Job。 */
+    fun resume(sessionId: String = ""): Boolean {
+        val run = runs[keyOf(sessionId)] ?: return false
+        val gate: CompletableDeferred<Unit>?
+        val phase: String
+        synchronized(run) {
+            if (!run.state.value.running || !run.paused) return false
+            run.paused = false
+            phase = run.pausePhase.ifBlank { "waiting_llm" }
+            gate = run.pauseGate
+            run.pauseGate = null
+        }
+        val now = SystemClock.elapsedRealtime()
+        run.state.update {
+            it.copy(
+                paused = false,
+                phase = phase,
+                phaseStartedAtElapsed = now,
+                lastEventAtElapsed = now,
+                lastEventText = "已继续"
+            )
+        }
+        publishState(run)
+        gate?.complete(Unit)
+        return true
+    }
+
+    /** Agent owner 专用暂停入口; sessionId 必须匹配当前 owner。 */
+    fun pauseAgent(sessionId: String): Boolean {
+        val key = agentOwnerKey ?: return false
+        if (key != keyOf(sessionId)) return false
+        return pause(sessionId)
+    }
+
+    /** Agent owner 专用继续入口; sessionId 必须匹配当前 owner。 */
+    fun resumeAgent(sessionId: String): Boolean {
+        val key = agentOwnerKey ?: return false
+        if (key != keyOf(sessionId)) return false
+        return resume(sessionId)
+    }
+
+    /** 挂起点; 暂停时等待继续, 不取消当前 Job。 */
+    suspend fun awaitIfPaused(sessionId: String = "") {
+        val run = runs[keyOf(sessionId)] ?: return
+        while (true) {
+            val gate = synchronized(run) {
+                if (!run.paused || !run.state.value.running) null else run.pauseGate
+            } ?: return
+            try {
+                gate.await()
+            } catch (_: CancellationException) {
+                throw CancellationException("任务已取消")
+            }
+        }
+    }
+
+    /** 通知栏/悬浮窗停止按钮: 只停 Agent owner, 不影响其他 chat。 */
+    fun stopAgent(sessionId: String = "") {
         val key = agentOwnerKey ?: return
+        if (sessionId.isNotBlank() && key != keyOf(sessionId)) return
         runs[key]?.let { stopRun(it) }
     }
 
     private fun stopRun(run: Run) {
         run.confirm?.complete(false)
         run.confirm = null
+        synchronized(run) {
+            run.paused = false
+            run.pauseGate?.complete(Unit)
+            run.pauseGate = null
+        }
         run.job?.cancel()
         val now = SystemClock.elapsedRealtime()
         run.state.update {
@@ -577,6 +681,7 @@ object AgentController {
                 pendingConfirm = null,
                 phase = "stopped",
                 terminalKind = "stopped",
+                paused = false,
                 lastEventAtElapsed = now,
                 lastEventText = "用户已停止"
             )
