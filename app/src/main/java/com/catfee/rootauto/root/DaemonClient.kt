@@ -65,6 +65,10 @@ object DaemonClient {
      */
     private fun ensureStartedLocked(): Boolean {
         if (process?.isAlive == true && writer != null && reader != null) return true
+        if (!RootShell.isAvailable()) {
+            closeQuietlyLocked()
+            return false
+        }
         try {
             closeQuietlyLocked()
             val p = ProcessBuilder("su", "-c", "$DAEMON_BIN stdio 2>$DAEMON_LOG").start()
@@ -117,6 +121,10 @@ object DaemonClient {
      * 使用场景: 所有原子操作的底层通道
      */
     suspend fun call(method: String, vararg args: Any): JSONObject = withContext(Dispatchers.IO) {
+        if (!RootShell.isAvailable()) {
+            return@withContext JSONObject().put("ok", false)
+                .put("err", "当前为非 Root 模式，uinput/daemon 不可用")
+        }
         ioLock.withLock {
             try {
                 if (!ensureStartedLocked()) {

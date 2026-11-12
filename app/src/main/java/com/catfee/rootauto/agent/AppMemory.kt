@@ -42,6 +42,7 @@ object AppMemory {
         UiObserverService.instance?.currentPackage()
             ?.takeIf { it.isNotBlank() }
             ?.let { return it }
+        if (!RootShell.isAvailable()) return ""
         val line = RootShell.execText("dumpsys window 2>/dev/null | grep -m1 mCurrentFocus")
         val inner = line.substringAfter('{', "").substringBefore('}')
         val target = inner.split(' ').lastOrNull { it.contains('/') }.orEmpty()

@@ -2,13 +2,23 @@ package com.catfee.rootauto.a11y
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
+import android.graphics.Bitmap
 import android.graphics.Path
 import android.graphics.Rect
+import android.hardware.HardwareBuffer
+import android.os.Build
 import android.os.Bundle
+import android.os.SystemClock
 import android.util.Log
+import android.view.Display
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import com.catfee.rootauto.root.ScreenGeometry
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlin.coroutines.resume
 
 /**
  * UiObserverService —— 无障碍服务, 负责采集并压缩界面元素树
@@ -141,9 +151,10 @@ class UiObserverService : AccessibilityService() {
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        // 只记录包名, 不做任何耗时处理, 避免拖慢系统
+        // 只记录包名/类名, 不做任何耗时处理, 避免拖慢系统
         try {
             event?.packageName?.let { lastPackage = it.toString() }
+            event?.className?.let { lastClass = it.toString() }
         } catch (e: Exception) {
             Log.w(TAG, "处理事件失败: ${e.message}")
         }
@@ -534,6 +545,104 @@ class UiObserverService : AccessibilityService() {
     /** 前台 Activity 缓存, 由 Agent 的 observe 流程定期刷新 */
     @Volatile
     var cachedActivity: String = ""
+
+    /** 最近一次窗口事件的类名, 非 Root 下用于拼出 包名/类名 的近似 Activity */
+    @Volatile
+    private var lastClass: String = ""
+
+    /** 非 Root 下的近似前台 Activity; 完整组件名不可靠时退回包名 */
+    fun currentComponentGuess(): String {
+        val pkg = currentPackage()
+        if (pkg.isBlank()) return ""
+        if (cachedActivity.isNotBlank()) return cachedActivity
+        val cls = lastClass
+        if (cls.isBlank()) return pkg
+        return if (cls.startsWith(".")) "$pkg/$cls" else "$pkg/$cls"
+    }
+
+    /** 无障碍全局返回/Home/最近任务, 不需要 Root */
+    fun globalBack(): Boolean = try {
+        performGlobalAction(GLOBAL_ACTION_BACK)
+    } catch (e: Exception) {
+        false
+    }
+
+    fun globalHome(): Boolean = try {
+        performGlobalAction(GLOBAL_ACTION_HOME)
+    } catch (e: Exception) {
+        false
+    }
+
+    fun globalRecents(): Boolean = try {
+        performGlobalAction(GLOBAL_ACTION_RECENTS)
+    } catch (e: Exception) {
+        false
+    }
+
+    /** 对当前焦点输入框发送 IME 回车; 仅 API 30+ 且控件支持时可用 */
+    fun imeEnter(): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return false
+        return try {
+            val node = rootInActiveWindow?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+                ?: return false
+            node.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER.id)
+        } catch (e: Exception) {
+            Log.w(TAG, "IME enter 失败: ${e.message}")
+            false
+        }
+    }
+
+    // 非 Root 截图有系统频率限制, 串行并留最小间隔
+    private val screenshotMutex = Mutex()
+    private var lastScreenshotAt = 0L
+
+    /**
+     * Android 11+ 无障碍系统截图。返回的是当前显示方向的软件 Bitmap。
+     * 失败时返回 null: FLAG_SECURE、系统限流、服务未连接都可能失败。
+     */
+    suspend fun takeScreenshotBitmap(): Bitmap? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return null
+        return screenshotMutex.withLock {
+            val gap = 350L - (SystemClock.elapsedRealtime() - lastScreenshotAt)
+            if (gap > 0) delay(gap)
+            lastScreenshotAt = SystemClock.elapsedRealtime()
+            suspendCancellableCoroutine { cont ->
+                try {
+                    takeScreenshot(
+                        Display.DEFAULT_DISPLAY,
+                        mainExecutor,
+                        object : AccessibilityService.TakeScreenshotCallback {
+                            override fun onSuccess(result: AccessibilityService.ScreenshotResult) {
+                                var buffer: HardwareBuffer? = null
+                                try {
+                                    buffer = result.hardwareBuffer
+                                    val wrapped = Bitmap.wrapHardwareBuffer(buffer, result.colorSpace)
+                                    val copy = wrapped?.copy(Bitmap.Config.ARGB_8888, false)
+                                    if (!cont.isCompleted) cont.resume(copy)
+                                } catch (e: Exception) {
+                                    Log.w(TAG, "无障碍截图转 Bitmap 失败: ${e.message}")
+                                    if (!cont.isCompleted) cont.resume(null)
+                                } finally {
+                                    try {
+                                        buffer?.close()
+                                    } catch (_: Exception) {
+                                    }
+                                }
+                            }
+
+                            override fun onFailure(errorCode: Int) {
+                                Log.w(TAG, "无障碍截图失败: code=$errorCode")
+                                if (!cont.isCompleted) cont.resume(null)
+                            }
+                        }
+                    )
+                } catch (e: Exception) {
+                    Log.w(TAG, "无障碍截图请求异常: ${e.message}")
+                    if (!cont.isCompleted) cont.resume(null)
+                }
+            }
+        }
+    }
 
     /**
      * 功能: 给当前获得输入焦点的输入框设置文本

@@ -25,11 +25,15 @@ export default defineNuxtConfig({
     }
   },
 
+  devServer: {
+    port: 9777
+  },
+
   runtimeConfig: {
     dbPath: './data/catfee.db',
     adminUser: 'admin',
     adminPassword: 'change-me',
-    publicUrl: 'http://localhost:3000',
+    publicUrl: 'http://localhost:9777',
     sessionDays: 30
   },
 

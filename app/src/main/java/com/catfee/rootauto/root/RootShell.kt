@@ -24,6 +24,10 @@ object RootShell {
 
     private const val TAG = "Shell"
 
+    /** 能力探测结果缓存; null 表示尚未探测。非 Root 下用它避免反复拉起 su。 */
+    @Volatile
+    private var available: Boolean? = null
+
     /** 命令执行结果 */
     data class Result(
         val code: Int,
@@ -43,6 +47,9 @@ object RootShell {
      * 使用场景: 几乎所有需要 shell 的系统操作
      */
     suspend fun exec(cmd: String, timeoutMs: Long = 15_000): Result = withContext(Dispatchers.IO) {
+        if (!isAvailable()) {
+            return@withContext Result(-1, "", "当前为非 Root 模式，未执行 root 命令")
+        }
         try {
             // libsu 的 exec() 是阻塞调用, 用 runInterruptible 让协程超时能真正打断它
             val result = withTimeoutOrNull(timeoutMs) {
@@ -93,10 +100,16 @@ object RootShell {
      */
     fun appGrantedRoot(): Boolean? = try {
         // isAppGrantedRoot() 在部分环境会返回 null; 回退到 getShell() 实际探测一次。
-        // 已授权的设备直接复用常驻 shell, 不会重复弹窗。
-        Shell.isAppGrantedRoot() ?: Shell.getShell().isRoot
+        // 结果会缓存, 非 Root 设备不会在每个工具调用前反复尝试 su。
+        val result = Shell.isAppGrantedRoot() ?: Shell.getShell().isRoot
+        available = result
+        result
     } catch (e: Exception) {
         Log.w(TAG, "查询 root 授权失败: ${e.message}")
+        available = false
         false
     }
+
+    /** 已探测的 Root 能力; 未探测时先探测一次。 */
+    fun isAvailable(): Boolean = available ?: (appGrantedRoot() == true)
 }

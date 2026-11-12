@@ -10,7 +10,7 @@
 
 ```text
 Browser ──HTTP/SSE──┐
-                    ├─ Nuxt 4 / Nitro（单端口 3000）
+                    ├─ Nuxt 4 / Nitro（单端口 9777）
 Android Agent ──WS───┘
                     ├─ REST API
                     ├─ SSE（控制台实时事件）
@@ -48,7 +48,7 @@ Android Agent ──WS───┘
 cd web/console
 pnpm install
 cp .env.example .env        # Windows: copy .env.example .env
-pnpm dev                    # http://localhost:3000
+pnpm dev                    # http://localhost:9777
 ```
 
 首次启动会自动建表，并创建管理员：
@@ -106,8 +106,8 @@ web/console/
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `NUXT_PORT` | `3000` | 单端口 |
-| `NUXT_PUBLIC_URL` | `http://localhost:3000` | 对外地址，用于生成 WS / 注册地址 |
+| `PORT` | `9777` | 生产端口（开发由 devServer 指定） |
+| `NUXT_PUBLIC_URL` | `http://localhost:9777` | 对外地址，用于生成 WS / 注册地址 |
 | `NUXT_DB_PATH` | `./data/catfee.db` | SQLite 路径 |
 | `NUXT_ADMIN_USER` | `admin` | 首次启动创建的管理员 |
 | `NUXT_ADMIN_PASSWORD` | `change-me` | 首次启动密码 |

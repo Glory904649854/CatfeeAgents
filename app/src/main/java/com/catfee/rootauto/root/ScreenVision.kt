@@ -1,8 +1,12 @@
 package com.catfee.rootauto.root
 
 import android.graphics.Bitmap
+import android.os.Build
 import android.util.Base64
 import android.util.Log
+import com.catfee.rootauto.a11y.UiObserverService
+import com.catfee.rootauto.device.DeviceCapabilities
+import com.catfee.rootauto.device.ScreenshotSource
 import com.catfee.rootauto.llm.LlmClient
 import com.catfee.rootauto.llm.LlmSettings
 import kotlinx.coroutines.Dispatchers
@@ -76,11 +80,11 @@ object ScreenVision {
      * 使用场景: 视觉兜底、失败存证
      */
     suspend fun captureJpegFrame(): JpegFrame = withContext(Dispatchers.IO) {
-        // 先缓存 natural 尺寸, 保证 see_screen 的 display 坐标和旋转一致
         try {
-            DaemonClient.screenSize()
+            // 非 Root 下用 DisplayManager 校准; Root 下保留 dumpsys 校准。
+            ScreenGeometry.refreshRotation()
         } catch (e: Exception) {
-            Log.w(TAG, "刷新屏幕尺寸失败: ${e.message}")
+            Log.w(TAG, "刷新屏幕方向失败: ${e.message}")
         }
         val (bmp, err) = captureBitmap()
         if (bmp == null) return@withContext JpegFrame("", 0, 0, err)
@@ -106,6 +110,30 @@ object ScreenVision {
      * 注意: 调用方负责 recycle 返回的 Bitmap
      */
     suspend fun captureBitmap(): Pair<Bitmap?, String> = withContext(Dispatchers.IO) {
+        val caps = DeviceCapabilities.current()
+
+        // 1) Root daemon 是首选: 更快, 且不受无障碍截图频率限制。
+        if (caps.daemon) {
+            val (bmp, err) = captureRootBitmap()
+            if (bmp != null) return@withContext bmp to ""
+            Log.w(TAG, "Root 截图失败, 尝试无障碍截图: $err")
+        }
+
+        // 2) Android 11+ 无障碍系统截图。
+        if (caps.screenshot == ScreenshotSource.ACCESSIBILITY ||
+            (caps.accessibility && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R)
+        ) {
+            val bmp = UiObserverService.instance?.takeScreenshotBitmap()
+            if (bmp != null) return@withContext bmp to ""
+            return@withContext null to
+                "无障碍截图失败（系统限流、页面禁止截图或服务刚重连）"
+        }
+
+        null to "当前模式不支持截图：未 Root，且无障碍截图不可用（需要 Android 11+）"
+    }
+
+    /** Root daemon 截图: 读取 /data/local/tmp 下的 raw RGBA 文件 */
+    private suspend fun captureRootBitmap(): Pair<Bitmap?, String> = withContext(Dispatchers.IO) {
         try {
             val (shotOk, w, h) = DaemonClient.shot(SHOT_PATH)
             if (!shotOk || w <= 0 || h <= 0) return@withContext null to "截图失败"

@@ -12,7 +12,7 @@
     "dev": "node scripts/check-node.mjs && node node_modules/nuxt/bin/nuxt.mjs dev",
     "build": "node scripts/check-node.mjs && node node_modules/nuxt/bin/nuxt.mjs build",
     "preview": "node scripts/check-node.mjs && node node_modules/nuxt/bin/nuxt.mjs preview",
-    "start": "node scripts/check-node.mjs && node .output/server/index.mjs",
+    "start": "node scripts/check-node.mjs && node scripts/start.mjs",
     "typecheck": "node scripts/check-node.mjs && node node_modules/nuxt/bin/nuxt.mjs typecheck",
     "db:reset": "node scripts/db-reset.mjs",
     "db:demo": "node scripts/check-node.mjs && node scripts/db-demo.mjs",

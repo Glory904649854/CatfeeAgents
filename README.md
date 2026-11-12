@@ -38,6 +38,7 @@
 | 📊 | **用量与成本** | 每个会话显示 tokens、上下文长度、消息/步骤数、累计耗时；可配置每 1M token 单价估算费用。 |
 | 📡 | **远程日志** | 可选接入 `clouddream-server` 的 `/logReport`，异步上报每一步输入、模型输出、工具参数与结果，便于回放和优化。 |
 | 🖥 | **Web 控制台** | 仓库内提供 Nuxt 单端口控制台：设备注册、任务下发、实时事件、暂停/继续/停止与审计。Agent 主动通过 WebSocket 接入，Web 端不直接操作设备。 |
+| ⚡ | **DECISION 加速** | 可选接入百炼 decision 接口，高置信度时跳过主模型的 observe / wait；默认关闭，点击、输入和完成仍由主模型决定。 |
 
 ## Web 控制台
 
@@ -48,13 +49,29 @@
 ```bash
 cd web/console
 pnpm install
-pnpm dev        # http://localhost:3000
+pnpm dev        # http://localhost:9777
 ```
 
 首次启动创建管理员 `admin / change-me`，可用环境变量覆盖。
 详见 [Web 控制台文档](docs/web-console.md)、
 [Agent 协议契约](contracts/README.md) 与 [OpenAPI](contracts/openapi.yaml)。
 
+## DECISION 加速（可选）
+
+设置 → 模型 → DECISION 加速，默认关闭。
+
+- Base URL / Key / 模型默认从 `local.properties` 的 `decision.baseUrl`、`decision.apiKey`、`decision.model` 读取，构建时写入 BuildConfig，不会进入仓库；其他开发者未配置时可在 App 内手动填写。
+- 开启后，高置信度时由百炼 decision 接口接管 `observe` / `wait`，跳过该轮主模型；点击、输入、`finish` 仍由主模型决定，避免分类器误操作。
+- 可调最小置信度（默认 0.75）和最多连续快速步数（默认 3）；连续失败两次会自动停用本次任务的 DECISION。
+- 本地实测（同一部署、同一把 Key）：路由决策中位数约 **124ms**（手机端稳态约 **200ms**，首次含 TLS 握手约 **1.1s**），`deepseek-v4.1-flash` 做同样的下一步判断约 **955ms**。实际任务提速取决于能跳过主模型的步骤占比。
+- 真实淘宝场景对比（非 Root，同一目标，DDR4 3600 16GB 最低价）：SimpleMode **91.8s / 345.8K tok / 68 步**；DecisionMode 两次为 **134.8s / 487.8K tok / 86 步** 和 **139.8s / 558.5K tok**。这个以点击、滑动、详情页探索为主的场景里 DECISION 反而更慢：快路径只覆盖 `observe/wait`，其余步骤仍要主模型，且分类器可能带来额外观察步骤。建议只在等待/读取型任务开启，点击密集任务保持关闭。
+
+复现实测：
+
+```bash
+set DASHSCOPE_API_KEY=your-key
+node scripts/bench-decision.mjs
+```
 
 ## 快速开始
 
@@ -64,13 +81,13 @@ pnpm dev        # http://localhost:3000
 | --- | --- |
 | 系统 | Android 8.0+（API 26） |
 | 架构 | `arm64-v8a` / `armeabi-v7a` |
-| Root | Magisk 或可用的 `su`，用于 uinput 注入、截图和部分系统操作 |
-| 无障碍 | 开启 CatfeeAgents 的无障碍服务 |
+| Root | 可选。Magisk 或可用的 `su` 用于 uinput 注入、快速截图和系统级操作；无 Root 时走无障碍 + 系统截图 |
+| 无障碍 | 开启 CatfeeAgents 的无障碍服务；非 Root 设备必需（Android 11+ 才支持系统截图） |
 | 通知 | Android 13+ 需授予通知权限，否则看不到 Agent 状态 |
 | 构建 | JDK 17、Android SDK 36 |
 | 网络 | 能访问所配置的 OpenAI 兼容接口；远程日志默认访问 `https://api.catfee.cn` |
 
-> 当前版本面向 **Root 设备**。非 Root 路线（无障碍点击 + MediaProjection + Shizuku/ADB）尚未落地，见[已知限制](#已知限制)。
+> **Root 是增强项，不是使用前提。** Android 11+ 无 Root 设备开启无障碍后即可读屏、点击、滑动、输入、启动 App，并使用系统无障碍截图做 OCR/视觉；Root 设备保留完整能力。Android 8–10 无 Root 暂不支持截图，详见[非 Root 模式](#非-root-模式)。
 
 ### 2. 构建与安装
 
@@ -100,7 +117,7 @@ adb shell settings put secure accessibility_enabled 1
 
 也可以手动进入「设置 → 无障碍 → 已下载的应用 → CatfeeAgents」开启。
 
-### 4. 安装 Root daemon（首次使用）
+### 4. 安装 Root daemon（可选，仅 Root 设备）
 
 `uinput` 点击/滑动依赖常驻 daemon。仓库已带 `daemon/dist` 预编译产物，可直接打包 Magisk 模块：
 
@@ -124,7 +141,7 @@ powershell -ExecutionPolicy Bypass -File daemon/build.ps1
 4. 点 **拉取模型列表**，接口返回的模型会全部列出来，点任意一个即可切换并保存；
 5. 也可以手动填写模型 ID 后点 **保存模型配置**。
 
-设置页顶部的能力标签会显示 `无障碍 / ROOT / 悬浮窗` 状态。API Key、Agent Token 使用 `EncryptedSharedPreferences` 保存。
+设置页顶部的能力标签会显示 `无障碍 / 手势 / 截图 / Root / 悬浮窗` 状态，以及 `完整模式 / 无障碍模式 / 仅聊天模式`。API Key、Agent Token 使用 `EncryptedSharedPreferences` 保存。
 
 ### 6. 开始任务
 
@@ -349,9 +366,19 @@ magisk/                          # Magisk 模块
 | P2 | 基本完成 | 文本候选消歧、OCR 质量门槛、documentY/viewportY 区分、read_page 截断说明、按 run 的观察/OCR/媒体缓存 |
 | 仍需真机验证 | 持续 | 不同 ROM、WebView、自绘页面、不同播放器和复杂表单的准确度需要设备回放数据验证；远程日志服务端权限/历史隔离仍取决于服务端实现 |
 
+## 非 Root 模式
+
+Android 11+ 且无障碍已开启时，无需 Root 即可：
+
+- 无障碍读树、节点点击、坐标手势、滑动、长按、输入文本、返回/Home/最近任务
+- `PackageManager` / `Intent` 启动应用、打开链接、查询包信息
+- `AccessibilityService.takeScreenshot` 系统截图 → 本地 OCR / 视觉模型 / 表单
+
+非 Root 下明确不支持：`shell`、`settings_put`、任意路径文件读写、`stop_app`、Magisk 模块安装，以及 Android 8–10 的截图（后续可加 MediaProjection）。设置页会按能力自动隐藏/拒绝这些工具，并显示当前模式。
+
 ## 已知限制
 
-- **仅支持 Root 设备**：非 Root 路线尚未实现；
+- **非 Root 能力边界**：Android 11+ 可使用无障碍手势与系统截图；`shell`、`settings_put`、任意路径文件、`stop_app`、Magisk 模块仍需要 Root；Android 8–10 无 Root 暂不支持截图；`FLAG_SECURE` 页面无法截图；
 - **Agent 全局单例**：聊天可以并发，但同一时间只允许一个会话操作手机；
 - **暂停是进程内暂停**：暂停不会取消当前 Job，但 App 进程被系统杀死后不能自动恢复原执行点；
 - **媒体/表单是通用能力而非业务流程**：Agent 不知道任何 App 的业务完成条件，必须依赖用户目标和页面证据；

@@ -188,6 +188,10 @@ import androidx.lifecycle.lifecycleScope
 import com.catfee.rootauto.a11y.UiObserverService
 import com.catfee.rootauto.agent.AgentController
 import com.catfee.rootauto.agent.AppMemory
+import com.catfee.rootauto.device.DeviceCapabilities
+import com.catfee.rootauto.device.DeviceMode
+import com.catfee.rootauto.llm.DecisionClient
+import com.catfee.rootauto.llm.DecisionSettings
 import com.catfee.rootauto.llm.LlmClient
 import com.catfee.rootauto.llm.LlmSettings
 import com.catfee.rootauto.llm.UsageSettings
@@ -205,6 +209,7 @@ import com.catfee.rootauto.session.SessionExporter
 import com.catfee.rootauto.session.SessionManager
 import com.catfee.rootauto.session.SessionSummary
 import kotlinx.coroutines.Dispatchers
+import org.json.JSONObject
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -412,6 +417,7 @@ private fun AgentConsole(activity: ComponentActivity) {
         if (showSettings) {
             rootGranted = withContext(Dispatchers.IO) { RootShell.appGrantedRoot() }
             overlayGranted = Settings.canDrawOverlays(activity)
+            DeviceCapabilities.refresh(activity, force = true)
         }
     }
 
@@ -1878,6 +1884,7 @@ private fun ApprovalCard(
     onAllow: () -> Unit,
     onDeny: () -> Unit
 ) {
+    val caps by DeviceCapabilities.state.collectAsState()
     Surface(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(18.dp),
@@ -1898,13 +1905,18 @@ private fun ApprovalCard(
                 Spacer(Modifier.width(9.dp))
                 Column(Modifier.weight(1f)) {
                     Text(
-                        "允许控制手机？",
+                        if (caps.root) "允许控制手机？" else "允许使用无障碍操作手机？",
                         fontSize = 12.5.sp,
                         fontWeight = FontWeight.SemiBold,
                         color = Color(0xFF92400E)
                     )
                     Text(
-                        "Agent 想${permissionAction(pending.tool)}。允许后本会话不再询问。",
+                        "Agent 想${permissionAction(pending.tool)}。" +
+                            if (caps.root) {
+                                "允许后本会话不再询问。"
+                            } else {
+                                "将通过无障碍读屏和手势执行；截图/OCR 受系统限制。允许后本会话不再询问。"
+                            },
                         fontSize = 10.5.sp,
                         color = Color(0xFF92400E).copy(alpha = 0.8f)
                     )
@@ -3075,6 +3087,7 @@ private fun SettingsSheet(
     val scrollState = rememberScrollState()
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val caps by DeviceCapabilities.state.collectAsState()
     var tab by rememberSaveable { mutableIntStateOf(0) }
     var memoryEntries by remember { mutableStateOf<List<AppMemory.MemoryEntry>>(emptyList()) }
     var editingMemory by remember { mutableStateOf<AppMemory.MemoryEntry?>(null) }
@@ -3121,7 +3134,7 @@ private fun SettingsSheet(
                     color = Ink,
                     modifier = Modifier.weight(1f)
                 )
-                RootBadge(rootGranted)
+                ModeBadge(caps.mode)
                 Spacer(Modifier.width(6.dp))
                 IconButton(onClick = onDismiss) {
                     Icon(Icons.Rounded.Close, "关闭", tint = Muted)
@@ -3155,8 +3168,10 @@ private fun SettingsSheet(
             }
             Spacer(Modifier.height(10.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                CapabilityChip("无障碍", UiObserverService.instance != null)
-                CapabilityChip("ROOT", rootGranted == true)
+                CapabilityChip("无障碍", caps.accessibility)
+                CapabilityChip("手势", caps.gestures)
+                CapabilityChip("截图", caps.hasScreenshot)
+                CapabilityChip("Root", caps.root)
                 CapabilityChip("悬浮窗", overlayGranted)
             }
             Spacer(Modifier.height(10.dp))
@@ -3260,6 +3275,8 @@ private fun SettingsSheet(
                         modifier = Modifier.padding(top = 8.dp)
                     )
                 }
+                Spacer(Modifier.height(18.dp))
+                DecisionModeSection()
             } else if (tab == 1) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
@@ -3872,6 +3889,40 @@ private fun CapabilityChip(label: String, ok: Boolean) {
 }
 
 @Composable
+private fun ModeBadge(mode: DeviceMode) {
+    val (label, active) = when (mode) {
+        DeviceMode.FULL -> "完整模式" to true
+        DeviceMode.ACCESSIBILITY -> "无障碍模式" to true
+        DeviceMode.CHAT_ONLY -> "仅聊天模式" to false
+    }
+    val color = when (mode) {
+        DeviceMode.FULL -> Success
+        DeviceMode.ACCESSIBILITY -> Warning
+        DeviceMode.CHAT_ONLY -> Muted
+    }
+    Surface(
+        shape = RoundedCornerShape(50),
+        color = color.copy(alpha = 0.10f),
+        border = BorderStroke(1.dp, color.copy(alpha = 0.25f))
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(Modifier.size(5.dp).background(color, CircleShape))
+            Spacer(Modifier.width(5.dp))
+            Text(
+                label,
+                fontSize = 9.sp,
+                fontWeight = FontWeight.Medium,
+                color = if (active) color else Muted,
+                maxLines = 1
+            )
+        }
+    }
+}
+
+@Composable
 private fun RootBadge(granted: Boolean?) {
     val active = granted == true
     val label = when (granted) {
@@ -3901,6 +3952,177 @@ private fun RootBadge(granted: Boolean?) {
                 color = if (active) Success else Muted,
                 maxLines = 1
             )
+        }
+    }
+}
+
+@Composable
+private fun DecisionModeSection() {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val initial = remember { DecisionSettings.load(context) }
+    var enabled by rememberSaveable { mutableStateOf(initial.enabled) }
+    var baseUrl by rememberSaveable { mutableStateOf(initial.baseUrl) }
+    var apiKey by rememberSaveable { mutableStateOf(initial.apiKey) }
+    var model by rememberSaveable { mutableStateOf(initial.model) }
+    var minConfidence by rememberSaveable { mutableStateOf("%.2f".format(initial.minConfidence)) }
+    var maxFastSteps by rememberSaveable { mutableStateOf(initial.maxFastSteps.toString()) }
+    var testing by remember { mutableStateOf(false) }
+    var result by remember { mutableStateOf("") }
+
+    fun config() = DecisionSettings.Config(
+        enabled = enabled,
+        baseUrl = baseUrl.trim(),
+        apiKey = apiKey.trim(),
+        model = model.trim(),
+        minConfidence = minConfidence.toDoubleOrNull()
+            ?.coerceIn(0.5, 1.0) ?: DecisionSettings.DEFAULT_MIN_CONFIDENCE,
+        maxFastSteps = maxFastSteps.toIntOrNull()
+            ?.coerceIn(1, 8) ?: DecisionSettings.DEFAULT_MAX_FAST_STEPS
+    )
+
+    fun save() {
+        if (DecisionSettings.save(context, config())) {
+            result = "已保存 DECISION 配置"
+        } else {
+            result = "保存失败，请检查本机存储"
+        }
+    }
+
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(16.dp),
+        color = Color(0xFFFAFBFC),
+        border = BorderStroke(1.dp, Line)
+    ) {
+        Column(Modifier.padding(14.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        "DECISION 加速",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = Ink
+                    )
+                    Text(
+                        "默认关闭。高置信度时用 decision 接口接管 observe / wait，跳过本轮主模型；" +
+                            "点击、输入和完成仍由主模型决定。",
+                        fontSize = 9.5.sp,
+                        color = Muted,
+                        lineHeight = 14.sp,
+                        modifier = Modifier.padding(top = 2.dp)
+                    )
+                }
+                Switch(
+                    checked = enabled,
+                    onCheckedChange = {
+                        enabled = it
+                        save()
+                    },
+                    colors = SwitchDefaults.colors(
+                        checkedThumbColor = Color.White,
+                        checkedTrackColor = Ink,
+                        uncheckedThumbColor = Color.White,
+                        uncheckedTrackColor = Color(0xFFD1D5DB),
+                        uncheckedBorderColor = Color.Transparent
+                    )
+                )
+            }
+
+            if (enabled) {
+                Spacer(Modifier.height(12.dp))
+                StudioField(
+                    "DECISION Base URL", baseUrl, { baseUrl = it },
+                    DecisionSettings.DEFAULT_BASE_URL, mono = true, minLines = 2
+                )
+                StudioField(
+                    "DECISION Key", apiKey, { apiKey = it },
+                    "sk-...", mono = true
+                )
+                StudioField(
+                    "DECISION 模型", model, { model = it },
+                    "decision-model-preview", mono = true
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    StudioField(
+                        "最小置信度", minConfidence, { minConfidence = it },
+                        "0.80", mono = true, modifier = Modifier.weight(1f)
+                    )
+                    StudioField(
+                        "最多连续快速步", maxFastSteps, { maxFastSteps = it },
+                        "3", mono = true, modifier = Modifier.weight(1f)
+                    )
+                }
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    OutlinedButton(
+                        onClick = {
+                            if (testing) return@OutlinedButton
+                            testing = true
+                            result = ""
+                            val cfg = config()
+                            scope.launch {
+                                try {
+                                    val state = JSONObject()
+                                        .put("goal", "测试 DECISION 接口连通性")
+                                        .put("step", 2)
+                                        .put("last_tool", "observe")
+                                        .put("observation", "当前页面有登录按钮和「稍后再说」弹窗")
+                                        .put("foreground_app", "com.example.app")
+                                    val outcome = DecisionClient.decide(cfg, state, 4_000)
+                                    result = if (outcome.ok) {
+                                        "连接成功：${outcome.action} " +
+                                            "${(outcome.confidence * 100).toInt()}% · " +
+                                            "${outcome.latencyMs}ms · ${outcome.inputTokens} tokens"
+                                    } else {
+                                        "连接失败：${outcome.error}"
+                                    }
+                                } finally {
+                                    testing = false
+                                }
+                            }
+                        },
+                        enabled = !testing,
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(12.dp),
+                        border = BorderStroke(1.dp, Line),
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            contentColor = Ink,
+                            disabledContentColor = Color(0xFF9CA3AF)
+                        )
+                    ) {
+                        Text(if (testing) "测试中…" else "测试连接", fontSize = 11.sp)
+                    }
+                    Button(
+                        onClick = { save() },
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(12.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = Ink)
+                    ) {
+                        Text("保存 DECISION 配置", fontSize = 11.sp)
+                    }
+                }
+                if (result.isNotBlank()) {
+                    val ok = result.startsWith("连接成功") || result.startsWith("已保存")
+                    Text(
+                        result,
+                        fontSize = 10.5.sp,
+                        color = if (ok) Success else Danger,
+                        lineHeight = 15.sp,
+                        modifier = Modifier.padding(top = 8.dp)
+                    )
+                }
+                Text(
+                    "Base URL 填到 /compatible-mode/v1 即可，接口会自动拼接 /systemone。" +
+                        "Key 仅保存在本机加密偏好中。",
+                    fontSize = 9.5.sp,
+                    color = Color(0xFF9CA3AF),
+                    lineHeight = 14.sp,
+                    modifier = Modifier.padding(top = 6.dp)
+                )
+            }
         }
     }
 }

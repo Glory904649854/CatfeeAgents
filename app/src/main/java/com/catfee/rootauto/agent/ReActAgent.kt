@@ -2,6 +2,9 @@ package com.catfee.rootauto.agent
 
 import android.content.Context
 import android.util.Log
+import com.catfee.rootauto.device.DeviceCapabilities
+import com.catfee.rootauto.llm.DecisionClient
+import com.catfee.rootauto.llm.DecisionSettings
 import com.catfee.rootauto.llm.LlmClient
 import com.catfee.rootauto.llm.LlmSettings
 import com.catfee.rootauto.log.AgentTrace
@@ -225,6 +228,15 @@ object ReActAgent {
         }
 
         val started = System.currentTimeMillis()
+        val caps = DeviceCapabilities.refresh(context)
+        val nonRootHint = if (caps.root) {
+            ""
+        } else {
+            "\n\n===== 非 Root 模式提示 =====\n" +
+                "当前通过无障碍读屏和手势操作：启动 App 后如果出现开屏广告/弹窗，优先点击" +
+                "「跳过 / 关闭 / 稍后再说 / 知道了」；不要用返回键退出 App，返回键可能直接回到桌面。" +
+                "截图/OCR 使用系统无障碍截图，可能偶发限流；失败时改用 observe/read_page。"
+        }
         val startPkg = AppMemory.currentPackage()
         val traceRun = AgentTrace.startTask(context, goal, provider.model, SYSTEM_PROMPT, startPkg)
         var currentStep = 0
@@ -248,6 +260,7 @@ object ReActAgent {
         var mutationCount = 0
         // 工具可见性按任务阶段变化: 聊天 -> enter_agent_mode -> 核心工具/按需组
         val toolSession = AgentTools.Session()
+        toolSession.caps = caps
         // 长期便签: 历史消息会被裁剪, 但便签每轮都注入 system, 保证关键数据不丢
         val notes = StringBuilder()
         // 任务清单: 多步骤任务由 Agent 自己维护, 每轮注入, 防止漏项
@@ -260,6 +273,13 @@ object ReActAgent {
         var lastScreenHash = ""
         var repeatHintSent = false
         var noChangeHintSent = false
+        var lastToolName = ""
+        var lastToolArgs = ""
+        var lastToolResult = ""
+        var decisionFastRun = 0
+        var decisionFailures = 0
+        var decisionDisabled = false
+        val decisionConfig = DecisionSettings.load(context)
 
         try {
             for (step in 1..MAX_STEPS) {
@@ -311,7 +331,9 @@ object ReActAgent {
                 systemMessage.put(
                     "content",
                     SYSTEM_PROMPT +
+                        nonRootHint +
                         "\n\n===== 任务目标 =====\n" + goal +
+                        "\n\n===== 设备能力 =====\n" + caps.summary() +
                         (if (notes.isNotEmpty()) "\n\n===== 已记录的信息 =====\n${notes.toString().take(MAX_NOTES_CHARS)}" else "") +
                         hints.toString().take(MAX_TODO_CHARS + 2_000)
                 )
@@ -323,29 +345,98 @@ object ReActAgent {
                 val ctxMsgs = messages.length()
                 val tools = AgentTools.definitions(toolSession)
                 onContext(ctxMsgs, ctxChars)
-                var r = chatWithHeartbeat(
-                    provider, messages, tools, step, ctxChars, onEvent,
-                    onStreamContent, onStreamReasoning
-                )
-                var attempt = 1
-                while (!r.ok && attempt < 3) {
-                    onPhase("waiting_llm", step, "请求失败, 第 ${attempt + 1} 次重试")
-                    val retryMsg = "LLM 请求失败(第 $attempt 次): ${r.error}; 5 秒后重试"
-                    onEvent(Event("system", retryMsg))
-                    AgentTrace.event(context, traceRun, "warn", "LLM 重试 · Step $step", retryMsg)
-                    kotlinx.coroutines.delay(5000)
-                    awaitIfPaused()
-                    attempt++
+
+                // DECISION 模式: 高置信度时只接管 observe / wait 这类安全动作,
+                // 点击、输入、finish 仍必须由主模型决定, 避免分类器误操作。
+                val fastDecision = try {
+                    if (decisionConfig.enabled && decisionConfig.usable && !decisionDisabled &&
+                        toolSession.agentMode && !toolSession.agentBlocked &&
+                        step > 1 && decisionFastRun < decisionConfig.maxFastSteps &&
+                        sameCallCount < 3 && noChangeCount < 2 &&
+                        lastToolResult.isNotBlank()
+                    ) {
+                        onPhase("waiting_llm", step, "DECISION 快速判断")
+                        val decisionState = JSONObject()
+                            .put("goal", goal.take(600))
+                            .put("step", step)
+                            .put("last_tool", lastToolName.ifBlank { "none" })
+                            .put("last_arguments", lastToolArgs.take(240))
+                            .put("observation", lastToolResult.take(1400))
+                            .put("foreground_app", AppMemory.currentPackage())
+                        DecisionClient.decide(decisionConfig, decisionState).also { outcome ->
+                            if (!outcome.ok) {
+                                decisionFailures++
+                                if (decisionFailures >= 2) {
+                                    decisionDisabled = true
+                                    Log.w(TAG, "DECISION disabled after repeated failures: ${outcome.error}")
+                                }
+                            }
+                        }
+                    } else {
+                        null
+                    }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Log.w(TAG, "decision failed: ${e.message}")
+                    decisionFailures++
+                    if (decisionFailures >= 2) decisionDisabled = true
+                    null
+                }
+
+                val fastAction = fastDecision?.takeIf {
+                    it.ok && it.confidence >= decisionConfig.minConfidence &&
+                        it.action in setOf("observe", "wait") &&
+                        !(it.action == "observe" && lastToolName == "observe") &&
+                        !(it.action == "wait" && lastToolName == "wait")
+                }?.action
+
+                var r: LlmClient.LlmResult
+                if (fastAction != null) {
+                    decisionFastRun++
+                    val args = if (fastAction == "wait") "{\"ms\":800}" else "{}"
+                    r = LlmClient.LlmResult(
+                        ok = true,
+                        toolCalls = listOf(
+                            LlmClient.ToolCall(
+                                id = "decision_${step}_${System.currentTimeMillis()}",
+                                name = fastAction,
+                                arguments = args
+                            )
+                        ),
+                        elapsedMs = fastDecision?.latencyMs ?: 0
+                    )
+                    val pct = ((fastDecision?.confidence ?: 0.0) * 100).toInt()
+                    val msg = "DECISION 快速路径: $fastAction (置信度 ${pct}%, " +
+                        "${fastDecision?.latencyMs ?: 0}ms)，已跳过本轮主模型"
+                    onEvent(Event("system", msg))
+                    AgentTrace.event(context, traceRun, "info", "DECISION 快速路径 · Step $step", msg)
+                } else {
+                    decisionFastRun = 0
                     r = chatWithHeartbeat(
                         provider, messages, tools, step, ctxChars, onEvent,
                         onStreamContent, onStreamReasoning
                     )
-                }
-                if (!r.ok) {
-                    onPhase("error", step, "LLM 请求失败")
-                    onEvent(Event("error", "第 $step 轮请求失败(已重试 2 次): ${r.error}"))
-                    AgentTrace.finish(context, traceRun, false, "LLM 请求失败: ${r.error}", step)
-                    return "LLM 请求失败: ${r.error}"
+                    var attempt = 1
+                    while (!r.ok && attempt < 3) {
+                        onPhase("waiting_llm", step, "请求失败, 第 ${attempt + 1} 次重试")
+                        val retryMsg = "LLM 请求失败(第 $attempt 次): ${r.error}; 5 秒后重试"
+                        onEvent(Event("system", retryMsg))
+                        AgentTrace.event(context, traceRun, "warn", "LLM 重试 · Step $step", retryMsg)
+                        kotlinx.coroutines.delay(5000)
+                        awaitIfPaused()
+                        attempt++
+                        r = chatWithHeartbeat(
+                            provider, messages, tools, step, ctxChars, onEvent,
+                            onStreamContent, onStreamReasoning
+                        )
+                    }
+                    if (!r.ok) {
+                        onPhase("error", step, "LLM 请求失败")
+                        onEvent(Event("error", "第 $step 轮请求失败(已重试 2 次): ${r.error}"))
+                        AgentTrace.finish(context, traceRun, false, "LLM 请求失败: ${r.error}", step)
+                        return "LLM 请求失败: ${r.error}"
+                    }
                 }
                 val llmMs = r.elapsedMs
                 onUsage(r.promptTokens, r.completionTokens, r.totalTokens)
@@ -465,6 +556,14 @@ object ReActAgent {
                                 )
                             )
                             messages.put(toolMessage(call.id, already))
+                            continue
+                        }
+                        if (!toolSession.caps.accessibility && !toolSession.caps.root) {
+                            val blocked = "当前设备未开启无障碍且没有 Root，无法操作手机。" +
+                                "请让用户到系统设置-无障碍中开启 CatfeeAgents 后重试。"
+                            onEvent(Event("conflict", blocked, tool = call.name))
+                            toolSession.agentBlocked = true
+                            messages.put(toolMessage(call.id, blocked))
                             continue
                         }
                         val denied = claimAgentMode()
@@ -676,6 +775,9 @@ object ReActAgent {
                         AgentTrace.ToolTrace(call.name, call.arguments, result, elapsed, toolOk)
                     )
                     onEvent(Event("result", result.take(400), tool = call.name))
+                    lastToolName = call.name
+                    lastToolArgs = call.arguments
+                    lastToolResult = result
                     messages.put(toolMessage(call.id, result))
                     awaitIfPaused()
                     // 只有可能改变页面的动作才需要 settle；只读工具不能额外固定等待 800ms。

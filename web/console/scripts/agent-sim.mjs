@@ -5,7 +5,7 @@
  * 运行：pnpm agent:sim
  * 前置：控制台已启动，且管理员账号可用（默认 admin / change-me）。
  */
-const BASE = (process.env.CATFEE_BASE_URL || 'http://localhost:3000').replace(/\/+$/, '')
+const BASE = (process.env.CATFEE_BASE_URL || 'http://localhost:9777').replace(/\/+$/, '')
 const USERNAME = process.env.CATFEE_ADMIN_USER || 'admin'
 const PASSWORD = process.env.CATFEE_ADMIN_PASSWORD || 'change-me'
 

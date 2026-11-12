@@ -19,9 +19,9 @@ pnpm dev
 ## 常用命令
 
 ```bash
-pnpm dev          # 开发服务器（3000）
+pnpm dev          # 开发服务器（9777）
 pnpm build        # 生产构建
-pnpm start        # 运行 .output（3000）
+pnpm start        # 运行 .output（9777）
 pnpm db:demo      # 写入演示数据（需先启动一次）
 pnpm db:reset     # 清空数据库
 pnpm agent:sim    # 模拟 Agent 完成协议联调

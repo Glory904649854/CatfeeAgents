@@ -1,10 +1,11 @@
 package com.catfee.rootauto.ocr
 
+import com.catfee.rootauto.root.ScreenGeometry
+import com.catfee.rootauto.root.InputDispatcher
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Rect
 import android.util.Log
-import com.catfee.rootauto.root.DaemonClient
 import com.catfee.rootauto.root.ScreenVision
 import kotlinx.coroutines.delay
 import kotlin.math.abs
@@ -79,10 +80,10 @@ object LongOcr {
                     bmp.recycle()
                     if (!retriedNoScroll) {
                         retriedNoScroll = true
-                        val (w, h) = DaemonClient.screenSize()
+                        val (w, h) = ScreenGeometry.displaySize()
                         val y1 = (h * 0.78f).toInt()
                         val y2 = (h * 0.38f).toInt()
-                        if (!DaemonClient.swipe(w / 2, y1, w / 2, y2, 850)) break
+                        if (!InputDispatcher.swipe(w / 2, y1, w / 2, y2, 850)) break
                         delay(1100)
                         continue
                     }
@@ -119,10 +120,10 @@ object LongOcr {
                 previous?.recycle()
                 previous = bmp
                 screens++
-                val (w, h) = DaemonClient.screenSize()
+                val (w, h) = ScreenGeometry.displaySize()
                 val startY = (h * 0.78f).toInt()
                 val endY = (h * (1f - scrollPx.toFloat() / h).coerceIn(0.18f, 0.62f)).toInt()
-                if (!DaemonClient.swipe(w / 2, startY, w / 2, endY, 500)) break
+                if (!InputDispatcher.swipe(w / 2, startY, w / 2, endY, 500)) break
                 delay(850)
             }
         } finally {
@@ -158,10 +159,10 @@ object LongOcr {
     /** 页面回顶部 */
     private suspend fun scrollTop() {
         repeat(10) {
-            val (w, h) = DaemonClient.screenSize()
+            val (w, h) = ScreenGeometry.displaySize()
             val y1 = (h * 0.22f).toInt()
             val y2 = (h * 0.90f).toInt()
-            if (!DaemonClient.swipe(w / 2, y1, w / 2, y2, 300)) return
+            if (!InputDispatcher.swipe(w / 2, y1, w / 2, y2, 300)) return
             delay(250)
         }
         // 等惯性/下拉刷新完全停下

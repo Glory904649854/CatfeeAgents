@@ -6,7 +6,7 @@ info:
     Catfee Web 控制台的 HTTP API。控制台、API、SSE 与 Agent WebSocket
     由同一个 Nitro 进程和端口提供。
 servers:
-  - url: http://localhost:3000
+  - url: http://localhost:9777
 tags:
   - name: auth
   - name: devices

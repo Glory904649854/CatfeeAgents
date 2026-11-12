@@ -104,13 +104,17 @@ object ScreenGeometry {
         val now = SystemClock.elapsedRealtime()
         if (!force && now - lastRotationCheck < ROTATION_TTL_MS) return
         lastRotationCheck = now
-        val fromInput = try {
-            val out = RootShell.execText(
-                "dumpsys input 2>/dev/null | grep -m1 SurfaceOrientation"
-            )
-            Regex("""SurfaceOrientation:\s*([0-3])""")
-                .find(out)?.groupValues?.getOrNull(1)?.toIntOrNull()
-        } catch (e: Exception) {
+        val fromInput = if (RootShell.isAvailable()) {
+            try {
+                val out = RootShell.execText(
+                    "dumpsys input 2>/dev/null | grep -m1 SurfaceOrientation"
+                )
+                Regex("""SurfaceOrientation:\s*([0-3])""")
+                    .find(out)?.groupValues?.getOrNull(1)?.toIntOrNull()
+            } catch (e: Exception) {
+                null
+            }
+        } else {
             null
         }
         cachedRotation = when (fromInput) {
@@ -137,10 +141,13 @@ object ScreenGeometry {
             @Suppress("DEPRECATION")
             display.getRealSize(p)
             if (p.x <= 0 || p.y <= 0) return null
+            // getRealSize 返回 natural 尺寸; display 的宽高按当前 rotation 互换。
+            val nw = p.x
+            val nh = p.y
             val rotated = rotation == Surface.ROTATION_90 || rotation == Surface.ROTATION_270
-            val nw = if (rotated) p.y else p.x
-            val nh = if (rotated) p.x else p.y
-            Info(p.x, p.y, rotation, nw, nh)
+            val w = if (rotated) nh else nw
+            val h = if (rotated) nw else nh
+            Info(w, h, rotation, nw, nh)
         } catch (e: Exception) {
             null
         }

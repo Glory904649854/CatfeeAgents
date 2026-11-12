@@ -1,8 +1,13 @@
 package com.catfee.rootauto.agent
 
 import android.content.Context
+import android.content.Intent
+import android.provider.Settings
 import android.util.Log
 import com.catfee.rootauto.a11y.UiObserverService
+import com.catfee.rootauto.device.AppLauncher
+import com.catfee.rootauto.device.Capabilities
+import com.catfee.rootauto.device.DeviceCapabilities
 import com.catfee.rootauto.llm.LlmSettings
 import com.catfee.rootauto.ocr.LongOcr
 import com.catfee.rootauto.root.DaemonClient
@@ -46,6 +51,8 @@ object AgentTools {
         var agentMode: Boolean = false
         var agentBlocked: Boolean = false
         val activeGroups: MutableSet<String> = mutableSetOf()
+        /** 本次 run 的设备能力快照, 由 ReActAgent 启动时刷新写入 */
+        var caps: Capabilities = DeviceCapabilities.current()
 
         // 观察/验证/视觉缓存按一次 Agent run 隔离，避免跨会话返回过期结果。
         // lastObservedHash 同时供 observe 去重和 verify_changed 做动作前后比对。
@@ -89,6 +96,58 @@ object AgentTools {
         "memory" to setOf("memory_list", "todo_read")
     )
 
+    /** 只有 Root 才能可靠执行的工具 */
+    private val ROOT_ONLY_TOOLS = setOf(
+        "shell", "settings_put", "file_read", "file_write", "file_list", "stop_app"
+    )
+
+    /** 需要截图能力的工具 */
+    private val SCREENSHOT_TOOLS = setOf(
+        "screenshot", "ocr", "long_ocr", "see_screen",
+        "verify_option", "verify_question", "answer_form"
+    )
+
+    /** 需要坐标/按键注入能力的工具 */
+    private val GESTURE_TOOLS = setOf(
+        "tap", "swipe", "long_press", "double_tap", "swipe_direction",
+        "key", "media_speed", "wait_media", "scroll_to_text"
+    )
+
+    /** 需要无障碍读树/节点操作的工具 */
+    private val A11Y_TOOLS = setOf(
+        "observe", "read_page", "find_text", "tap_text", "tap_node", "tap_desc", "tap_id",
+        "input_text", "clear_text", "set_text_id", "list_options",
+        "verify_text", "verify_changed", "wait_for_text"
+    )
+    /** 能力不足时返回给 Agent 的可行动原因; null 表示可用 */
+    fun capabilityBlockReason(session: Session, name: String): String? {
+        val caps = session.caps
+        if (name in ROOT_ONLY_TOOLS && !caps.root) {
+            return "当前为非 Root 模式，$name 不可用。改用 observe/find_text/tap_text/" +
+                "input_text 等无障碍工具，不要反复尝试系统级工具。"
+        }
+        if (name in SCREENSHOT_TOOLS && !caps.hasScreenshot) {
+            return "当前设备截图不可用（未 Root，或 Android 版本低于 11），$name 不可用。" +
+                "改用 observe/read_page/find_text。"
+        }
+        if (name in GESTURE_TOOLS && !caps.input) {
+            return "当前设备没有可用的坐标/按键注入通道，$name 不可用。" +
+                "请先开启无障碍服务，或改用 tap_text/tap_node。"
+        }
+        if (name in A11Y_TOOLS && !caps.accessibility) {
+            return "无障碍服务未连接，$name 不可用。请让用户在系统设置-无障碍中开启 CatfeeAgents。"
+        }
+        if (name == "get_activity" && !caps.accessibility && !caps.root) {
+            return "当前模式无法可靠读取前台 Activity，请改用 observe/read_page。"
+        }
+        return null
+    }
+
+    private fun groupAvailable(session: Session, group: String): Boolean {
+        val tools = GROUP_TOOLS[group].orEmpty()
+        return tools.any { capabilityBlockReason(session, it) == null }
+    }
+
     /** 按任务目标自动加载常用高级组; 模型仍可用 load_tools 手动补 */
     fun activateForGoal(session: Session, goal: String) {
         val text = goal.lowercase()
@@ -119,6 +178,10 @@ object AgentTools {
         if (hit("全部工具", "所有工具", "高级工具")) {
             session.activeGroups.add("all")
         }
+        // 当前设备能力不足的组不要自动加载, 否则模型会反复尝试不可用工具
+        session.activeGroups.removeAll { group ->
+            group != "all" && !groupAvailable(session, group)
+        }
     }
 
     /** 当前会话是否允许调用某个工具 (防止模型幻觉出未加载的工具) */
@@ -126,6 +189,7 @@ object AgentTools {
         if (session.agentBlocked) return false
         if (name == "enter_agent_mode" || name == "load_tools") return true
         if (!session.agentMode) return false
+        if (capabilityBlockReason(session, name) != null) return false
         if (name in CORE_TOOLS) return true
         if ("all" in session.activeGroups) {
             return GROUP_TOOLS.values.any { name in it }
@@ -144,13 +208,22 @@ object AgentTools {
             return "已加载全部高级工具组, 下一轮生效。"
         }
         val known = GROUP_TOOLS.keys
-        val loaded = names.filter { it in known }.toSet()
+        val availableGroups = names.filter { it in known && groupAvailable(session, it) }.toSet()
+        val unavailableGroups = names.filter { it in known && !groupAvailable(session, it) }
         val unknown = names.filter { it !in known }
-        session.activeGroups.addAll(loaded)
+        session.activeGroups.addAll(availableGroups)
         return buildString {
-            if (loaded.isNotEmpty()) append("已加载工具组: ").append(loaded.joinToString(", ")).append("; 下一轮生效。")
+            if (availableGroups.isNotEmpty()) {
+                append("已加载工具组: ").append(availableGroups.joinToString(", "))
+                    .append("; 下一轮生效。")
+            }
+            if (unavailableGroups.isNotEmpty()) {
+                if (isNotEmpty()) append(' ')
+                append("当前设备能力不足, 未加载: ")
+                    .append(unavailableGroups.joinToString(", "))
+            }
             if (unknown.isNotEmpty()) {
-                if (loaded.isNotEmpty()) append(' ')
+                if (isNotEmpty()) append(' ')
                 append("未知工具组: ").append(unknown.joinToString(", "))
                     .append("。可用: ").append(known.joinToString(", ")).append(", all")
             }
@@ -177,7 +250,7 @@ object AgentTools {
         for (i in 0 until allDefinitions.length()) {
             val item = allDefinitions.optJSONObject(i) ?: continue
             val name = item.optJSONObject("function")?.optString("name").orEmpty()
-            if (name in allowed) out.put(item)
+            if (name in allowed && capabilityBlockReason(session, name) == null) out.put(item)
         }
         out.put(loadToolsDefinition())
         return out
@@ -780,7 +853,7 @@ object AgentTools {
                 )
                 "list_options" -> ToolRuntime.listOptions(args.optString("keyword"))
                 "get_activity" -> ToolRuntime.currentActivity()
-                "screenshot" -> ToolRuntime.screenshot()
+                "screenshot" -> ToolRuntime.screenshot(context)
                 "ocr" -> ToolRuntime.ocr(session)
                 "long_ocr" -> {
                     val scan = LongOcr.scan(
@@ -854,15 +927,15 @@ object AgentTools {
                 "set_text_id" -> ToolRuntime.setTextId(
                     args.optString("id_suffix"), args.optString("text")
                 )
-                "launch_activity" -> ToolRuntime.launchActivity(args.optString("component"))
+                "launch_activity" -> ToolRuntime.launchActivity(context, args.optString("component"))
                 "stop_app" -> ToolRuntime.stopApp(args.optString("package"))
-                "list_packages" -> ToolRuntime.listPackages(args.optString("keyword"))
-                "app_info" -> ToolRuntime.appInfo(args.optString("package"))
-                "open_url" -> ToolRuntime.openUrl(args.optString("url"))
+                "list_packages" -> ToolRuntime.listPackages(context, args.optString("keyword"))
+                "app_info" -> ToolRuntime.appInfo(context, args.optString("package"))
+                "open_url" -> ToolRuntime.openUrl(context, args.optString("url"))
                 "shell" -> ToolRuntime.shell(args.optString("command"))
                 "get_prop" -> ToolRuntime.getProp(args.optString("key"))
                 "settings_get" -> ToolRuntime.settingsGet(
-                    args.optString("namespace", "system"), args.optString("key")
+                    context, args.optString("namespace", "system"), args.optString("key")
                 )
                 "settings_put" -> ToolRuntime.settingsPut(
                     args.optString("namespace", "system"),
@@ -942,7 +1015,7 @@ object AgentTools {
                     }
                 }
                 "key" -> keyEvent(args.optString("name"))
-                "launch_app" -> launchApp(args.optString("package"))
+                "launch_app" -> launchApp(context, args.optString("package"))
                 "wait" -> {
                     // 单次最多 5 分钟; 分段等待并每 15 秒发进度, 避免界面长时间无反馈
                     val ms = args.optInt("ms", 1000).coerceIn(200, 300_000).toLong()
@@ -994,7 +1067,19 @@ object AgentTools {
      * 说明: 直接写 secure 设置项, 系统会自动重新绑定服务;
      *       需要 root, 无 root 时返回 false 交由用户手动处理。
      */
-    private suspend fun tryRestoreA11y(): Boolean {
+    private suspend fun tryRestoreA11y(context: Context): Boolean {
+        if (!RootShell.isAvailable()) {
+            // 非 Root 无法写 secure settings, 只能把用户带到系统设置页
+            try {
+                context.startActivity(
+                    Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                )
+            } catch (e: Exception) {
+                Log.w(TAG, "打开无障碍设置失败: ${e.message}")
+            }
+            return false
+        }
         return try {
             val svc = "com.catfee.rootauto/com.catfee.rootauto.a11y.UiObserverService"
             val r = RootShell.exec(
@@ -1021,7 +1106,12 @@ object AgentTools {
      */
     /** 坐标越界直接拒绝, 并把当前显示方向/尺寸告诉模型; 避免反复点屏幕外 */
     private suspend fun invalidCoord(x: Int, y: Int): String? {
-        val (w, h) = DaemonClient.screenSize()
+        try {
+            ScreenGeometry.refreshRotation()
+        } catch (e: Exception) {
+            Log.w(TAG, "刷新方向失败: ${e.message}")
+        }
+        val (w, h) = ScreenGeometry.displaySize()
         return ScreenGeometry.invalid(x, y) ?: if (x !in 0 until w || y !in 0 until h) {
             "坐标越界: ($x,$y), 当前显示 ${w}x${h}。tap 坐标必须是当前显示方向像素; " +
                 "不要用 0~1000 归一化值。该控件大概率在屏幕外, 先 swipe/scroll_to_text 滚动后再定位; " +
@@ -1032,11 +1122,12 @@ object AgentTools {
     private suspend fun readPage(session: Session): String {
         val svc = UiObserverService.instance ?: return "无障碍服务未连接"
         // 先校准旋转, 否则横屏播放器的 2340x1080 坐标会被当成竖屏坐标
-        val (screenW, screenH) = try {
-            DaemonClient.screenSize()
+        try {
+            ScreenGeometry.refreshRotation()
         } catch (e: Exception) {
-            ScreenGeometry.displaySize()
+            Log.w(TAG, "刷新方向失败: ${e.message}")
         }
+        val (screenW, screenH) = ScreenGeometry.displaySize()
         val tree = svc.dumpTree(1000)
         if (tree.isEmpty()) return "当前页面没有可读节点"
         val text = buildString {
@@ -1082,29 +1173,30 @@ object AgentTools {
         session: Session
     ): String {
         // 顺手刷新前台 Activity, 让模型知道自己在哪个界面
-        // dumpsys 原始格式是 "mCurrentFocus=Window{4f4f213 u0 com.example.app/com.example.Activity}",
-        // 直接整串塞给模型既费 token 又难读, 这里只取花括号内的 "包名/Activity" 部分
-        val focus = RootShell.execText(
-            "dumpsys window 2>/dev/null | grep -m1 mCurrentFocus"
-        )
+        // Root 下用 dumpsys 校准; 非 Root 用无障碍事件缓存近似。
+        val focus = if (RootShell.isAvailable()) {
+            RootShell.execText("dumpsys window 2>/dev/null | grep -m1 mCurrentFocus")
+        } else {
+            ""
+        }
         val svc = UiObserverService.instance
         if (svc == null) {
             // 无障碍被系统杀掉很常见(force-stop / 省电清理), 有 root 就直接拉起来,
-            // 否则 Agent 第一次 observe 就失败, 白白浪费一轮
-            val restored = tryRestoreA11y()
+            // 否则把用户带到系统设置页并明确失败。
+            val restored = tryRestoreA11y(context)
             if (!restored) {
                 return "无障碍服务未连接, 且自动恢复失败。请让用户在系统设置-无障碍中手动开启 CatfeeAgents。"
             }
             return "无障碍服务刚被重新拉起, 请稍后再次 observe。"
         }
-        svc.cachedActivity = extractFocusTarget(focus)
-        // 先刷新一次 daemon 的 natural 尺寸, 让 snapshot 按当前 rotation 输出 display 坐标
-        val (screenW, screenH) = try {
-            DaemonClient.screenSize()
+        svc.cachedActivity = extractFocusTarget(focus).ifBlank { svc.currentComponentGuess() }
+        // 先校准当前显示方向/尺寸, 非 Root 下走 DisplayManager
+        try {
+            ScreenGeometry.refreshRotation()
         } catch (e: Exception) {
-            Log.w(TAG, "刷新屏幕尺寸失败: ${e.message}")
-            ScreenGeometry.displaySize()
+            Log.w(TAG, "刷新方向失败: ${e.message}")
         }
+        val (screenW, screenH) = ScreenGeometry.displaySize()
         val snap = svc.snapshot()
         if (snap != null && snap.nodes.isNotEmpty()) {
             // 播放页的 observe 已看到当前/总时长时先缓存, 控制条隐藏后 wait_media 仍能算剩余
@@ -1188,28 +1280,54 @@ object AgentTools {
      * 说明: 走 daemon 的 uinput, 比 adb input 更快且不依赖 adb
      */
     private suspend fun keyEvent(name: String): String {
-        val code = when (name.lowercase()) {
+        val key = name.lowercase()
+        val code = when (key) {
             "back" -> 158
             "home" -> 102
             "enter" -> 28
             "recent" -> 580
             else -> return "不支持的按键: $name"
         }
-        return if (DaemonClient.keyevent(code)) "已发送按键 $name" else "按键发送失败"
+
+        if (DeviceCapabilities.current().daemon) {
+            if (DaemonClient.keyevent(code)) return "已发送按键 $name"
+        }
+
+        // 非 Root / daemon 不可用: 用无障碍全局动作
+        val svc = UiObserverService.instance
+            ?: return "当前无 Root 且无障碍未连接，无法发送按键"
+        return when (key) {
+            "back" -> if (svc.globalBack()) "已发送按键 back（无障碍）" else "按键发送失败"
+            "home" -> if (svc.globalHome()) "已发送按键 home（无障碍）" else "按键发送失败"
+            "recent" -> if (svc.globalRecents()) "已发送按键 recent（无障碍）" else "按键发送失败"
+            "enter" -> if (svc.imeEnter()) {
+                "已发送回车（无障碍 IME）"
+            } else {
+                "当前页面不支持 IME 回车；请点击页面上的搜索/确认按钮"
+            }
+            else -> "不支持的按键: $name"
+        }
     }
 
     /**
      * 功能: 按包名启动应用
-     * 参数: pkg 包名
+     * 参数: context; pkg 包名
      * 返回: 结果描述
-     * 说明: 用 monkey 启动, 会自动选择该包的 LAUNCHER Activity, 无需知道具体类名
+     * 说明: 优先 PackageManager Intent（非 Root 可用），Root 下失败再用 monkey 兜底。
      */
-    private suspend fun launchApp(pkg: String): String {
+    private suspend fun launchApp(context: Context, pkg: String): String {
         if (pkg.isBlank()) return "启动失败: 包名为空"
-        val r = RootShell.exec(
-            "monkey -p $pkg -c android.intent.category.LAUNCHER 1 2>&1 | tail -2"
-        )
-        val ok = r.stdout.contains("Events injected: 1") || r.stdout.contains("injected")
-        return if (ok) "已启动 $pkg" else "启动 $pkg 可能失败: ${r.stdout.take(160)}"
+        val intentError = AppLauncher.launchPackage(context, pkg)
+        if (intentError == null) return "已启动 $pkg"
+
+        if (RootShell.isAvailable()) {
+            val r = RootShell.exec(
+                "monkey -p $pkg -c android.intent.category.LAUNCHER 1 2>&1 | tail -2"
+            )
+            val ok = r.stdout.contains("Events injected: 1") || r.stdout.contains("injected")
+            if (ok) return "已启动 $pkg"
+            return "启动 $pkg 可能失败: ${r.stdout.take(160)}"
+        }
+        return intentError
     }
 }

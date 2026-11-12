@@ -1,9 +1,9 @@
 package com.catfee.rootauto.agent
 
+import com.catfee.rootauto.root.ScreenGeometry
 import android.graphics.Rect
 import com.catfee.rootauto.a11y.UiObserverService
 import com.catfee.rootauto.ocr.OcrEngine
-import com.catfee.rootauto.root.DaemonClient
 import com.catfee.rootauto.root.InputDispatcher
 import com.catfee.rootauto.root.ScreenVision
 import kotlinx.coroutines.delay
@@ -117,7 +117,7 @@ object MediaState {
     private suspend fun readOnce(cache: Cache = defaultCache): State {
         try {
             // 先刷新横竖屏; 播放器页的坐标空间必须和 tap 一致
-            DaemonClient.screenSize()
+            ScreenGeometry.displaySize()
         } catch (_: Exception) {
         }
 

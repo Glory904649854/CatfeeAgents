@@ -1,9 +1,13 @@
 package com.catfee.rootauto.agent
 
 import android.content.Context
+import android.graphics.Bitmap
 import android.graphics.Rect
+import android.os.Build
+import android.provider.Settings
 import android.util.Log
 import com.catfee.rootauto.a11y.UiObserverService
+import com.catfee.rootauto.device.AppLauncher
 import com.catfee.rootauto.llm.LlmClient
 import com.catfee.rootauto.llm.LlmSettings
 import com.catfee.rootauto.ocr.OcrEngine
@@ -15,6 +19,8 @@ import com.catfee.rootauto.root.ScreenVision
 import kotlinx.coroutines.delay
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.File
+import java.io.FileOutputStream
 
 /**
  * ToolRuntime —— Agent 原子工具的实际执行器
@@ -187,10 +193,23 @@ object ToolRuntime {
 
     /** 当前前台包名/Activity */
     suspend fun currentActivity(): String {
+        val guess = UiObserverService.instance?.currentComponentGuess().orEmpty()
+        if (guess.isNotBlank()) return guess
+        if (!RootShell.isAvailable()) return "读取失败: 当前为非 Root 模式且无障碍不可用"
         val line = RootShell.execText("dumpsys window 2>/dev/null | grep -m1 mCurrentFocus")
         val inner = line.substringAfter('{', "").substringBefore('}')
         val target = inner.split(' ').lastOrNull { it.contains('/') }.orEmpty()
         return if (target.isBlank()) "读取失败: $line" else target
+    }
+
+    /** 当前显示尺寸; 非 Root 走 DisplayManager, 不触发 su */
+    private suspend fun displaySize(): Pair<Int, Int> {
+        try {
+            ScreenGeometry.refreshRotation()
+        } catch (e: Exception) {
+            Log.w(TAG, "刷新方向失败: ${e.message}")
+        }
+        return ScreenGeometry.displaySize()
     }
 
     /** 按文字/描述查找节点, 返回前 20 条 */
@@ -263,10 +282,21 @@ object ToolRuntime {
         }
     }
 
-    /** 截图并返回尺寸/路径 */
-    suspend fun screenshot(): String {
-        val (ok, w, h) = DaemonClient.shot()
-        return if (ok) "截图成功: ${w}x$h -> /data/local/tmp/catfee_shot.raw" else "截图失败"
+    /** 截图并写入 App cache, 返回尺寸/路径 */
+    suspend fun screenshot(context: Context): String {
+        val (bmp, err) = ScreenVision.captureBitmap()
+        if (bmp == null) return "截图失败: $err"
+        return try {
+            val f = File(context.cacheDir, "catfee_screenshot.png")
+            FileOutputStream(f).use { out ->
+                bmp.compress(Bitmap.CompressFormat.PNG, 100, out)
+            }
+            "截图成功: ${bmp.width}x${bmp.height} -> ${f.absolutePath}"
+        } catch (e: Exception) {
+            "截图保存失败: ${e.message}"
+        } finally {
+            bmp.recycle()
+        }
     }
 
     /** 本地 OCR 当前屏幕, 返回前 60 行文字与坐标 */
@@ -394,7 +424,7 @@ object ToolRuntime {
     /** 按文字点击; 找不到时返回候选 */
     suspend fun tapText(keyword: String, exact: Boolean): String {
         val svc = UiObserverService.instance ?: return "无障碍服务未连接"
-        val (w, h) = DaemonClient.screenSize()
+        val (w, h) = displaySize()
         val tree = svc.dumpTree(800)
         val matches: (UiObserverService.TreeNode) -> Boolean = {
             val v = if (it.text.isNotBlank()) it.text else it.desc
@@ -419,7 +449,7 @@ object ToolRuntime {
     /** 按 contentDescription 点击 */
     suspend fun tapDesc(keyword: String): String {
         val svc = UiObserverService.instance ?: return "无障碍服务未连接"
-        val (w, h) = DaemonClient.screenSize()
+        val (w, h) = displaySize()
         val tree = svc.dumpTree(800)
         val matches: (UiObserverService.TreeNode) -> Boolean = { it.desc.contains(keyword) }
         val picked = pickClickTarget(tree, w, h, matches)
@@ -441,7 +471,7 @@ object ToolRuntime {
     /** 按 resource-id 后缀点击 */
     suspend fun tapId(idSuffix: String): String {
         val svc = UiObserverService.instance ?: return "无障碍服务未连接"
-        val (w, h) = DaemonClient.screenSize()
+        val (w, h) = displaySize()
         val tree = svc.dumpTree(800)
         val matches: (UiObserverService.TreeNode) -> Boolean = { it.resourceId.endsWith(idSuffix) }
         val picked = pickClickTarget(tree, w, h, matches)
@@ -468,7 +498,7 @@ object ToolRuntime {
 
     /** 按方向滑动; distance 为屏幕短边的比例 (0~1) */
     suspend fun swipeDirection(direction: String, distance: Float, durationMs: Int): String {
-        val (w, h) = DaemonClient.screenSize()
+        val (w, h) = displaySize()
         val d = (minOf(w, h) * distance.coerceIn(0.1f, 0.9f)).toInt()
         val cx = w / 2
         val cy = h / 2
@@ -505,7 +535,7 @@ object ToolRuntime {
             if (tree.any { it.text.contains(keyword) || it.desc.contains(keyword) }) {
                 return "第 ${i + 1} 次滚动前已看到「$keyword」"
             }
-            val (w, h) = DaemonClient.screenSize()
+            val (w, h) = displaySize()
             val startY = (h * 0.82f).toInt()
             val endY = (h * 0.34f).toInt()
             val moved = InputDispatcher.swipe(w / 2, startY, w / 2, endY, 420)
@@ -522,35 +552,74 @@ object ToolRuntime {
 
     // ---------------- 应用/系统 ----------------
 
-    suspend fun launchActivity(component: String): String {
+    suspend fun launchActivity(context: Context, component: String): String {
         if (component.isBlank() || !component.contains('/')) return "component 格式应为 包名/Activity"
-        val r = RootShell.exec("am start -n $component 2>&1")
-        return if (r.ok && !r.stdout.contains("Error")) "已启动 $component" else "启动失败: ${(r.stdout + r.stderr).take(200)}"
+        val err = AppLauncher.launchActivity(context, component)
+        if (err == null) return "已启动 $component"
+        if (RootShell.isAvailable()) {
+            val r = RootShell.exec("am start -n $component 2>&1")
+            if (r.ok && !r.stdout.contains("Error")) return "已启动 $component"
+            return "启动失败: ${(r.stdout + r.stderr).take(200)}"
+        }
+        return "启动失败: $err"
     }
 
     suspend fun stopApp(pkg: String): String {
         if (pkg.isBlank()) return "包名为空"
+        if (!RootShell.isAvailable()) return "当前为非 Root 模式，stop_app 不可用"
         val r = RootShell.exec("am force-stop $pkg")
         return if (r.ok) "已停止 $pkg" else "停止失败: ${r.stderr.take(160)}"
     }
 
-    suspend fun listPackages(keyword: String): String {
+    @Suppress("DEPRECATION")
+    suspend fun listPackages(context: Context, keyword: String): String {
+        if (!RootShell.isAvailable()) {
+            val apps = try {
+                context.packageManager.getInstalledApplications(0)
+            } catch (e: Exception) {
+                return "读取应用列表失败: ${e.message}"
+            }
+            val lines = apps.map { it.packageName }
+                .filter { keyword.isBlank() || it.contains(keyword, ignoreCase = true) }
+                .sorted()
+                .take(80)
+                .map { "package:$it" }
+            return if (lines.isEmpty()) "没有匹配的包" else lines.joinToString("\n")
+        }
         val cmd = if (keyword.isBlank()) "pm list packages" else "pm list packages | grep -i '$keyword'"
         val r = RootShell.exec(cmd)
         val lines = r.stdout.lines().filter { it.isNotBlank() }.take(80)
         return if (lines.isEmpty()) "没有匹配的包" else lines.joinToString("\n")
     }
 
-    suspend fun appInfo(pkg: String): String {
+    suspend fun appInfo(context: Context, pkg: String): String {
         if (pkg.isBlank()) return "包名为空"
+        if (!RootShell.isAvailable()) {
+            return try {
+                val pm = context.packageManager
+                val info = pm.getPackageInfo(pkg, 0)
+                val app = info.applicationInfo ?: return "读取包信息失败: applicationInfo 为空"
+                "包名: ${info.packageName}\n版本: ${info.versionName} (${info.longVersionCode})\n" +
+                    "应用名: ${pm.getApplicationLabel(app)}\n" +
+                    "targetSdk: ${app.targetSdkVersion}\nuid: ${app.uid}"
+            } catch (e: Exception) {
+                "读取包信息失败: ${e.message}"
+            }
+        }
         val r = RootShell.exec("dumpsys package $pkg | head -60")
         return r.stdout.ifBlank { r.stderr }.take(3000)
     }
 
-    suspend fun openUrl(url: String): String {
+    suspend fun openUrl(context: Context, url: String): String {
         if (url.isBlank()) return "URL 为空"
-        val r = RootShell.exec("am start -a android.intent.action.VIEW -d '$url' 2>&1")
-        return if (r.ok && !r.stdout.contains("Error")) "已打开 $url" else "打开失败: ${(r.stdout + r.stderr).take(200)}"
+        val err = AppLauncher.openUrl(context, url)
+        if (err == null) return "已打开 $url"
+        if (RootShell.isAvailable()) {
+            val r = RootShell.exec("am start -a android.intent.action.VIEW -d '$url' 2>&1")
+            if (r.ok && !r.stdout.contains("Error")) return "已打开 $url"
+            return "打开失败: ${(r.stdout + r.stderr).take(200)}"
+        }
+        return "打开失败: $err"
     }
 
     private val shellUiInject = Regex(
@@ -562,6 +631,10 @@ object ToolRuntime {
 
     suspend fun shell(cmd: String): String {
         if (cmd.isBlank()) return "命令为空"
+        if (!RootShell.isAvailable()) {
+            return "当前为非 Root 模式，shell 不可用。请改用 observe / read_page / " +
+                "tap_text / input_text 等无障碍工具。"
+        }
         if (shellUiInject.containsMatchIn(cmd)) {
             return "shell 禁止注入 UI 事件。请改用 tap / tap_node / swipe / key / input_text; " +
                 "shell 只用于只读查询。"
@@ -577,35 +650,70 @@ object ToolRuntime {
 
     suspend fun getProp(key: String): String {
         if (key.isBlank()) return "key 为空"
+        if (!RootShell.isAvailable()) {
+            val v = when (key) {
+                "ro.build.version.release" -> Build.VERSION.RELEASE
+                "ro.build.version.sdk" -> Build.VERSION.SDK_INT.toString()
+                "ro.product.model" -> Build.MODEL
+                "ro.product.manufacturer" -> Build.MANUFACTURER
+                "ro.product.brand" -> Build.BRAND
+                "ro.product.device" -> Build.DEVICE
+                "ro.product.name" -> Build.PRODUCT
+                "ro.hardware" -> Build.HARDWARE
+                "ro.build.type" -> Build.TYPE
+                "ro.build.tags" -> Build.TAGS
+                "ro.build.fingerprint" -> Build.FINGERPRINT
+                else -> return "当前为非 Root 模式，无法读取全部系统属性: $key"
+            }
+            return "$key=$v"
+        }
         val v = RootShell.execText("getprop $key")
         return "$key=$v"
     }
 
-    suspend fun settingsGet(namespace: String, key: String): String {
+    suspend fun settingsGet(context: Context, namespace: String, key: String): String {
+        if (!RootShell.isAvailable()) {
+            val ns = namespace.ifBlank { "system" }
+            val cr = context.contentResolver
+            val v = try {
+                when (ns) {
+                    "secure" -> Settings.Secure.getString(cr, key)
+                    "global" -> Settings.Global.getString(cr, key)
+                    else -> Settings.System.getString(cr, key)
+                }
+            } catch (e: Exception) {
+                null
+            }
+            return "$ns/$key=${v ?: "(不可读)"}"
+        }
         val v = RootShell.execText("settings get ${namespace.ifBlank { "system" }} $key")
         return "$namespace/$key=$v"
     }
 
     suspend fun settingsPut(namespace: String, key: String, value: String): String {
         if (key.isBlank()) return "key 为空"
+        if (!RootShell.isAvailable()) return "当前为非 Root 模式，settings_put 不可用"
         val r = RootShell.exec("settings put ${namespace.ifBlank { "system" }} $key '$value'")
         return if (r.ok) "已写入 $namespace/$key=$value" else "写入失败: ${r.stderr.take(160)}"
     }
 
     suspend fun fileRead(path: String): String {
         if (path.isBlank()) return "path 为空"
+        if (!RootShell.isAvailable()) return "当前为非 Root 模式，任意路径文件读取不可用"
         val r = RootShell.exec("cat '$path'", 10_000)
         return (r.stdout.ifBlank { r.stderr }).take(5000)
     }
 
     suspend fun fileWrite(path: String, content: String): String {
         if (path.isBlank()) return "path 为空"
+        if (!RootShell.isAvailable()) return "当前为非 Root 模式，任意路径文件写入不可用"
         val b64 = android.util.Base64.encodeToString(content.toByteArray(), android.util.Base64.NO_WRAP)
         val r = RootShell.exec("echo '$b64' | base64 -d > '$path'", 10_000)
         return if (r.ok) "已写入 ${content.length} 字符到 $path" else "写入失败: ${r.stderr.take(160)}"
     }
 
     suspend fun fileList(path: String): String {
+        if (!RootShell.isAvailable()) return "当前为非 Root 模式，任意路径文件列表不可用"
         val p = path.ifBlank { "/data/local/tmp" }
         val r = RootShell.exec("ls -la '$p'", 10_000)
         return (r.stdout.ifBlank { r.stderr }).take(4000)

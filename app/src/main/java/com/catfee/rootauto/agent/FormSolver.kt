@@ -1,5 +1,7 @@
 ﻿package com.catfee.rootauto.agent
 
+import com.catfee.rootauto.root.ScreenGeometry
+import com.catfee.rootauto.root.InputDispatcher
 import android.content.Context
 import android.graphics.Bitmap
 import android.util.Log
@@ -96,7 +98,7 @@ object FormSolver {
             ?: return Result(false, 0, "LLM 配置为空")
         if (!provider.usable) return Result(false, 0, "LLM 配置不完整")
         ctx = context.applicationContext
-        val (w, h) = DaemonClient.screenSize()
+        val (w, h) = ScreenGeometry.displaySize()
         val checks = verifyTimes.coerceIn(1, 5)
         awaitIfPaused()
         if (reset) resetIfNeeded(onLog, awaitIfPaused)
@@ -247,14 +249,14 @@ object FormSolver {
                     val missing = q.options.filter { it.letter in ans && it.letter !in actual }
                     for (o in extras) {
                         awaitIfPaused()
-                        if (!DaemonClient.tap(o.tx, o.ty)) {
+                        if (!InputDispatcher.tap(o.tx, o.ty)) {
                             log(onLog, "第 ${q.number} 题清理 ${o.letter} 失败")
                         }
                         delay(220)
                     }
                     for (o in missing) {
                         awaitIfPaused()
-                        if (!DaemonClient.tap(o.tx, o.ty)) {
+                        if (!InputDispatcher.tap(o.tx, o.ty)) {
                             log(onLog, "第 ${q.number} 题点击 ${o.letter} 失败")
                         }
                         delay(260)
@@ -354,7 +356,7 @@ object FormSolver {
         val tx = part?.box?.centerX() ?: submit.cx
         val ty = part?.box?.centerY() ?: submit.cy
         log(onLog, "点击「${part?.text?.trim() ?: submit.text.take(20)}」提交")
-        DaemonClient.tap(tx, ty)
+        InputDispatcher.tap(tx, ty)
         delay(1500)
         confirmDialog(onLog)
         delay(2500)
@@ -709,7 +711,7 @@ object FormSolver {
         for (letter in ans) {
             val o = q.options.firstOrNull { it.letter == letter } ?: continue
             Log.i(TAG, "点击第 ${q.number} 题 $letter @ ${o.tx},${o.ty}")
-            DaemonClient.tap(o.tx, o.ty)
+            InputDispatcher.tap(o.tx, o.ty)
             delay(300)
         }
     }
@@ -738,7 +740,7 @@ object FormSolver {
             }
             try {
                 val c = ctx
-                val (w, h) = DaemonClient.screenSize()
+                val (w, h) = ScreenGeometry.displaySize()
                 fun parse(rows: List<OcrEngine.OcrRow>): Question? {
                     val filtered = rows.filterNot {
                         it.text.contains("CatfeeAgent") ||
@@ -770,13 +772,13 @@ object FormSolver {
                     val extra = selected - ans.toSet()
                     for (letter in extra) {
                         val o = q.options.firstOrNull { it.letter == letter } ?: continue
-                        DaemonClient.tap(o.tx, o.ty)
+                        InputDispatcher.tap(o.tx, o.ty)
                         delay(300)
                     }
                     // 补齐缺失项
                     for (letter in ans.filter { it !in selected }) {
                         val o = q.options.firstOrNull { it.letter == letter } ?: continue
-                        DaemonClient.tap(o.tx, o.ty)
+                        InputDispatcher.tap(o.tx, o.ty)
                         delay(300)
                     }
                     delay(400)
@@ -875,10 +877,10 @@ object FormSolver {
                 delay(500)
                 return
             }
-            val (w, h) = DaemonClient.screenSize()
+            val (w, h) = ScreenGeometry.displaySize()
             val y1 = (h * 0.35f).toInt()
             val y2 = (h * 0.82f).toInt()
-            if (!DaemonClient.swipe(w / 2, y1, w / 2, y2, 500)) return
+            if (!InputDispatcher.swipe(w / 2, y1, w / 2, y2, 500)) return
             delay(850)
         }
         delay(600)
@@ -894,16 +896,16 @@ object FormSolver {
     ) {
         repeat(8) {
             awaitIfPaused()
-            val (w, h) = DaemonClient.screenSize()
+            val (w, h) = ScreenGeometry.displaySize()
             val startY = (h * 0.30f).toInt()
             val endY = (h * 0.82f).toInt()
-            if (!DaemonClient.swipe(w / 2, startY, w / 2, endY, 300)) return@repeat
+            if (!InputDispatcher.swipe(w / 2, startY, w / 2, endY, 300)) return@repeat
             delay(220)
         }
         delay(600)
         val redo = ocrRows().firstOrNull { it.text.contains("重做") } ?: return
         log(onLog, "检测到「${redo.text.take(20)}」, 先重置")
-        DaemonClient.tap(redo.cx, redo.cy)
+        InputDispatcher.tap(redo.cx, redo.cy)
         delay(2000)
 
         // 处理「确认重做」弹窗: 只点按钮本身, 不能点题干 (题干里也有"确认重做")
@@ -926,7 +928,7 @@ object FormSolver {
             }
             if (confirm != null) {
                 log(onLog, "重做确认: 点击「${confirm.text.trim()}」")
-                DaemonClient.tap(confirm.box.centerX(), confirm.box.centerY())
+                InputDispatcher.tap(confirm.box.centerX(), confirm.box.centerY())
                 delay(2600)
                 break
             }
@@ -937,7 +939,7 @@ object FormSolver {
             }
             if (merged != null) {
                 log(onLog, "重做确认: 合并按钮行, 点右侧")
-                DaemonClient.tap(merged.box.left + merged.box.width() * 3 / 4, merged.cy)
+                InputDispatcher.tap(merged.box.left + merged.box.width() * 3 / 4, merged.cy)
                 delay(2600)
                 break
             }
@@ -953,7 +955,7 @@ object FormSolver {
             }
             if (start != null) {
                 log(onLog, "点击「${start.text.take(10)}」进入答题")
-                DaemonClient.tap(start.cx, start.cy)
+                InputDispatcher.tap(start.cx, start.cy)
                 delay(2600)
                 break
             }
@@ -963,10 +965,10 @@ object FormSolver {
     }
 
     private suspend fun swipeUp(): Boolean {
-        val (w, h) = DaemonClient.screenSize()
+        val (w, h) = ScreenGeometry.displaySize()
         val startY = (h * 0.78f).toInt()
         val endY = (h * 0.48f).toInt()
-        val ok = DaemonClient.swipe(w / 2, startY, w / 2, endY, 500)
+        val ok = InputDispatcher.swipe(w / 2, startY, w / 2, endY, 500)
         // 等 WebView 惯性完全停下, 否则 OCR 坐标与点击时的位置不一致
         if (ok) delay(1600)
         return ok
@@ -974,10 +976,10 @@ object FormSolver {
 
     /** 收集阶段用整屏滚动, 更快覆盖长页面 */
     private suspend fun scrollCollect() {
-        val (w, h) = DaemonClient.screenSize()
+        val (w, h) = ScreenGeometry.displaySize()
         val startY = (h * 0.82f).toInt()
         val endY = (h * 0.30f).toInt()
-        if (DaemonClient.swipe(w / 2, startY, w / 2, endY, 450)) {
+        if (InputDispatcher.swipe(w / 2, startY, w / 2, endY, 450)) {
             delay(900)
         }
     }
@@ -997,7 +999,7 @@ object FormSolver {
                 t == "确定" || t == "确认" || t == "确定提交" || t == "确认提交"
             } ?: continue
             log(onLog, "确认弹窗: 点击「${part.text.trim()}」")
-            DaemonClient.tap(part.box.centerX(), part.box.centerY())
+            InputDispatcher.tap(part.box.centerX(), part.box.centerY())
             return
         }
     }

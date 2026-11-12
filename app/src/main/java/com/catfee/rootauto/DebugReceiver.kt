@@ -7,9 +7,11 @@ import android.util.Log
 import com.catfee.rootauto.a11y.UiObserverService
 import com.catfee.rootauto.agent.MediaState
 import com.catfee.rootauto.agent.ToolRuntime
+import com.catfee.rootauto.device.DeviceCapabilities
+import com.catfee.rootauto.llm.DecisionSettings
+import com.catfee.rootauto.llm.LlmSettings
 import com.catfee.rootauto.ocr.OcrEngine
 import com.catfee.rootauto.ocr.PaddleOcrEngine
-import com.catfee.rootauto.root.DaemonClient
 import com.catfee.rootauto.root.ScreenGeometry
 import com.catfee.rootauto.root.ScreenVision
 import kotlinx.coroutines.CoroutineScope
@@ -40,8 +42,9 @@ class DebugReceiver : BroadcastReceiver() {
         Log.i(TAG, "cmd=$cmd")
         when (cmd) {
             "dump" -> dumpTree()
+            "dumpcaps" -> scope.launch { dumpCaps(context) }
             "coords" -> scope.launch {
-                DaemonClient.screenSize()
+                ScreenGeometry.displaySize()
                 Log.i(TAG, "===== COORDS =====\n" + ScreenGeometry.describe())
             }
             "media" -> scope.launch {
@@ -67,6 +70,8 @@ class DebugReceiver : BroadcastReceiver() {
                 )
             }
             "ocr" -> scope.launch { runOcr() }
+            "provision" -> provision(context, intent)
+            "dumpconfig" -> dumpConfig(context)
             "paddleocr" -> scope.launch { runPaddleOcr(context) }
             "longocr" -> scope.launch { runLongOcr(context) }
             "listopts" -> Log.i(
@@ -90,9 +95,102 @@ class DebugReceiver : BroadcastReceiver() {
         }
     }
 
+    /**
+     * 运行时写入 LLM / DECISION 配置, 用于换机或批量调试。
+     * Key 只从 adb 参数读取并写入 App 的加密偏好, 不落源码。
+     *
+     * am broadcast -n com.catfee.rootauto/.DebugReceiver \
+     *   -a com.catfee.rootauto.DEBUG --es cmd provision \
+     *   --es baseUrl ... --es apiKey ... --es model ... \
+     *   --es decisionBaseUrl ... --es decisionApiKey ... --es decisionModel ...
+     */
+    private fun provision(context: Context, intent: Intent) {
+        if (!BuildConfig.DEBUG) {
+            Log.w(TAG, "provision 仅在 debug 包可用")
+            return
+        }
+        val app = context.applicationContext
+        val baseUrl = intent.getStringExtra("baseUrl")?.trim().orEmpty()
+        val apiKey = intent.getStringExtra("apiKey")?.trim().orEmpty()
+        val model = intent.getStringExtra("model")?.trim().orEmpty()
+
+        if (baseUrl.isNotBlank() && apiKey.isNotBlank() && model.isNotBlank()) {
+            LlmSettings.upsert(
+                app,
+                LlmSettings.Provider(
+                    id = "main",
+                    name = "默认",
+                    baseUrl = baseUrl,
+                    apiKey = apiKey,
+                    model = model
+                )
+            )
+            LlmSettings.setActiveId(app, "main")
+            Log.i(TAG, "provision main: model=$model keyLen=${apiKey.length}")
+        } else {
+            Log.w(TAG, "provision main 参数不完整, 跳过")
+        }
+
+        val decisionBaseUrl = intent.getStringExtra("decisionBaseUrl")?.trim().orEmpty()
+        val decisionApiKey = intent.getStringExtra("decisionApiKey")?.trim().orEmpty()
+        val decisionModel = intent.getStringExtra("decisionModel")?.trim().orEmpty()
+        if (decisionBaseUrl.isNotBlank() && decisionApiKey.isNotBlank() && decisionModel.isNotBlank()) {
+            val saved = DecisionSettings.save(
+                app,
+                DecisionSettings.Config(
+                    enabled = intent.getBooleanExtra("decisionEnabled", true),
+                    baseUrl = decisionBaseUrl,
+                    apiKey = decisionApiKey,
+                    model = decisionModel,
+                    minConfidence = intent.getDoubleExtra(
+                        "minConfidence", DecisionSettings.DEFAULT_MIN_CONFIDENCE
+                    ),
+                    maxFastSteps = intent.getIntExtra(
+                        "maxFastSteps", DecisionSettings.DEFAULT_MAX_FAST_STEPS
+                    )
+                )
+            )
+            Log.i(
+                TAG,
+                "provision decision: saved=$saved model=$decisionModel keyLen=${decisionApiKey.length}"
+            )
+        } else {
+            Log.w(TAG, "provision decision 参数不完整, 跳过")
+        }
+    }
+
+    /** 输出配置摘要 (不含 Key 明文), 便于换机后核对 */
+    private fun dumpConfig(context: Context) {
+        val app = context.applicationContext
+        val main = LlmSettings.active(app)
+        val decision = DecisionSettings.load(app)
+        Log.i(
+            TAG,
+            "CONFIG main baseUrl=${main?.baseUrl.orEmpty()} model=${main?.model.orEmpty()} " +
+                "keyLen=${main?.apiKey?.length ?: 0}"
+        )
+        Log.i(
+            TAG,
+            "CONFIG decision enabled=${decision.enabled} baseUrl=${decision.baseUrl} " +
+                "model=${decision.model} keyLen=${decision.apiKey.length} " +
+                "minConf=${decision.minConfidence} maxFast=${decision.maxFastSteps}"
+        )
+    }
+
+    /** 输出设备能力摘要, 便于排查非 Root 模式 */
+    private suspend fun dumpCaps(context: Context) {
+        val caps = DeviceCapabilities.refresh(context.applicationContext, force = true)
+        Log.i(
+            TAG,
+            "CAPS mode=${caps.modeLabel()} root=${caps.root} daemon=${caps.daemon} " +
+                "a11y=${caps.accessibility} gestures=${caps.gestures} " +
+                "screenshot=${caps.screenshot} sdk=${caps.androidSdk} " +
+                "input=${caps.input} overlay=${caps.overlay}"
+        )
+    }
+
     /** 输出完整无障碍树 */
-    private fun dumpTree() {
-        val svc = UiObserverService.instance
+    private fun dumpTree() {        val svc = UiObserverService.instance
         if (svc == null) {
             Log.w(TAG, "无障碍服务未连接")
             return

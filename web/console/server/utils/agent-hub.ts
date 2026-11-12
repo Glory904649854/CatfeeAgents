@@ -493,7 +493,7 @@ export function handleAgentMessage(peer: AgentPeer, raw: string): void {
 
 export function agentConnectionInfo(event: H3Event) {
   const config = useRuntimeConfig(event)
-  const baseUrl = String(config.publicUrl || 'http://localhost:3000').replace(/\/+$/, '')
+  const baseUrl = String(config.publicUrl || 'http://localhost:9777').replace(/\/+$/, '')
   const wsBase = baseUrl.replace(/^http/, 'ws')
   return {
     baseUrl,

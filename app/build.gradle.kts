@@ -1,8 +1,26 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
 }
+
+/**
+ * DECISION 模式的默认接入信息从 local.properties 读取。
+ * Key 不进入仓库；其他开发者未配置时字段为空，可在 App 内手动填写。
+ */
+val localProps = Properties()
+val localPropsFile = rootProject.file("local.properties")
+if (localPropsFile.exists()) {
+    localPropsFile.inputStream().use { localProps.load(it) }
+}
+
+fun localValue(key: String, fallback: String = ""): String =
+    localProps.getProperty(key)?.trim()?.takeIf { it.isNotEmpty() } ?: fallback
+
+fun gradleEscaped(value: String): String =
+    value.replace("\\", "\\\\").replace("\"", "\\\"")
 
 android {
     namespace = "com.catfee.rootauto"
@@ -14,6 +32,22 @@ android {
         targetSdk = 34
         versionCode = 10000
         versionName = "1.0.0"
+
+        buildConfigField(
+            "String",
+            "DECISION_BASE_URL",
+            "\"${gradleEscaped(localValue("decision.baseUrl", "https://llm-cev4lnmqq9bzm5of.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"))}\""
+        )
+        buildConfigField(
+            "String",
+            "DECISION_API_KEY",
+            "\"${gradleEscaped(localValue("decision.apiKey"))}\""
+        )
+        buildConfigField(
+            "String",
+            "DECISION_MODEL",
+            "\"${gradleEscaped(localValue("decision.model", "decision-model-preview"))}\""
+        )
     }
 
     buildTypes {
@@ -34,6 +68,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 
     packaging {
