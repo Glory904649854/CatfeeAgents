@@ -11,6 +11,7 @@ import android.content.res.ColorStateList
 import android.content.res.Configuration
 import android.graphics.Color
 import android.graphics.PixelFormat
+import android.graphics.Rect
 import android.net.Uri
 import android.os.Build
 import android.os.IBinder
@@ -113,8 +114,12 @@ class AgentStatusService : Service() {
 
     private var overlayView: View? = null
     private var overlayParams: WindowManager.LayoutParams? = null
+    private var overlayWm: WindowManager? = null
     private var overlayTicker: Job? = null
     private var overlayRemoveJob: Job? = null
+    /** 悬浮窗「×」第一次点击后的确认截止时间; 0 表示未进入确认态 */
+    private var stopConfirmUntil = 0L
+    private var lastOverlayBounds: Rect? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -186,6 +191,12 @@ class AgentStatusService : Service() {
                         ongoing = true
                     )
                 )
+            }
+        }
+        // Agent 注入手势命中悬浮窗时临时让点击穿透, 手势结束自动恢复
+        scope.launch {
+            OverlayTouchGuard.touchable.collect { touchable ->
+                applyOverlayTouchable(touchable)
             }
         }
         // 服务被系统重启但没有真实 Agent 状态时，不要留“准备中”假象
@@ -371,12 +382,10 @@ class AgentStatusService : Service() {
         try {
             val wm = getSystemService(WINDOW_SERVICE) as WindowManager
             val view = LayoutInflater.from(this).inflate(R.layout.agent_status_overlay, null)
-            // 状态条只做展示: 不可触摸, 也不向无障碍暴露节点。
-            // 之前按钮可点击且窗口在右上角, Agent 的点击/用户的误触落到 × 上会直接停掉任务。
+            // 状态条不向无障碍暴露: 读屏/页面快照不该把悬浮窗当成内容。
+            // 触摸不受影响, 暂停/停止按钮仍可正常点击。
             view.importantForAccessibility =
                 View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
-            view.findViewById<View>(R.id.overlay_pause)?.visibility = View.GONE
-            view.findViewById<View>(R.id.overlay_stop)?.visibility = View.GONE
             val statusBar = resources.getIdentifier("status_bar_height", "dimen", "android")
                 .takeIf { it > 0 }?.let { resources.getDimensionPixelSize(it) } ?: 0
             val lp = WindowManager.LayoutParams(
@@ -384,8 +393,7 @@ class AgentStatusService : Service() {
                 WindowManager.LayoutParams.WRAP_CONTENT,
                 WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                    WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
-                    WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
                 PixelFormat.TRANSLUCENT
             ).apply {
                 gravity = Gravity.TOP or Gravity.END
@@ -397,6 +405,11 @@ class AgentStatusService : Service() {
             wm.addView(view, lp)
             overlayView = view
             overlayParams = lp
+            overlayWm = wm
+            view.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
+                updateOverlayBounds()
+            }
+            view.post { updateOverlayBounds() }
             view.findViewById<TextView>(R.id.overlay_title)?.maxWidth =
                 (200 * resources.displayMetrics.density).toInt()
             view.findViewById<TextView>(R.id.overlay_detail)?.maxWidth =
@@ -407,14 +420,77 @@ class AgentStatusService : Service() {
                 if (s.paused) AgentController.resumeAgent(s.sessionId)
                 else AgentController.pauseAgent(s.sessionId)
             }
-            view.findViewById<View>(R.id.overlay_stop)?.setOnClickListener {
+            view.findViewById<View>(R.id.overlay_stop)?.setOnClickListener { btn ->
                 val s = lastState ?: return@setOnClickListener
-                if (s.sessionId.isNotBlank()) AgentController.stopAgent(s.sessionId, "悬浮窗")
+                if (s.sessionId.isBlank()) return@setOnClickListener
+                // Agent 注入的点击刚到达时忽略, 避免穿透失败/时序问题时误停
+                if (OverlayTouchGuard.gestureJustHappened()) return@setOnClickListener
+                val now = SystemClock.elapsedRealtime()
+                if (now > stopConfirmUntil) {
+                    // 两步确认: 第一次点击只进入确认态, 防止误触和 Agent 点击
+                    stopConfirmUntil = now + 3_000
+                    (btn as? TextView)?.apply {
+                        text = "确认"
+                        textSize = 10f
+                    }
+                    scope.launch {
+                        delay(3_100)
+                        if (SystemClock.elapsedRealtime() >= stopConfirmUntil) {
+                            resetStopButton(btn)
+                        }
+                    }
+                    return@setOnClickListener
+                }
+                stopConfirmUntil = 0
+                resetStopButton(btn)
+                AgentController.stopAgent(s.sessionId, "悬浮窗")
             }
         } catch (e: Exception) {
             android.util.Log.w(TAG, "添加悬浮窗失败: ${e.message}")
             DisplaySettings.setOverlayEnabled(this, false)
             removeOverlay()
+        }
+    }
+
+    private fun resetStopButton(view: View?) {
+        (view as? TextView)?.apply {
+            text = "×"
+            textSize = 18f
+        }
+    }
+
+    /** 悬浮窗可触摸状态变更: 注入手势命中时临时加上 NOT_TOUCHABLE, 让点击穿透到下层 App */
+    private fun applyOverlayTouchable(touchable: Boolean) {
+        val wm = overlayWm ?: return
+        val view = overlayView ?: return
+        val lp = overlayParams ?: return
+        val flags = if (touchable) {
+            lp.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
+        } else {
+            lp.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+        }
+        if (flags == lp.flags) return
+        lp.flags = flags
+        try {
+            wm.updateViewLayout(view, lp)
+        } catch (e: Exception) {
+            android.util.Log.w(TAG, "更新悬浮窗触摸状态失败: ${e.message}")
+        }
+    }
+
+    private fun updateOverlayBounds() {
+        val view = overlayView
+        if (view == null || view.width <= 0 || view.height <= 0) {
+            OverlayTouchGuard.updateBounds(null)
+            return
+        }
+        val loc = IntArray(2)
+        view.getLocationOnScreen(loc)
+        val rect = Rect(loc[0], loc[1], loc[0] + view.width, loc[1] + view.height)
+        OverlayTouchGuard.updateBounds(rect)
+        if (rect != lastOverlayBounds) {
+            lastOverlayBounds = Rect(rect)
+            android.util.Log.i(TAG, "overlay bounds=$rect")
         }
     }
 
@@ -465,6 +541,11 @@ class AgentStatusService : Service() {
         }
         overlayView = null
         overlayParams = null
+        overlayWm = null
+        stopConfirmUntil = 0
+        lastOverlayBounds = null
+        OverlayTouchGuard.updateBounds(null)
+        OverlayTouchGuard.setTouchable(true)
     }
 
     private fun createChannel() {

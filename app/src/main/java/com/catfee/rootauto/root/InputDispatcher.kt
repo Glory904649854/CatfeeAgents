@@ -3,7 +3,10 @@ package com.catfee.rootauto.root
 import android.os.SystemClock
 import com.catfee.rootauto.a11y.UiObserverService
 import com.catfee.rootauto.device.DeviceCapabilities
+import com.catfee.rootauto.service.OverlayTouchGuard
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 
 /**
  * InputDispatcher —— 输入注入的统一入口
@@ -45,46 +48,87 @@ object InputDispatcher {
         if (since > 0) delay(since)
     }
 
-    suspend fun tap(x: Int, y: Int): Boolean {
-        val svc = a11yForGesture()
-        if (svc != null) {
-            waitGestureGap()
-            if (svc.gestureTap(x, y)) return true
+    /**
+     * 悬浮窗让路: 手势路径如果会命中状态条, 注入期间把状态条设为不可触摸,
+     * 点击就会穿透到下层 App; 手势结束(含滑动/长按时长)后恢复按钮可点。
+     * 不会命中时零开销, 不加任何延迟。
+     */
+    private suspend fun <T> passThroughOverlay(
+        x1: Int,
+        y1: Int,
+        x2: Int,
+        y2: Int,
+        settleMs: Long,
+        block: suspend () -> T
+    ): T {
+        OverlayTouchGuard.markGesture()
+        if (!OverlayTouchGuard.intersects(x1, y1, x2, y2)) return block()
+        OverlayTouchGuard.setTouchable(false)
+        // 给 WindowManager 一点时间应用新的窗口标志
+        delay(40)
+        try {
+            return block()
+        } finally {
+            // 任务被取消时也要恢复, 否则悬浮窗会一直不可触摸
+            withContext(NonCancellable) {
+                delay(settleMs + 140)
+                OverlayTouchGuard.setTouchable(true)
+            }
         }
-        if (!DeviceCapabilities.current().daemon) return false
-        return DaemonClient.tap(x, y)
     }
 
-    suspend fun swipe(x1: Int, y1: Int, x2: Int, y2: Int, durationMs: Int = 300): Boolean {
+    suspend fun tap(x: Int, y: Int): Boolean = passThroughOverlay(x, y, x, y, 80L) {
         val svc = a11yForGesture()
         if (svc != null) {
             waitGestureGap()
-            if (svc.gestureSwipe(x1, y1, x2, y2, durationMs.toLong())) return true
+            if (svc.gestureTap(x, y)) return@passThroughOverlay true
         }
-        if (!DeviceCapabilities.current().daemon) return false
-        return DaemonClient.swipe(x1, y1, x2, y2, durationMs)
+        if (!DeviceCapabilities.current().daemon) return@passThroughOverlay false
+        DaemonClient.tap(x, y)
     }
 
-    suspend fun longPress(x: Int, y: Int, holdMs: Int): Boolean {
+    suspend fun swipe(
+        x1: Int,
+        y1: Int,
+        x2: Int,
+        y2: Int,
+        durationMs: Int = 300
+    ): Boolean = passThroughOverlay(x1, y1, x2, y2, durationMs.toLong()) {
         val svc = a11yForGesture()
         if (svc != null) {
             waitGestureGap()
-            if (svc.gestureLongPress(x, y, holdMs.toLong())) return true
+            if (svc.gestureSwipe(x1, y1, x2, y2, durationMs.toLong())) {
+                return@passThroughOverlay true
+            }
         }
-        if (!DeviceCapabilities.current().daemon) return false
-        return DaemonClient.longPress(x, y, holdMs)
+        if (!DeviceCapabilities.current().daemon) return@passThroughOverlay false
+        DaemonClient.swipe(x1, y1, x2, y2, durationMs)
     }
 
-    suspend fun doubleTap(x: Int, y: Int): Boolean {
-        val svc = a11yForGesture()
-        if (svc != null) {
-            waitGestureGap()
-            if (!svc.gestureTap(x, y)) return false
-            delay(120)
-            waitGestureGap()
-            return svc.gestureTap(x, y)
+    suspend fun longPress(x: Int, y: Int, holdMs: Int): Boolean =
+        passThroughOverlay(x, y, x, y, holdMs.toLong()) {
+            val svc = a11yForGesture()
+            if (svc != null) {
+                waitGestureGap()
+                if (svc.gestureLongPress(x, y, holdMs.toLong())) {
+                    return@passThroughOverlay true
+                }
+            }
+            if (!DeviceCapabilities.current().daemon) return@passThroughOverlay false
+            DaemonClient.longPress(x, y, holdMs)
         }
-        if (!DeviceCapabilities.current().daemon) return false
-        return DaemonClient.doubleTap(x, y)
-    }
+
+    suspend fun doubleTap(x: Int, y: Int): Boolean =
+        passThroughOverlay(x, y, x, y, 520L) {
+            val svc = a11yForGesture()
+            if (svc != null) {
+                waitGestureGap()
+                if (!svc.gestureTap(x, y)) return@passThroughOverlay false
+                delay(120)
+                waitGestureGap()
+                return@passThroughOverlay svc.gestureTap(x, y)
+            }
+            if (!DeviceCapabilities.current().daemon) return@passThroughOverlay false
+            DaemonClient.doubleTap(x, y)
+        }
 }
