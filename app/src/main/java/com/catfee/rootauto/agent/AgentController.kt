@@ -196,7 +196,15 @@ object AgentController {
         sessionId: String = "",
         priorContext: String = "",
         phoneAllowed: Boolean = false,
-        attachments: List<Attachment> = emptyList()
+        attachments: List<Attachment> = emptyList(),
+        /** Web 控制台任务 ID; 非空时日志直接挂到该任务时间线 */
+        traceTaskId: String = "",
+        /** Web 任务策略: 是否允许使用设备 Root 增强工具 */
+        allowRootTools: Boolean = true,
+        /** Web 任务策略: 是否允许截图/视觉工具 */
+        allowScreenshot: Boolean = true,
+        /** Web 任务策略: 超时毫秒; <=0 表示使用 Agent 默认预算 */
+        timeoutMs: Long = 0
     ): Boolean {
         val key = keyOf(sessionId)
         val nowWall = System.currentTimeMillis()
@@ -231,7 +239,10 @@ object AgentController {
             SessionManager.setRunning(appContext, sessionId, true)
         }
         run.job = scope.launch {
-            executeRun(run, provider, goal, priorContext, phoneAllowed, attachments)
+            executeRun(
+                run, provider, goal, priorContext, phoneAllowed, attachments,
+                traceTaskId, allowRootTools, allowScreenshot, timeoutMs
+            )
         }
         return true
     }
@@ -242,7 +253,11 @@ object AgentController {
         goal: String,
         priorContext: String,
         phoneAllowed: Boolean,
-        attachments: List<Attachment>
+        attachments: List<Attachment>,
+        traceTaskId: String,
+        allowRootTools: Boolean,
+        allowScreenshot: Boolean,
+        timeoutMs: Long
     ) {
         val appContext = run.context
         val sessionId = run.sessionId
@@ -370,7 +385,11 @@ object AgentController {
                     onPhase = { phase, step, detail ->
                         updatePhase(run, phase, step, detail)
                     },
-                    awaitIfPaused = { awaitIfPaused(sessionId) }
+                    awaitIfPaused = { awaitIfPaused(sessionId) },
+                    traceTaskId = traceTaskId,
+                    allowRootTools = allowRootTools,
+                    allowScreenshot = allowScreenshot,
+                    timeoutMs = timeoutMs
                 )
             } catch (e: kotlinx.coroutines.CancellationException) {
                 "已停止"

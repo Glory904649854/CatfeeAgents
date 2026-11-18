@@ -53,6 +53,10 @@ object AgentTools {
         val activeGroups: MutableSet<String> = mutableSetOf()
         /** 本次 run 的设备能力快照, 由 ReActAgent 启动时刷新写入 */
         var caps: Capabilities = DeviceCapabilities.current()
+        /** Web 任务策略: 设备即使有 Root, 也可以按任务禁用增强工具 */
+        var allowRootTools: Boolean = true
+        /** Web 任务策略: 是否允许截图/视觉工具 */
+        var allowScreenshot: Boolean = true
 
         // 观察/验证/视觉缓存按一次 Agent run 隔离，避免跨会话返回过期结果。
         // lastObservedHash 同时供 observe 去重和 verify_changed 做动作前后比对。
@@ -126,8 +130,16 @@ object AgentTools {
             return "当前为非 Root 模式，$name 不可用。改用 observe/find_text/tap_text/" +
                 "input_text 等无障碍工具，不要反复尝试系统级工具。"
         }
+        if (name in ROOT_ONLY_TOOLS && !session.allowRootTools) {
+            return "该 Web 任务未授权 Root 增强能力，$name 不可用。" +
+                "请改用无障碍工具 observe/find_text/tap_text/input_text。"
+        }
         if (name in SCREENSHOT_TOOLS && !caps.hasScreenshot) {
             return "当前设备截图不可用（未 Root，或 Android 版本低于 11），$name 不可用。" +
+                "改用 observe/read_page/find_text。"
+        }
+        if (name in SCREENSHOT_TOOLS && !session.allowScreenshot) {
+            return "该 Web 任务未授权截图/视觉能力，$name 不可用。" +
                 "改用 observe/read_page/find_text。"
         }
         if (name in GESTURE_TOOLS && !caps.input) {

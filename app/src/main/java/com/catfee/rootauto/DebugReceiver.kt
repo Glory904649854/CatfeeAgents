@@ -7,6 +7,9 @@ import android.util.Log
 import com.catfee.rootauto.a11y.UiObserverService
 import com.catfee.rootauto.agent.MediaState
 import com.catfee.rootauto.agent.ToolRuntime
+import com.catfee.rootauto.console.ConsoleClient
+import com.catfee.rootauto.console.ConsoleSettings
+import com.catfee.rootauto.console.RemoteConsoleService
 import com.catfee.rootauto.device.DeviceCapabilities
 import com.catfee.rootauto.llm.DecisionSettings
 import com.catfee.rootauto.llm.LlmSettings
@@ -71,6 +74,35 @@ class DebugReceiver : BroadcastReceiver() {
             }
             "ocr" -> scope.launch { runOcr() }
             "provision" -> provision(context, intent)
+            "activateprovider" -> {
+                val id = intent.getStringExtra("id")?.trim().orEmpty()
+                if (id.isNotBlank()) {
+                    LlmSettings.setActiveId(context.applicationContext, id)
+                    Log.i(TAG, "provider active=$id")
+                }
+            }
+            "removeprovider" -> {
+                val id = intent.getStringExtra("id")?.trim().orEmpty()
+                if (id.isNotBlank()) {
+                    LlmSettings.remove(context.applicationContext, id)
+                    Log.i(TAG, "provider removed id=$id active=${LlmSettings.activeId(context)}")
+                }
+            }
+            "consolebind" -> scope.launch { bindConsole(context, intent) }
+            "consolestart" -> {
+                RemoteConsoleService.ensureStarted(context.applicationContext)
+                Log.i(TAG, "console service start requested")
+            }
+            "consolestop" -> {
+                RemoteConsoleService.stop(context.applicationContext)
+                Log.i(TAG, "console service stopped")
+            }
+            "consoleunbind" -> {
+                RemoteConsoleService.stop(context.applicationContext)
+                ConsoleSettings.clear(context.applicationContext)
+                Log.i(TAG, "console unbound")
+            }
+            "consolestatus" -> dumpConsole(context)
             "dumpconfig" -> dumpConfig(context)
             "paddleocr" -> scope.launch { runPaddleOcr(context) }
             "longocr" -> scope.launch { runLongOcr(context) }
@@ -113,20 +145,27 @@ class DebugReceiver : BroadcastReceiver() {
         val baseUrl = intent.getStringExtra("baseUrl")?.trim().orEmpty()
         val apiKey = intent.getStringExtra("apiKey")?.trim().orEmpty()
         val model = intent.getStringExtra("model")?.trim().orEmpty()
+        // 默认覆盖 main; 测试时可写独立 provider, 不影响用户已保存的默认配置
+        val providerId = intent.getStringExtra("providerId")?.trim().orEmpty().ifBlank { "main" }
+        val activate = intent.getBooleanExtra("activate", true)
 
         if (baseUrl.isNotBlank() && apiKey.isNotBlank() && model.isNotBlank()) {
             LlmSettings.upsert(
                 app,
                 LlmSettings.Provider(
-                    id = "main",
-                    name = "默认",
+                    id = providerId,
+                    name = if (providerId == "main") "默认" else providerId,
                     baseUrl = baseUrl,
                     apiKey = apiKey,
                     model = model
                 )
             )
-            LlmSettings.setActiveId(app, "main")
-            Log.i(TAG, "provision main: model=$model keyLen=${apiKey.length}")
+            if (activate) LlmSettings.setActiveId(app, providerId)
+            Log.i(
+                TAG,
+                "provision provider=$providerId active=${LlmSettings.activeId(app)} " +
+                    "model=$model keyLen=${apiKey.length}"
+            )
         } else {
             Log.w(TAG, "provision main 参数不完整, 跳过")
         }
@@ -157,6 +196,44 @@ class DebugReceiver : BroadcastReceiver() {
         } else {
             Log.w(TAG, "provision decision 参数不完整, 跳过")
         }
+    }
+
+    /**
+     * 用 Web 控制台一次性注册码绑定设备, 便于换机/批量调试。
+     * am broadcast -a com.catfee.rootauto.DEBUG --es cmd consolebind \
+     *   --es baseUrl http://192.168.1.100:9777 --es code xxx --es name "测试机"
+     */
+    private suspend fun bindConsole(context: Context, intent: Intent) {
+        if (!BuildConfig.DEBUG) {
+            Log.w(TAG, "consolebind 仅在 debug 包可用")
+            return
+        }
+        val app = context.applicationContext
+        val baseUrl = intent.getStringExtra("baseUrl")?.trim().orEmpty()
+        val code = intent.getStringExtra("code")?.trim().orEmpty()
+        val name = intent.getStringExtra("name")?.trim().orEmpty()
+        val res = ConsoleClient.enroll(app, baseUrl, code, name)
+        res.onSuccess {
+            RemoteConsoleService.ensureStarted(app)
+            Log.i(
+                TAG,
+                "CONSOLE bound deviceId=${it.deviceId} base=${it.baseUrl} " +
+                    "connected=${ConsoleClient.connected.value}"
+            )
+        }.onFailure {
+            Log.w(TAG, "CONSOLE bind failed: ${it.message}")
+        }
+    }
+
+    /** 输出控制台绑定状态, 不打印 deviceSecret */
+    private fun dumpConsole(context: Context) {
+        val cfg = ConsoleSettings.load(context.applicationContext)
+        Log.i(
+            TAG,
+            "CONSOLE enabled=${cfg.enabled} base=${cfg.baseUrl} deviceId=${cfg.deviceId} " +
+                "name=${cfg.deviceName} usable=${cfg.usable} " +
+                "connected=${ConsoleClient.connected.value} status=${ConsoleClient.status.value}"
+        )
     }
 
     /** 输出配置摘要 (不含 Key 明文), 便于换机后核对 */

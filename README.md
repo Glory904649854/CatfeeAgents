@@ -36,7 +36,7 @@
 | 🗂 | **会话管理** | 历史会话支持搜索、置顶、收藏、归档、重命名、导出 Markdown；消息可复制、引用、编辑重发、重新生成、分支出新会话。 |
 | 🧭 | **按 App 记忆** | 每个包名一份简短记忆，自动注入当前前台 App 的上下文；任务结束后只沉淀稳定入口、控件和坑，不记录题目答案或一次性数据。 |
 | 📊 | **用量与成本** | 每个会话显示 tokens、上下文长度、消息/步骤数、累计耗时；可配置每 1M token 单价估算费用。 |
-| 📡 | **远程日志** | 可选接入 `clouddream-server` 的 `/logReport`，异步上报每一步输入、模型输出、工具参数与结果，便于回放和优化。 |
+| 📡 | **统一远程日志** | 可选绑定内置 Web 控制台，异步上报每一步输入、模型输出、工具参数与结果；本地聊天和 Web 任务共用同一套设备凭证，不再需要第三方 JWT。 |
 | 🖥 | **Web 控制台** | 仓库内提供 Nuxt 单端口控制台：设备注册、任务下发、实时事件、暂停/继续/停止与审计。Agent 主动通过 WebSocket 接入，Web 端不直接操作设备。 |
 | ⚡ | **DECISION 加速** | 可选接入百炼 decision 接口，高置信度时跳过主模型的 observe / wait；默认关闭，点击、输入和完成仍由主模型决定。 |
 
@@ -44,7 +44,8 @@
 
 [`web/console`](web/console) 是面向已授权设备的远程 Agent 管理端，与 APK 共用
 黑白红扁平设计。Nuxt 4 单端口同时承载页面、REST API、SSE 和 Agent WebSocket，
-数据存储在本地 SQLite。
+数据存储在本地 SQLite。默认示例适合内网；公网部署请放在 HTTPS 反向代理后，
+设备使用 WSS。
 
 ```bash
 cd web/console
@@ -55,6 +56,8 @@ pnpm dev        # http://localhost:9777
 首次启动创建管理员 `admin / change-me`，可用环境变量覆盖。
 详见 [Web 控制台文档](docs/web-console.md)、
 [Agent 协议契约](contracts/README.md) 与 [OpenAPI](contracts/openapi.yaml)。
+UI 重做可直接使用 [双端 UI 提示词](docs/ui-prompts-ardot.md) 与
+[Web UI 需求清单](docs/web-ui-requirements.md)。
 
 ## DECISION 加速（可选）
 
@@ -141,7 +144,7 @@ powershell -ExecutionPolicy Bypass -File daemon/build.ps1
 4. 点 **拉取模型列表**，接口返回的模型会全部列出来，点任意一个即可切换并保存；
 5. 也可以手动填写模型 ID 后点 **保存模型配置**。
 
-设置页顶部的能力标签会显示 `无障碍 / 手势 / 截图 / Root / 悬浮窗` 状态，以及 `完整模式 / 无障碍模式 / 仅聊天模式`。API Key、Agent Token 使用 `EncryptedSharedPreferences` 保存。
+设置页顶部的能力标签会显示 `无障碍 / 手势 / 截图 / Root / 悬浮窗` 状态，以及 `完整模式 / 无障碍模式 / 仅聊天模式`。API Key 与 Web 控制台设备凭证使用 `EncryptedSharedPreferences` 保存。
 
 ### 6. 开始任务
 
@@ -254,17 +257,25 @@ Agent · 第 12 步 · 等待模型
 5. 单选也会清理旧选项，提交前从顶部重新全量复查；存在未确认题目时禁止提交；
 6. 长页面坐标明确区分 documentY 和 viewportY，整页坐标不能直接用于 tap。
 
-## 远程日志（可选）
+## Web 控制台日志与远程任务
 
-把每一步的输入/输出上报到日志系统，不阻塞 Agent：
+绑定一次后，本地聊天日志、Web 任务日志和远程控制共用同一条设备长连接：
 
-1. 在日志系统「日志报告 → 接入凭证」选择项目，生成 6 位一次性校验码；
-2. App `设置 → 日志` 填写 `Log Base URL` 和校验码，点 **换取**；
-3. 成功后自动填入 Agent JWT、显示绑定项目并打开开关，点 **保存日志配置**。
+1. 启动 `web/console`，登录后在「设备」页生成一次性注册码；
+2. APK `设置 → 控制台` 填写控制台地址、设备名称和注册码，点 **绑定**；
+3. 绑定成功后自动启用前台长连接；Web「设备」页显示在线即可下发任务。
 
-上报内容包括任务信息、每步模型 `content / reasoning / tool_calls`、工具参数与结果、LLM 耗时、异常和最终结果。文本单步最多 16000 字符，单条工具结果最多 8000 字符，**不上传截图二进制**。
+事件以服务端 `taskId` 写入任务时间线：`task.started`、`agent.task.step`、`task.paused / resumed / stopped / succeeded / failed`。本地聊天任务使用 `local_` 前缀，只写日志，不改变 Web 任务状态。
 
-> 现有 `GET /logReport/reports` 只接受用户登录 JWT；Agent JWT 只能 `POST /reports`、`POST /upload`、`GET /whoami`。如果要让 Agent 自己拉取历史日志做诊断，需要在服务端增加 `VerifyAgentToken` 作用域的只读接口。
+任务策略 `allowRoot` / `allowScreenshot` 会在设备端再次校验；未授权时对应工具直接隐藏并返回可行动原因。上报内容包括任务信息、每步模型 `content / reasoning / tool_calls`、工具参数与结果、LLM 耗时、异常和最终结果。文本单步最多 6000 字符，单条工具结果最多 2000 字符，**不上传截图二进制**。
+
+设备只保存 `deviceId + deviceSecret`，不需要管理员 Token 或 JWT；Web 撤销设备后长连接立即失效。调试包也可以通过 adb 绑定：
+
+```bash
+adb shell am broadcast -a com.catfee.rootauto.DEBUG \
+  -n com.catfee.rootauto/.DebugReceiver --es cmd consolebind \
+  --es baseUrl http://192.168.1.100:9777 --es code <一次性注册码>
+```
 
 ## 目录结构
 
@@ -296,8 +307,9 @@ app/src/main/java/com/catfee/rootauto/
 ├── service/
 │   ├── AgentStatusService.kt    # 前台通知 + 悬浮状态条
 │   └── DisplaySettings.kt       # 悬浮窗开关
+├── console/                     # 设备凭证 / WebSocket / 远程任务执行
 ├── llm/                         # LlmClient / LlmSettings / UsageSettings
-└── log/                         # LogSettings / AgentTrace
+└── log/                         # AgentTrace → /api/agent/events
 
 app/src/main/assets/ocr/         # PP-OCRv3 det/rec ONNX
 daemon/                          # native 输入注入守护进程
@@ -315,7 +327,7 @@ magisk/                          # Magisk 模块
 | 长任务 | `wait_media`/`wait_for_text` 分段执行并可暂停；LLM 超过 20 秒发心跳；任务受步数/总时长预算约束 |
 | 控制 | Agent 可从主界面、通知栏和悬浮窗暂停/继续/停止；暂停不取消原 Job，停止需要重新发起 |
 | 流式 | SSE 增量输出；统一总请求超时和可重试错误分类，服务端不支持 SSE 时回退普通请求 |
-| 安全 | `shell` 禁止 UI 注入；远程日志不上传截图；Key/Token 加密存储；源码不含真实密钥 |
+| 安全 | `shell` 禁止 UI 注入；远程日志不上传截图；Key/设备凭证加密存储；源码不含真实密钥 |
 
 ## 常见问题
 
@@ -352,8 +364,8 @@ magisk/                          # Magisk 模块
 ## 安全与隐私
 
 - Root 权限可以执行高权限操作，请只在测试机或受控设备上使用；
-- LLM Key 与 Agent JWT 使用 `EncryptedSharedPreferences` 保存，不写入日志；
-- 远程日志会包含页面文字、工具参数与结果，请确认日志系统的访问权限；
+- LLM Key 与 Web 控制台设备凭证使用 `EncryptedSharedPreferences` 保存，不写入日志；
+- Web 日志会包含页面文字、工具参数与结果，请确认控制台账号的访问权限；
 - 不上传截图二进制；文本和工具结果会按长度截断；
 - 源码不包含真实 API Key；`local.properties` 已加入 `.gitignore`。
 

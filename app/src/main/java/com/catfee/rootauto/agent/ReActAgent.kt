@@ -216,7 +216,15 @@ object ReActAgent {
             { _, _ -> true },
         claimAgentMode: () -> String? = { null },
         onPhase: (phase: String, step: Int, detail: String) -> Unit = { _, _, _ -> },
-        awaitIfPaused: suspend () -> Unit = {}
+        awaitIfPaused: suspend () -> Unit = {},
+        /** Web 控制台任务 ID; 非空时事件写到该任务时间线 */
+        traceTaskId: String = "",
+        /** Web 任务策略: 是否允许 Root 增强工具 */
+        allowRootTools: Boolean = true,
+        /** Web 任务策略: 是否允许截图/视觉工具 */
+        allowScreenshot: Boolean = true,
+        /** Web 任务策略: 超时毫秒; <=0 表示使用默认总预算 */
+        timeoutMs: Long = 0
     ): String {
         if (!provider.usable) {
             onEvent(Event("error", "LLM 配置不完整, 请先填写并保存 BaseUrl / Key / 模型名"))
@@ -228,6 +236,8 @@ object ReActAgent {
         }
 
         val started = System.currentTimeMillis()
+        // Web 任务可以给更短的预算, 但不能超过 Agent 自己的硬上限
+        val timeoutBudget = if (timeoutMs > 0) minOf(TOTAL_TIMEOUT_MS, timeoutMs) else TOTAL_TIMEOUT_MS
         val caps = DeviceCapabilities.refresh(context)
         val nonRootHint = if (caps.root) {
             ""
@@ -238,7 +248,9 @@ object ReActAgent {
                 "截图/OCR 使用系统无障碍截图，可能偶发限流；失败时改用 observe/read_page。"
         }
         val startPkg = AppMemory.currentPackage()
-        val traceRun = AgentTrace.startTask(context, goal, provider.model, SYSTEM_PROMPT, startPkg)
+        val traceRun = AgentTrace.startTask(
+            context, goal, provider.model, SYSTEM_PROMPT, startPkg, traceTaskId
+        )
         var currentStep = 0
         var phoneGranted = false
         var lastCallSig = ""
@@ -261,6 +273,8 @@ object ReActAgent {
         // 工具可见性按任务阶段变化: 聊天 -> enter_agent_mode -> 核心工具/按需组
         val toolSession = AgentTools.Session()
         toolSession.caps = caps
+        toolSession.allowRootTools = allowRootTools
+        toolSession.allowScreenshot = allowScreenshot
         // 长期便签: 历史消息会被裁剪, 但便签每轮都注入 system, 保证关键数据不丢
         val notes = StringBuilder()
         // 任务清单: 多步骤任务由 Agent 自己维护, 每轮注入, 防止漏项
@@ -287,9 +301,9 @@ object ReActAgent {
                 mutationCount = 0
                 awaitIfPaused()
                 val stepStart = System.currentTimeMillis()
-                if (System.currentTimeMillis() - started > TOTAL_TIMEOUT_MS) {
+                if (System.currentTimeMillis() - started > timeoutBudget) {
                     onPhase("error", step, "任务总时长超时")
-                    onEvent(Event("error", "任务总时长超过 $TOTAL_TIMEOUT_MS ms, 已中断"))
+                    onEvent(Event("error", "任务总时长超过 $timeoutBudget ms, 已中断"))
                     AgentTrace.finish(context, traceRun, false, "超时中断", step)
                     return "超时中断"
                 }

@@ -188,6 +188,9 @@ import androidx.lifecycle.lifecycleScope
 import com.catfee.rootauto.a11y.UiObserverService
 import com.catfee.rootauto.agent.AgentController
 import com.catfee.rootauto.agent.AppMemory
+import com.catfee.rootauto.console.ConsoleClient
+import com.catfee.rootauto.console.ConsoleSettings
+import com.catfee.rootauto.console.RemoteConsoleService
 import com.catfee.rootauto.device.DeviceCapabilities
 import com.catfee.rootauto.device.DeviceMode
 import com.catfee.rootauto.llm.DecisionClient
@@ -195,8 +198,6 @@ import com.catfee.rootauto.llm.DecisionSettings
 import com.catfee.rootauto.llm.LlmClient
 import com.catfee.rootauto.llm.LlmSettings
 import com.catfee.rootauto.llm.UsageSettings
-import com.catfee.rootauto.log.AgentTrace
-import com.catfee.rootauto.log.LogSettings
 import com.catfee.rootauto.root.RootShell
 import com.catfee.rootauto.root.ScreenGeometry
 import com.catfee.rootauto.service.AgentStatusService
@@ -430,17 +431,28 @@ private fun AgentConsole(activity: ComponentActivity) {
     var fetchedModels by remember { mutableStateOf<List<String>>(emptyList()) }
     var fetchingModels by remember { mutableStateOf(false) }
 
-    // ---- 远程日志配置 ----
-    val logCfg = remember { LogSettings.config(activity) }
-    var logEnabled by remember { mutableStateOf(logCfg.enabled) }
-    var logBase by remember { mutableStateOf(logCfg.baseUrl) }
-    var logToken by remember { mutableStateOf(logCfg.token) }
-    var logProject by remember { mutableStateOf(logCfg.project) }
-    var logCode by remember { mutableStateOf("") }
-    var logStatus by remember { mutableStateOf(logCfg.lastStatus) }
-    val traceStatus by AgentTrace.status.collectAsState()
-    LaunchedEffect(traceStatus) {
-        if (traceStatus.isNotBlank()) logStatus = traceStatus
+    // ---- 内置 Web 控制台配置 (设备凭证, 不使用管理员 JWT) ----
+    val consoleCfg = remember { ConsoleSettings.load(activity) }
+    var consoleEnabled by remember { mutableStateOf(consoleCfg.enabled) }
+    var consoleBase by remember { mutableStateOf(consoleCfg.baseUrl) }
+    var consoleCode by remember { mutableStateOf("") }
+    var consoleName by remember {
+        mutableStateOf(
+            consoleCfg.deviceName.ifBlank { "${Build.MANUFACTURER} ${Build.MODEL}" }
+        )
+    }
+    var consoleDeviceId by remember { mutableStateOf(consoleCfg.deviceId) }
+    var consoleStatus by remember { mutableStateOf(consoleCfg.lastStatus) }
+    val consoleConnected by ConsoleClient.connected.collectAsState()
+    val consoleLiveStatus by ConsoleClient.status.collectAsState()
+    LaunchedEffect(consoleLiveStatus) {
+        if (consoleLiveStatus.isNotBlank()) consoleStatus = consoleLiveStatus
+    }
+    // 已绑定且启用时, 冷启动自动恢复长连接
+    LaunchedEffect(Unit) {
+        if (ConsoleSettings.load(activity).usable) {
+            RemoteConsoleService.ensureStarted(activity)
+        }
     }
 
     LaunchedEffect(Unit) {
@@ -462,16 +474,21 @@ private fun AgentConsole(activity: ComponentActivity) {
         return if (override.isBlank()) base else base.copy(model = override)
     }
 
-    fun persistLog() {
-        LogSettings.save(
+    fun saveConsole(
+        enabled: Boolean = consoleEnabled,
+        deviceId: String = consoleDeviceId,
+        baseUrl: String = consoleBase,
+        deviceName: String = consoleName
+    ) {
+        ConsoleSettings.save(
             activity,
-            LogSettings.Config(
-                enabled = logEnabled,
-                baseUrl = logBase.trim(),
-                token = logToken.trim(),
-                project = logProject,
-                expiresAt = logCfg.expiresAt,
-                lastStatus = logStatus
+            ConsoleSettings.Config(
+                enabled = enabled,
+                baseUrl = ConsoleSettings.normalizeBase(baseUrl),
+                deviceId = deviceId,
+                deviceSecret = ConsoleSettings.load(activity).deviceSecret,
+                deviceName = deviceName.trim(),
+                lastStatus = consoleStatus
             )
         )
     }
@@ -603,7 +620,6 @@ private fun AgentConsole(activity: ComponentActivity) {
         // 全局默认仍保存; 会话级模型只影响本次请求, 不污染默认配置
         LlmSettings.upsert(activity, currentProvider())
         LlmSettings.setActiveId(activity, "main")
-        persistLog()
         keyboard?.hide()
         hint = ""
 
@@ -978,7 +994,6 @@ private fun AgentConsole(activity: ComponentActivity) {
                 val p = currentProvider()
                 LlmSettings.upsert(activity, p)
                 LlmSettings.setActiveId(activity, "main")
-                persistLog()
                 testResult = "已保存 · ${p.model}"
             },
             onTestModel = {
@@ -1003,48 +1018,79 @@ private fun AgentConsole(activity: ComponentActivity) {
                     }
                 }
             },
-            logEnabled = logEnabled,
-            onLogEnabled = { logEnabled = it },
-            logBase = logBase,
-            onLogBase = { logBase = it },
-            logToken = logToken,
-            onLogToken = { logToken = it },
-            logCode = logCode,
-            onLogCode = { logCode = it },
-            logProject = logProject,
-            logStatus = logStatus.ifBlank { traceStatus },
-            onSaveLog = {
-                persistLog()
-                logStatus = "配置已保存"
+            consoleEnabled = consoleEnabled,
+            onConsoleEnabled = { enabled ->
+                consoleEnabled = enabled
+                saveConsole(enabled = enabled)
+                if (enabled) {
+                    if (consoleDeviceId.isBlank()) {
+                        consoleStatus = "请先填写一次性注册码完成绑定"
+                    } else {
+                        consoleStatus = "正在连接…"
+                        RemoteConsoleService.ensureStarted(activity)
+                    }
+                } else {
+                    consoleStatus = "控制台连接已停用"
+                    RemoteConsoleService.stop(activity)
+                }
             },
-            onExchange = {
-                persistLog()
-                logStatus = "正在换取令牌…"
-                scope.launch {
-                    val res = LogSettings.exchange(activity, logBase, logCode)
-                    withContext(Dispatchers.Main) {
-                        res.onSuccess { r ->
-                            logEnabled = true
-                            logBase = r.config.baseUrl
-                            logToken = r.config.token
-                            logProject = r.config.project
-                            logStatus = r.message
-                            logCode = ""
-                        }.onFailure {
-                            logStatus = it.message ?: "换取失败"
+            consoleBase = consoleBase,
+            onConsoleBase = { consoleBase = it },
+            consoleCode = consoleCode,
+            onConsoleCode = { consoleCode = it },
+            consoleName = consoleName,
+            onConsoleName = { consoleName = it },
+            consoleDeviceId = consoleDeviceId,
+            consoleStatus = consoleStatus,
+            consoleConnected = consoleConnected,
+            onBindConsole = {
+                if (consoleBase.isBlank()) {
+                    consoleStatus = "请填写 Web 控制台地址"
+                } else if (consoleCode.isBlank()) {
+                    consoleStatus = "请填写 Web 控制台生成的一次性注册码"
+                } else {
+                    consoleStatus = "正在绑定…"
+                    scope.launch {
+                        val res = ConsoleClient.enroll(activity, consoleBase, consoleCode, consoleName)
+                        withContext(Dispatchers.Main) {
+                            res.onSuccess { cfg ->
+                                consoleEnabled = true
+                                consoleBase = cfg.baseUrl
+                                consoleDeviceId = cfg.deviceId
+                                consoleCode = ""
+                                consoleStatus = "已绑定 ${cfg.deviceId}"
+                                RemoteConsoleService.ensureStarted(activity)
+                            }.onFailure {
+                                consoleStatus = it.message ?: "绑定失败"
+                            }
                         }
                     }
                 }
             },
-            onTestLog = {
-                persistLog()
-                logStatus = "正在自检…"
+            onSaveConsole = {
+                saveConsole()
+                consoleStatus = "配置已保存"
+            },
+            onTestConsole = {
                 scope.launch {
-                    val res = LogSettings.whoami(activity)
+                    consoleStatus = "正在测试连接…"
+                    val ok = ConsoleClient.heartbeat(activity)
                     withContext(Dispatchers.Main) {
-                        logStatus = res.getOrElse { it.message ?: "自检失败" }
+                        consoleStatus = if (ok) {
+                            "连接正常"
+                        } else {
+                            ConsoleClient.status.value.ifBlank { "连接失败" }
+                        }
                     }
                 }
+            },
+            onUnbindConsole = {
+                RemoteConsoleService.stop(activity)
+                ConsoleSettings.clear(activity)
+                consoleEnabled = false
+                consoleDeviceId = ""
+                consoleCode = ""
+                consoleStatus = "已解除绑定"
             },
             onDismiss = { showSettings = false }
         )
@@ -3069,19 +3115,21 @@ private fun SettingsSheet(
     testResult: String,
     onSaveModel: () -> Unit,
     onTestModel: () -> Unit,
-    logEnabled: Boolean,
-    onLogEnabled: (Boolean) -> Unit,
-    logBase: String,
-    onLogBase: (String) -> Unit,
-    logToken: String,
-    onLogToken: (String) -> Unit,
-    logCode: String,
-    onLogCode: (String) -> Unit,
-    logProject: String,
-    logStatus: String,
-    onSaveLog: () -> Unit,
-    onExchange: () -> Unit,
-    onTestLog: () -> Unit,
+    consoleEnabled: Boolean,
+    onConsoleEnabled: (Boolean) -> Unit,
+    consoleBase: String,
+    onConsoleBase: (String) -> Unit,
+    consoleCode: String,
+    onConsoleCode: (String) -> Unit,
+    consoleName: String,
+    onConsoleName: (String) -> Unit,
+    consoleDeviceId: String,
+    consoleStatus: String,
+    consoleConnected: Boolean,
+    onBindConsole: () -> Unit,
+    onSaveConsole: () -> Unit,
+    onTestConsole: () -> Unit,
+    onUnbindConsole: () -> Unit,
     onDismiss: () -> Unit
 ) {
     val scrollState = rememberScrollState()
@@ -3110,7 +3158,12 @@ private fun SettingsSheet(
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
-        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        sheetState = rememberModalBottomSheetState(
+            skipPartiallyExpanded = true,
+            // 设置页内容长, 下滑翻页时容易误触把整页甩掉;
+            // 关闭统一走右上角 X / 返回键。
+            confirmValueChange = { it != SheetValue.Hidden }
+        ),
         containerColor = Color.White,
         sheetMaxWidth = 640.dp,
         shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
@@ -3143,7 +3196,7 @@ private fun SettingsSheet(
             Text(
                 when (tab) {
                     0 -> "配置模型接口和可用模型。"
-                    1 -> "配置远程日志上报与接入凭证。"
+                    1 -> "绑定内置 Web 控制台，远程查看日志和控制任务。"
                     2 -> "管理每个 App 的简短操作记忆。"
                     3 -> "查看会话 token、上下文和耗时。"
                     else -> "了解 CatfeeAgents、能力状态和隐私说明。"
@@ -3161,7 +3214,7 @@ private fun SettingsSheet(
                     .padding(3.dp)
             ) {
                 SettingsTab("模型", tab == 0, Modifier.weight(1f)) { tab = 0 }
-                SettingsTab("日志", tab == 1, Modifier.weight(1f)) { tab = 1 }
+                SettingsTab("控制台", tab == 1, Modifier.weight(1f)) { tab = 1 }
                 SettingsTab("记忆", tab == 2, Modifier.weight(1f)) { tab = 2 }
                 SettingsTab("统计", tab == 3, Modifier.weight(1f)) { tab = 3 }
                 SettingsTab("关于", tab == 4, Modifier.weight(1f)) { tab = 4 }
@@ -3280,12 +3333,15 @@ private fun SettingsSheet(
             } else if (tab == 1) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
-                        Text("远程日志", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = Ink)
-                        Text("把每一步的输入/输出上报到日志系统", fontSize = 11.sp, color = Muted)
+                        Text("Web 控制台", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = Ink)
+                        Text(
+                            "日志、任务和远程指令统一走内置控制台，不再使用第三方 JWT。",
+                            fontSize = 11.sp, color = Muted, lineHeight = 15.sp
+                        )
                     }
                     Switch(
-                        checked = logEnabled,
-                        onCheckedChange = onLogEnabled,
+                        checked = consoleEnabled,
+                        onCheckedChange = onConsoleEnabled,
                         colors = SwitchDefaults.colors(
                             checkedThumbColor = Color.White,
                             checkedTrackColor = Ink,
@@ -3297,17 +3353,19 @@ private fun SettingsSheet(
                 }
                 Spacer(Modifier.height(14.dp))
                 Text(
-                    "接入配置",
+                    "连接配置",
                     fontSize = 11.sp,
                     fontWeight = FontWeight.SemiBold,
                     color = Muted,
                     modifier = Modifier.padding(bottom = 8.dp)
                 )
-                StudioField("Log Base URL", logBase, onLogBase, LogSettings.DEFAULT_BASE_URL)
                 StudioField(
-                    "Agent Token", logToken, onLogToken,
-                    "粘贴 JWT，或用下方校验码换取",
-                    mono = true, minLines = 2
+                    "控制台地址", consoleBase, onConsoleBase,
+                    "http://192.168.1.100:9777"
+                )
+                StudioField(
+                    "设备名称", consoleName, onConsoleName,
+                    "${Build.MANUFACTURER} ${Build.MODEL}"
                 )
 
                 Surface(
@@ -3317,12 +3375,13 @@ private fun SettingsSheet(
                     border = BorderStroke(1.dp, Line)
                 ) {
                     Column(Modifier.padding(12.dp)) {
-                        Text("校验码换取", fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = Ink)
                         Text(
-                            "在日志系统「接入凭证」生成 6 位一次性校验码",
-                            fontSize = 10.sp,
-                            color = Muted,
-                            lineHeight = 15.sp,
+                            "一次性注册码", fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold, color = Ink
+                        )
+                        Text(
+                            "在 Web 控制台「设备」页生成，绑定成功后立即失效。",
+                            fontSize = 10.sp, color = Muted, lineHeight = 15.sp,
                             modifier = Modifier.padding(top = 2.dp)
                         )
                         Spacer(Modifier.height(8.dp))
@@ -3331,12 +3390,12 @@ private fun SettingsSheet(
                             horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
                             StudioField(
-                                "6 位校验码", logCode, onLogCode, "000000",
+                                "注册码", consoleCode, onConsoleCode, "粘贴注册码",
                                 mono = true, modifier = Modifier.weight(1f)
                             )
                             Button(
-                                onClick = onExchange,
-                                enabled = logCode.trim().length == 6,
+                                onClick = onBindConsole,
+                                enabled = consoleCode.isNotBlank(),
                                 modifier = Modifier.padding(bottom = 8.dp),
                                 shape = RoundedCornerShape(14.dp),
                                 colors = ButtonDefaults.buttonColors(
@@ -3344,22 +3403,22 @@ private fun SettingsSheet(
                                     disabledContainerColor = Color(0xFFE5E7EB),
                                     disabledContentColor = Color(0xFF9CA3AF)
                                 )
-                            ) { Text("换取", fontSize = 12.sp) }
+                            ) { Text("绑定", fontSize = 12.sp) }
                         }
                     }
                 }
 
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    TextButton(onClick = onTestLog, contentPadding = PaddingValues(0.dp)) {
+                    TextButton(onClick = onTestConsole, contentPadding = PaddingValues(0.dp)) {
                         Text("测试连接", fontSize = 11.sp, fontWeight = FontWeight.Medium, color = Ink)
                     }
                     Spacer(Modifier.weight(1f))
-                    TextButton(onClick = onSaveLog, contentPadding = PaddingValues(0.dp)) {
-                        Text("保存日志配置", fontSize = 11.sp, color = Muted)
+                    TextButton(onClick = onSaveConsole, contentPadding = PaddingValues(0.dp)) {
+                        Text("保存配置", fontSize = 11.sp, color = Muted)
                     }
                 }
 
-                if (logProject.isNotBlank() || logStatus.isNotBlank()) {
+                if (consoleDeviceId.isNotBlank() || consoleStatus.isNotBlank()) {
                     Surface(
                         modifier = Modifier.fillMaxWidth(),
                         shape = RoundedCornerShape(14.dp),
@@ -3367,24 +3426,42 @@ private fun SettingsSheet(
                         border = BorderStroke(1.dp, Line)
                     ) {
                         Column(Modifier.padding(10.dp)) {
-                            if (logProject.isNotBlank()) {
+                            if (consoleDeviceId.isNotBlank()) {
                                 Text(
-                                    "已绑定 · $logProject",
-                                    fontSize = 11.sp, color = Success, lineHeight = 16.sp
+                                    if (consoleConnected) "已连接 Web 控制台" else "已绑定设备",
+                                    fontSize = 11.sp,
+                                    color = if (consoleConnected) Success else Muted
+                                )
+                                Text(
+                                    "设备 ID · $consoleDeviceId",
+                                    fontSize = 10.sp, color = Muted,
+                                    fontFamily = FontFamily.Monospace,
+                                    modifier = Modifier.padding(top = 2.dp)
                                 )
                             }
-                            if (logStatus.isNotBlank()) {
+                            if (consoleStatus.isNotBlank()) {
                                 Text(
-                                    logStatus,
+                                    consoleStatus,
                                     fontSize = 11.sp, color = Muted, lineHeight = 16.sp,
-                                    modifier = Modifier.padding(top = if (logProject.isNotBlank()) 2.dp else 0.dp)
+                                    modifier = Modifier.padding(
+                                        top = if (consoleDeviceId.isNotBlank()) 4.dp else 0.dp
+                                    )
                                 )
                             }
                         }
                     }
                 }
+                if (consoleDeviceId.isNotBlank()) {
+                    TextButton(
+                        onClick = onUnbindConsole,
+                        contentPadding = PaddingValues(0.dp),
+                        modifier = Modifier.padding(top = 4.dp)
+                    ) {
+                        Text("解除绑定", fontSize = 11.sp, color = Danger)
+                    }
+                }
                 Text(
-                    "校验码一次性有效；换取成功后会自动启用上报。",
+                    "设备只保存自己的 deviceId / deviceSecret；Web 撤销设备后长连接立即失效。",
                     fontSize = 10.sp, color = Color(0xFF9CA3AF), lineHeight = 15.sp,
                     modifier = Modifier.padding(top = 8.dp)
                 )
@@ -3782,7 +3859,11 @@ private fun ModelSheet(
     }
     ModalBottomSheet(
         onDismissRequest = onDismiss,
-        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        sheetState = rememberModalBottomSheetState(
+            skipPartiallyExpanded = true,
+            // 模型列表可能很长, 下滑浏览时不要误触关闭
+            confirmValueChange = { it != SheetValue.Hidden }
+        ),
         containerColor = Color.White,
         sheetMaxWidth = 640.dp,
         shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),

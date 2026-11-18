@@ -174,10 +174,36 @@ WS   /api/agent/_ws
 ## 9. Agent 接入流程
 
 1. 控制台生成一次性注册码（10 分钟）。
-2. APK 调用 `POST /api/agent/enroll` 换取 `deviceId + deviceSecret`。
-3. APK 连接 `ws://<host>/api/agent/_ws`，首条消息发送 `hello`。
+2. APK `设置 → 控制台` 填写控制台地址与注册码；`ConsoleClient.enroll()` 调用
+   `POST /api/agent/enroll` 换取 `deviceId + deviceSecret`，保存在
+   `EncryptedSharedPreferences`。
+3. APK 通过 `RemoteConsoleService` 保持前台长连接，连接
+   `ws://<host>/api/agent/_ws`，首条消息发送 `hello`。
 4. 服务端返回 `hello_ack`，并补发离线期间排队的指令。
 5. 任务以 `command` 下发，APK 返回 `command_ack`，随后上报 `event`。
+
+设备端实现位于 `app/src/main/java/com/catfee/rootauto/console/`：
+
+- `ConsoleSettings`：设备凭证与启用状态；
+- `ConsoleClient`：注册、心跳、WebSocket、事件批量补传；
+- `RemoteTaskRunner`：`TASK_ASSIGN / PAUSE / RESUME / STOP`，按 `commandId` 去重；
+- `RemoteConsoleService`：前台服务，保证锁屏/退后台后仍能接收任务。
+
+日志由 `log/AgentTrace.kt` 统一写入 `/api/agent/events`：Web 任务使用服务端
+`taskId`，本地聊天使用 `local_` 前缀。`task.started / succeeded / failed /
+stopped` 会同步任务状态，`agent.task.step` 只写时间线。任务策略
+`allowRoot` / `allowScreenshot` 会在设备端再次校验。
+
+调试包可通过 adb 绑定与查看状态：
+
+```bash
+adb shell am broadcast -a com.catfee.rootauto.DEBUG \
+  -n com.catfee.rootauto/.DebugReceiver --es cmd consolebind \
+  --es baseUrl http://192.168.1.100:9777 --es code <一次性注册码>
+
+adb shell am broadcast -a com.catfee.rootauto.DEBUG \
+  -n com.catfee.rootauto/.DebugReceiver --es cmd consolestatus
+```
 
 消息与状态语义见 [`contracts/README.md`](../../contracts/README.md)。
 
@@ -207,6 +233,8 @@ WS   /api/agent/_ws
 ## 11. 安全说明
 
 - 设备必须通过一次性注册码接入，凭证可撤销。
+- 设备凭证通过 `x-device-id / x-device-secret` 请求头传输；公网部署必须使用
+  HTTPS/WSS，内网测试才使用 `http://`。
 - 控制台会话使用 HttpOnly Cookie；密码使用 scrypt。
 - Web 端只暴露任务与控制指令，不提供任意 Shell。
 - Root 能力默认关闭，任务策略中显式记录。
@@ -216,7 +244,7 @@ WS   /api/agent/_ws
 ## 12. 当前限制与后续
 
 - 暂未提供密码修改 / 多用户管理界面，账号来自环境变量。
-- 暂未实现截图对象存储；`allowScreenshot` 仅为策略标记。
+- 暂未实现截图对象存储；`allowScreenshot` 只控制设备端截图/视觉工具，不上传画面。
 - 单实例 SQLite；多副本部署前需要迁移 PostgreSQL。
 - 设备组、批量任务、任务模板、审批流尚未实现。
 - Agent WS 使用 Nitro 实验性 WebSocket 支持，升级 Nitro 时需回归验证。

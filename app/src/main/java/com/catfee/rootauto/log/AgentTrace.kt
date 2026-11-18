@@ -3,87 +3,64 @@ package com.catfee.rootauto.log
 import android.content.Context
 import android.os.Build
 import android.util.Log
+import com.catfee.rootauto.console.ConsoleClient
+import com.catfee.rootauto.console.ConsoleSettings
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.Channel
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
-import java.util.Collections
-import java.util.WeakHashMap
-import java.util.concurrent.TimeUnit
-import kotlin.random.Random
+import java.util.UUID
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * AgentTrace —— Agent 每一步的远程日志
+ * AgentTrace —— Agent 每一步的结构化日志，统一走内置 Catfee Web 控制台。
  *
- * 只写「任务/步骤/工具输入输出」这类结构化文本, 不传截图二进制。
- * 上报是异步的: Agent 主循环只做 trySend, 网络慢/断网不会阻塞操作。
+ * 和旧版区别：
+ *   - 不再请求第三方 /logReport，也不再保存 Agent JWT
+ *   - 使用 ConsoleSettings 里的设备凭证，POST /api/agent/events
+ *   - Web 任务使用服务端 taskId，事件直接进入任务时间线
+ *   - 本地聊天任务用 local_ 前缀，只进日志，不影响 Web 任务状态
  *
- * 服务端: clouddream-server /logReport/reports (content_type=json)
- * 鉴权:   LogSettings 里的 Agent JWT
+ * 上报是异步批量：Agent 主循环只做 trySend，网络慢/断网不会阻塞操作。
  */
 object AgentTrace {
 
     private const val TAG = "AgentTrace"
-    private const val MAX_TEXT = 16_000
-    private const val MAX_TOOL_RESULT = 8_000
-    private const val MAX_ARGS = 4_000
-    private const val MAX_SYSTEM = 12_000
+    private const val MAX_TEXT = 6_000
+    private const val MAX_TOOL_RESULT = 2_000
+    private const val MAX_ARGS = 800
+    private const val MAX_REASONING = 2_000
+    private const val BATCH_SIZE = 10
+    private const val MAX_RETRY = 3
 
-    private val jsonMedia = "application/json; charset=utf-8".toMediaType()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val queue = Channel<QueuedReport>(256)
-
-    private val http by lazy {
-        OkHttpClient.Builder()
-            .connectTimeout(10, TimeUnit.SECONDS)
-            .readTimeout(25, TimeUnit.SECONDS)
-            .writeTimeout(15, TimeUnit.SECONDS)
-            .build()
-    }
-
-    private val _status = MutableStateFlow("")
-    val status: StateFlow<String> = _status.asStateFlow()
+    private val queue = Channel<JSONObject>(512)
 
     @Volatile private var senderStarted = false
+    @Volatile private var senderContext: Context? = null
 
-    /** 任务级的不可变身份, 每条报告都只能从这个对象取 taskId/goal/model/package。 */
+    /** 任务级的不可变身份, 每条事件都只能从这个对象取 taskId/goal/model/package。 */
     data class TraceContext(
         val taskId: String,
         val goal: String,
         val model: String,
         val packageName: String,
-        val startedAt: Long
+        val startedAt: Long,
+        /** true 表示 Web 控制台下发的任务, 会同步任务状态 */
+        val remote: Boolean
     )
 
-    /** 一次 Agent run 的日志句柄。句柄本身不依赖 AgentTrace 的可变当前任务。 */
+    /** 一次 Agent run 的日志句柄。句柄本身不依赖 AgentTrace 的全局可变状态。 */
     class TraceRun internal constructor(
         val task: TraceContext,
-        internal val config: LogSettings.Config,
-        internal val statusContext: Context
+        val enabled: Boolean
     ) {
-        val enabled: Boolean get() = config.usable
+        internal val finished = AtomicBoolean(false)
     }
-
-    private data class QueuedReport(
-        val report: JSONObject,
-        /** 入队时捕获, 发送阶段绝不从全局可变任务字段读取。 */
-        val task: TraceContext,
-        val config: LogSettings.Config,
-        val statusContext: Context
-    )
-
-    /** 仅为旧的无 handle API 保留的兼容映射; ReActAgent 不使用它。 */
-    private val legacyRuns = Collections.synchronizedMap(WeakHashMap<Context, TraceRun>())
 
     data class ToolTrace(
         val name: String,
@@ -93,51 +70,42 @@ object AgentTrace {
         val ok: Boolean = true
     )
 
-    /** 任务开始: 记录目标、模型、当前 App、系统提示词。返回本次 run 的日志句柄。 */
+    /** 任务开始: 记录目标、模型、当前 App、系统提示词。 */
     fun startTask(
         context: Context,
         goal: String,
         model: String,
         systemPrompt: String,
-        packageName: String
+        packageName: String,
+        traceTaskId: String = ""
     ): TraceRun {
-        val config = LogSettings.config(context)
-        _status.value = config.lastStatus
+        val remote = traceTaskId.isNotBlank()
         val task = TraceContext(
-            taskId = "T" + System.currentTimeMillis().toString(36).lowercase() +
-                Random.nextInt(0x1000, 0xFFFF).toString(16),
+            taskId = traceTaskId.ifBlank {
+                "local_" + System.currentTimeMillis().toString(36) +
+                    UUID.randomUUID().toString().take(6)
+            },
             goal = goal,
             model = model,
             packageName = packageName,
-            startedAt = System.currentTimeMillis()
+            startedAt = System.currentTimeMillis(),
+            remote = remote
         )
-        val run = TraceRun(task, config, context.applicationContext)
-        // 只服务旧调用方; 新调用方始终显式传 run, 因而不会串线。
-        legacyRuns[run.statusContext] = run
-        if (!run.enabled) return run
+        val enabled = ConsoleSettings.load(context).usable
+        val run = TraceRun(task, enabled)
+        if (!enabled) return run
 
-        ensureSender(run.statusContext)
-        val content = JSONObject()
-            .put("task_id", task.taskId)
-            .put("goal", task.goal.take(MAX_TEXT))
-            .put("model", task.model)
-            .put("package", task.packageName)
+        ensureSender(context)
+        val payload = JSONObject()
+            .put("summary", "任务开始 · ${goal.trim().take(40)}")
+            .put("taskId", task.taskId)
+            .put("goal", clip(goal, MAX_TEXT))
+            .put("model", model)
+            .put("package", packageName)
             .put("device", "${Build.MANUFACTURER} ${Build.MODEL}")
             .put("android", Build.VERSION.RELEASE)
-            .put("system_prompt", systemPrompt.take(MAX_SYSTEM))
-        enqueue(
-            run,
-            buildReport(
-                title = "任务开始 · ${task.goal.trim().take(40)}",
-                level = "info",
-                content = content,
-                tags = listOf("agent", "task-start", task.packageName.ifBlank { "unknown" }),
-                extra = JSONObject()
-                    .put("task_id", task.taskId)
-                    .put("model", task.model)
-                    .put("package", task.packageName)
-            )
-        )
+            .put("systemPrompt", clip(systemPrompt, MAX_TEXT))
+        enqueue(context, run, eventType(run, "start"), "info", payload)
         return run
     }
 
@@ -159,197 +127,162 @@ object AgentTrace {
         val task = run.task
         val planned = JSONArray()
         plannedTools.forEach { (name, args) ->
-            planned.put(JSONObject().put("name", name).put("arguments", args.take(MAX_ARGS)))
+            planned.put(JSONObject().put("name", name).put("arguments", clip(args, MAX_ARGS)))
         }
         val toolArr = JSONArray()
         tools.forEach { t ->
             toolArr.put(
                 JSONObject()
                     .put("name", t.name)
-                    .put("arguments", t.arguments.take(MAX_ARGS))
-                    .put("result", t.result.take(MAX_TOOL_RESULT))
-                    .put("elapsed_ms", t.elapsedMs)
+                    .put("arguments", clip(t.arguments, MAX_ARGS))
+                    .put("result", clip(t.result, MAX_TOOL_RESULT))
+                    .put("elapsedMs", t.elapsedMs)
                     .put("ok", t.ok)
             )
         }
-        val content = JSONObject()
-            .put("task_id", task.taskId)
+        val failed = tools.any { !it.ok }
+        val toolName = tools.firstOrNull()?.name ?: "think"
+        val payload = JSONObject()
+            .put("summary", "Step $step · $toolName")
+            .put("taskId", task.taskId)
             .put("step", step)
-            .put("goal", task.goal.take(MAX_TEXT))
+            .put("goal", clip(task.goal, MAX_TEXT))
             .put("model", task.model)
             .put("package", task.packageName)
-            .put("llm_ms", llmMs)
+            .put("llmMs", llmMs)
+            .put("durationMs", System.currentTimeMillis() - task.startedAt)
             .put("context", JSONObject().put("chars", contextChars).put("messages", contextMessages))
-            .put("input", JSONObject().put("last_message", input.take(MAX_TEXT)))
+            .put("input", JSONObject().put("lastMessage", clip(input, MAX_TEXT)))
             .put(
                 "output",
                 JSONObject()
-                    .put("content", output.take(MAX_TEXT))
-                    .put("reasoning", reasoning.take(MAX_TEXT))
-                    .put("tool_calls", planned)
+                    .put("content", clip(output, MAX_TEXT))
+                    .put("reasoning", clip(reasoning, MAX_REASONING))
+                    .put("toolCalls", planned)
             )
             .put("tools", toolArr)
-        val failed = tools.any { !it.ok }
-        val toolName = tools.firstOrNull()?.name ?: "think"
-        enqueue(
-            run,
-            buildReport(
-                title = "Step $step · $toolName",
-                level = if (failed) "error" else "info",
-                content = content,
-                tags = listOf("agent", "step", task.packageName.ifBlank { "unknown" }),
-                extra = JSONObject()
-                    .put("task_id", task.taskId)
-                    .put("step", step)
-                    .put("package", task.packageName)
-                    .put("model", task.model)
-                    .put("llm_ms", llmMs)
-                    .put("context_chars", contextChars)
-                    .put("context_messages", contextMessages)
-                    .put("tool_count", tools.size)
-            )
-        )
+        enqueue(context, run, "agent.task.step", if (failed) "error" else "info", payload)
     }
 
     /** 任务结束 / 失败 / 用户停止。 */
     fun finish(context: Context, run: TraceRun, success: Boolean, result: String, steps: Int) {
         if (!run.enabled) return
+        if (!run.finished.compareAndSet(false, true)) return
         val task = run.task
-        val content = JSONObject()
-            .put("task_id", task.taskId)
-            .put("goal", task.goal.take(MAX_TEXT))
+
+        if (task.remote) {
+            // 控制台 STOP 已经显式上报 task.stopped, 这里不再重复写一条状态事件。
+            if (ConsoleClient.consumeFinalStatus(task.taskId) != null) return
+        }
+
+        val stopped = !success && (result.contains("用户停止") || result == "已停止")
+        val type = when {
+            task.remote && stopped -> "task.stopped"
+            task.remote && success -> "task.succeeded"
+            task.remote -> "task.failed"
+            stopped -> "agent.task.stopped"
+            success -> "agent.task.succeeded"
+            else -> "agent.task.failed"
+        }
+        val level = when {
+            success -> "info"
+            stopped -> "warn"
+            else -> "error"
+        }
+        val title = when {
+            success -> "任务完成"
+            stopped -> "任务已停止"
+            else -> "任务失败"
+        }
+        val payload = JSONObject()
+            .put("summary", "$title · ${task.goal.trim().take(40)}")
+            .put("taskId", task.taskId)
+            .put("goal", clip(task.goal, MAX_TEXT))
             .put("success", success)
-            .put("result", result.take(MAX_TEXT))
+            .put("stopped", stopped)
+            .put("result", clip(result, MAX_TEXT))
             .put("steps", steps)
-            .put("duration_ms", System.currentTimeMillis() - task.startedAt)
-        enqueue(
-            run,
-            buildReport(
-                title = (if (success) "任务完成" else "任务结束") + " · " +
-                    task.goal.trim().take(40),
-                level = if (success) "success" else "error",
-                content = content,
-                tags = listOf("agent", "task-finish", task.packageName.ifBlank { "unknown" }),
-                extra = JSONObject()
-                    .put("task_id", task.taskId)
-                    .put("success", success)
-                    .put("steps", steps)
-            )
-        )
+            .put("durationMs", System.currentTimeMillis() - task.startedAt)
+        enqueue(context, run, type, level, payload)
     }
 
     /** 重试/系统干预等旁路事件。 */
     fun event(context: Context, run: TraceRun, level: String, title: String, message: String) {
         if (!run.enabled) return
         val task = run.task
+        val payload = JSONObject()
+            .put("summary", title.take(200))
+            .put("taskId", task.taskId)
+            .put("goal", clip(task.goal, MAX_TEXT))
+            .put("message", clip(message, MAX_TEXT))
+            .put("package", task.packageName)
         enqueue(
+            context,
             run,
-            buildReport(
-                title = title.take(200),
-                level = level,
-                content = JSONObject()
-                    .put("task_id", task.taskId)
-                    .put("goal", task.goal.take(MAX_TEXT))
-                    .put("message", message.take(MAX_TEXT)),
-                tags = listOf("agent", "event", task.packageName.ifBlank { "unknown" }),
-                extra = JSONObject().put("task_id", task.taskId).put("package", task.packageName)
-            )
+            "agent.event",
+            ConsoleClient.normalizeLevel(level),
+            payload
         )
     }
 
-    // 兼容旧调用方: 新代码必须使用上面的 handle overload, 旧调用方按 Context 取最近一次 run。
-    fun step(
+    private fun eventType(run: TraceRun, stage: String): String = when (stage) {
+        "start" -> if (run.task.remote) "task.started" else "agent.task.started"
+        else -> "agent.event"
+    }
+
+    private fun clip(text: String, max: Int): String =
+        if (text.length <= max) text else text.take(max) + "…"
+
+    private fun enqueue(
         context: Context,
-        step: Int,
-        input: String,
-        output: String,
-        plannedTools: List<Pair<String, String>>,
-        tools: List<ToolTrace>,
-        llmMs: Long,
-        reasoning: String = "",
-        contextChars: Int = 0,
-        contextMessages: Int = 0
-    ) {
-        legacyRuns[context.applicationContext]?.let {
-            step(context, it, step, input, output, plannedTools, tools, llmMs,
-                reasoning, contextChars, contextMessages)
-        }
-    }
-
-    fun finish(context: Context, success: Boolean, result: String, steps: Int) {
-        legacyRuns[context.applicationContext]?.let { finish(context, it, success, result, steps) }
-    }
-
-    fun event(context: Context, level: String, title: String, message: String) {
-        legacyRuns[context.applicationContext]?.let { event(context, it, level, title, message) }
-    }
-
-    private fun buildReport(
-        title: String,
+        run: TraceRun,
+        type: String,
         level: String,
-        content: JSONObject,
-        tags: List<String>,
-        extra: JSONObject
-    ): JSONObject {
-        val tagArr = JSONArray()
-        tags.filter { it.isNotBlank() }.forEach { tagArr.put(it.take(32)) }
-        return JSONObject()
-            .put("content_type", "json")
-            .put("level", level)
-            .put("title", title.take(255))
-            .put("content", content)
-            .put("tags", tagArr)
-            .put("source", "CatfeeAgents/Android")
-            .put("extra", extra)
-    }
-
-    private fun enqueue(run: TraceRun, report: JSONObject) {
+        payload: JSONObject
+    ) {
         if (!run.enabled) return
-        val queued = QueuedReport(report, run.task, run.config, run.statusContext)
-        if (!queue.trySend(queued).isSuccess) {
-            Log.w(TAG, "日志队列已满, 丢弃一条")
+        val event = JSONObject()
+            .put("id", "and_" + UUID.randomUUID().toString().replace("-", "").take(20))
+            .put("taskId", run.task.taskId)
+            .put("runId", run.task.taskId)
+            .put("sequence", ConsoleClient.nextSequence())
+            .put("type", type)
+            .put("level", ConsoleClient.normalizeLevel(level))
+            .put("payload", payload)
+            .put("occurredAt", java.time.Instant.now().toString())
+        if (!queue.trySend(event).isSuccess) {
+            Log.w(TAG, "日志队列已满, 丢弃一条: $type")
         }
+        ensureSender(context)
     }
 
     private fun ensureSender(context: Context) {
+        senderContext = context.applicationContext
         if (senderStarted) return
         synchronized(this) {
             if (senderStarted) return
             senderStarted = true
             scope.launch {
-                for (queued in queue) {
-                    send(queued)
+                while (true) {
+                    val first = queue.receiveCatching().getOrNull() ?: break
+                    val batch = JSONArray().put(first)
+                    while (batch.length() < BATCH_SIZE) {
+                        val next = queue.tryReceive().getOrNull() ?: break
+                        batch.put(next)
+                    }
+                    if (batch.length() > 0) {
+                        sendBatch(senderContext ?: context.applicationContext, batch)
+                    }
                 }
             }
         }
     }
 
-    private fun send(queued: QueuedReport) {
-        val c = queued.config
-        if (!c.usable) return
-        val url = c.baseUrl.trimEnd('/') + "/logReport/reports"
-        val req = Request.Builder()
-            .url(url)
-            .header("Authorization", "Bearer ${c.token}")
-            .post(queued.report.toString().toRequestBody(jsonMedia))
-            .build()
-        try {
-            http.newCall(req).execute().use { resp ->
-                val text = resp.body?.string().orEmpty()
-                val ok = resp.isSuccessful && text.contains("\"code\":0")
-                val status = if (ok) {
-                    "上报成功 · ${queued.report.optString("title").take(40)}"
-                } else {
-                    "上报失败 HTTP ${resp.code}: ${text.take(120)}"
-                }
-                _status.value = status
-                LogSettings.updateStatus(queued.statusContext, status)
-            }
-        } catch (e: Exception) {
-            val status = "上报失败: ${e.message}"
-            _status.value = status
-            LogSettings.updateStatus(queued.statusContext, status)
-            Log.w(TAG, status)
+    private suspend fun sendBatch(context: Context, batch: JSONArray) {
+        repeat(MAX_RETRY) { attempt ->
+            if (ConsoleClient.uploadEvents(context, batch)) return
+            if (attempt < MAX_RETRY - 1) delay(1_000L * (attempt + 1))
         }
+        Log.w(TAG, "日志批量上报失败, 丢弃 ${batch.length()} 条")
     }
 }

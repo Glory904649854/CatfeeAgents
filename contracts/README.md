@@ -96,6 +96,8 @@ WebSocket 断开时，服务端会把进行中的任务标记为 `interrupted`�
 device.online / device.offline / device.enrolled
 task.queued / task.accepted / task.started / task.paused
 task.resumed / task.stopped / task.succeeded / task.failed
+agent.task.started / agent.task.step / agent.task.succeeded
+agent.task.failed / agent.task.stopped / agent.event
 tool.called / tool.result
 model.request / model.response
 command.ack
@@ -104,6 +106,9 @@ security.device_revoked
 
 事件 `payload` 建议包含 `summary`、`error` 或 `reason`，控制台会优先展示这些字段。
 单个事件序列化后超过 16 KB 会被截断并标记 `truncated`，避免日志放大。
+
+`task.*` 事件必须带服务端任务 `taskId`，会同步任务状态；本地聊天使用
+`agent.task.*`，只写日志，不影响 Web 任务。
 
 ## 8. 文件
 

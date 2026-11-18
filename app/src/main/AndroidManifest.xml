@@ -75,6 +75,12 @@
             android:exported="false"
             android:foregroundServiceType="dataSync" />
 
+        <!-- 内置 Web 控制台长连接: 远程任务 / 日志 / 心跳 -->
+        <service
+            android:name=".console.RemoteConsoleService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
         <!-- 无障碍服务: 采集 UI 树, 比 uiautomator dump 快 5~10 倍 -->
         <service
             android:name=".a11y.UiObserverService"
