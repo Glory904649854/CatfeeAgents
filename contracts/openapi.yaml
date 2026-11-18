@@ -1,6 +1,6 @@
 openapi: 3.1.0
 info:
-  title: Catfee Console API
+  title: CatfeeAgents Console API
   version: 0.1.0
   description: |
     Catfee Web 控制台的 HTTP API。控制台、API、SSE 与 Agent WebSocket

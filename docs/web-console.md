@@ -1,4 +1,4 @@
-# Catfee Web 控制台
+# CatfeeAgents Web 控制台
 
 面向已授权 Android Agent 的远程管理控制台：设备接入、任务下发、实时事件、
 暂停 / 继续 / 停止与审计记录。
@@ -173,10 +173,11 @@ WS   /api/agent/_ws
 
 ## 9. Agent 接入流程
 
-1. 控制台生成一次性注册码（10 分钟）。
-2. APK `设置 → 控制台` 填写控制台地址与注册码；`ConsoleClient.enroll()` 调用
-   `POST /api/agent/enroll` 换取 `deviceId + deviceSecret`，保存在
-   `EncryptedSharedPreferences`。
+1. 控制台生成一次性注册码（8 位 `ABCD-2345`，10 分钟有效），并展示
+   `catfee://enroll?url=<console>&code=<token>` 二维码。
+2. APK `设置 → 控制台` 可手动输入注册码，或点「扫码绑定」扫描二维码；
+   `ConsoleClient.enroll()` 调用 `POST /api/agent/enroll` 换取
+   `deviceId + deviceSecret`，保存在 `EncryptedSharedPreferences`。
 3. APK 通过 `RemoteConsoleService` 保持前台长连接，连接
    `ws://<host>/api/agent/_ws`，首条消息发送 `hello`。
 4. 服务端返回 `hello_ack`，并补发离线期间排队的指令。

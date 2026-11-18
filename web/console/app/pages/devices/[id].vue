@@ -2,7 +2,7 @@
 import { useStore } from 'vuex'
 import type { RootState } from '~/store'
 
-useHead({ title: '设备详情 · Catfee 控制台' })
+useHead({ title: '设备详情 · CatfeeAgents 控制台' })
 
 const route = useRoute()
 const router = useRouter()
@@ -186,9 +186,14 @@ const infoFields = computed(() => [
           <div v-if="events.length === 0">
             <EmptyState icon="i-lucide-radio" title="暂无事件" description="设备开始执行后会回传事件。" />
           </div>
-          <div v-else class="max-h-[420px] overflow-y-auto">
+          <TransitionGroup
+            v-else
+            name="event-list"
+            tag="div"
+            class="relative max-h-[420px] overflow-y-auto"
+          >
             <EventRow v-for="event in events" :key="event.id" :event="event" />
-          </div>
+          </TransitionGroup>
         </SectionCard>
       </div>
 

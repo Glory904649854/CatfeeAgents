@@ -70,6 +70,30 @@ export function formatNumber(value: number): string {
   return numberFormatter.format(value)
 }
 
+export function formatDurationMs(ms?: number | null): string {
+  if (ms == null || !Number.isFinite(ms) || ms < 0) return '—'
+  if (ms < 1000) return `${Math.round(ms)} ms`
+  const totalSeconds = Math.round(ms / 1000)
+  if (totalSeconds < 60) {
+    return ms < 10_000 ? `${(ms / 1000).toFixed(1)} 秒` : `${totalSeconds} 秒`
+  }
+  const minutes = Math.floor(totalSeconds / 60)
+  const seconds = totalSeconds % 60
+  if (minutes < 60) return `${minutes} 分 ${seconds} 秒`
+  const hours = Math.floor(minutes / 60)
+  return `${hours} 小时 ${minutes % 60} 分`
+}
+
+export function formatCompactNumber(value?: number | null): string {
+  if (value == null || !Number.isFinite(value)) return '0'
+  if (value < 1000) return String(Math.round(value))
+  if (value < 1_000_000) {
+    const k = value / 1000
+    return `${k < 10 ? k.toFixed(1) : Math.round(k)}K`
+  }
+  return `${(value / 1_000_000).toFixed(1)}M`
+}
+
 export function formatSeconds(seconds: number): string {
   if (!Number.isFinite(seconds) || seconds < 0) return '—'
   if (seconds < 60) return `${Math.round(seconds)} 秒`

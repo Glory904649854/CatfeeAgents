@@ -3,7 +3,7 @@ import { useStore } from 'vuex'
 import type { DeviceSummary, TaskType } from '~~/shared/types'
 import type { RootState } from '~/store'
 
-useHead({ title: '任务 · Catfee 控制台' })
+useHead({ title: '任务 · CatfeeAgents 控制台' })
 
 const store = useStore<RootState>()
 const route = useRoute()
@@ -22,7 +22,7 @@ const form = reactive({
   title: '',
   type: 'agent.goal' as TaskType,
   goal: '',
-  timeoutMs: 120000,
+  timeoutMs: -1,
   allowScreenshot: true,
   allowRoot: false
 })
@@ -43,11 +43,17 @@ const typeOptions = [
 ]
 
 const timeoutOptions = [
-  { label: '1 分钟', value: 60000 },
-  { label: '2 分钟', value: 120000 },
+  { label: '不限制（直到任务完成）', value: -1 },
   { label: '5 分钟', value: 300000 },
-  { label: '10 分钟', value: 600000 }
+  { label: '15 分钟', value: 900000 },
+  { label: '30 分钟', value: 1800000 },
+  { label: '1 小时', value: 3600000 }
 ]
+
+const canGrantRoot = computed(() => {
+  const role = store.state.auth.user?.role
+  return role === 'owner' || role === 'admin'
+})
 
 const tasks = computed(() => store.state.tasks.items)
 const counts = computed(() => store.state.tasks.counts)
@@ -101,7 +107,7 @@ function resetForm() {
   form.title = ''
   form.goal = ''
   form.type = 'agent.goal'
-  form.timeoutMs = 120000
+  form.timeoutMs = -1
   form.allowScreenshot = true
   form.allowRoot = false
 }
@@ -255,6 +261,9 @@ async function submitCreate() {
           <div>
             <label class="field-label mb-1.5 block">超时时间</label>
             <n-select v-model:value="form.timeoutMs" :options="timeoutOptions" />
+            <p class="mt-1.5 text-[10.5px] text-faint">
+              默认不限制时长；任务运行中可在详情页随时暂停或停止。
+            </p>
           </div>
         </div>
 
@@ -281,9 +290,15 @@ async function submitCreate() {
           <div class="mt-3 flex items-center justify-between gap-3 border-t border-line/70 pt-3">
             <div>
               <p class="text-[11.5px] text-ink">允许 Root 能力</p>
-              <p class="mt-0.5 text-[10px] text-faint">高危能力默认关闭，需在设备策略中显式开启</p>
+              <p class="mt-0.5 text-[10px] text-faint">
+                仅 owner/admin 可授予；增强 shell/文件/系统设置，文字输入仍依赖无障碍
+              </p>
             </div>
-            <n-switch v-model:value="form.allowRoot" size="small" disabled />
+            <n-switch
+              v-model:value="form.allowRoot"
+              size="small"
+              :disabled="!canGrantRoot"
+            />
           </div>
         </div>
       </div>

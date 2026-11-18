@@ -11,8 +11,10 @@
 
 ## 2. 注册
 
-1. 管理员在控制台生成一次性 `enrollment token`（10 分钟有效）。
-2. Agent 调用 `POST /api/agent/enroll`，提交 token 与设备信息。
+1. 管理员在控制台生成一次性 `enrollment token`（8 位 `ABCD-2345`，10 分钟有效）。
+   控制台同时展示 `catfee://enroll?url=<console>&code=<token>` 二维码。
+2. Agent 可手动输入 token，或扫描二维码解析出控制台地址与 token；
+   随后调用 `POST /api/agent/enroll`，提交 token 与设备信息。
 3. 服务端返回 `deviceId` 与 `deviceSecret`。
 4. Agent 使用 `deviceId + deviceSecret` 完成 WebSocket `hello`。
 

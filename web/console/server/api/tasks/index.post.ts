@@ -10,7 +10,8 @@ const schema = z.object({
     .object({
       allowScreenshot: z.boolean().optional(),
       allowRoot: z.boolean().optional(),
-      timeoutMs: z.number().int().min(1000).max(3_600_000).optional()
+      // -1 表示不限制时长，直到任务完成或从 Web 端手动停止
+      timeoutMs: z.number().int().min(-1).max(3_600_000).optional()
     })
     .optional()
 })
@@ -33,7 +34,7 @@ export default defineEventHandler(async (event) => {
   const policy = {
     allowScreenshot: parsed.data.policy?.allowScreenshot ?? true,
     allowRoot: parsed.data.policy?.allowRoot ?? false,
-    timeoutMs: parsed.data.policy?.timeoutMs ?? 120_000
+    timeoutMs: parsed.data.policy?.timeoutMs ?? -1
   }
 
   const taskId = createId('task')

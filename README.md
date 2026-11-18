@@ -31,7 +31,7 @@
 | 💬 | **统一对话** | 普通问答、附件分析、手机操作共用一个输入框，不用先选 Chat / Agent 模式。需要碰手机时，模型自己请求进入设备模式。 |
 | 🧵 | **多会话并发** | 多个聊天会话可以同时运行；切换会话不会打断另一个会话。设备操作全局只允许一个 Agent，冲突时提示并可重试，聊天仍可继续。 |
 | 👁 | **状态看得见** | 通知栏和可选悬浮条实时显示「第 N 步 · 等待模型 / 操作中 / 等待确认」、运行时长和最后活动时间，支持一键停止或回到会话。 |
-| 🧠 | **本地多模态** | 无障碍树优先；读不到时降级到 ML Kit、PP-OCRv3、滚动长截图和视觉模型。图片附件先在本地 OCR，再把文字交给 LLM。 |
+| 🧠 | **本地多模态** | 无障碍树优先；读不到时降级到 ML Kit、PP-OCRv5、滚动长截图和视觉模型。图片附件先在本地 OCR，再把文字交给 LLM。 |
 | 🧰 | **原子工具** | 点击、长按、滑动、输入、按键、启动 App、读页面、截图、OCR、等待、校验、记忆、计划等都可独立调用，可组合出任意任务。 |
 | 🗂 | **会话管理** | 历史会话支持搜索、置顶、收藏、归档、重命名、导出 Markdown；消息可复制、引用、编辑重发、重新生成、分支出新会话。 |
 | 🧭 | **按 App 记忆** | 每个包名一份简短记忆，自动注入当前前台 App 的上下文；任务结束后只沉淀稳定入口、控件和坑，不记录题目答案或一次性数据。 |
@@ -66,6 +66,9 @@ UI 重做可直接使用 [双端 UI 提示词](docs/ui-prompts-ardot.md) 与
 - Base URL / Key / 模型默认从 `local.properties` 的 `decision.baseUrl`、`decision.apiKey`、`decision.model` 读取，构建时写入 BuildConfig，不会进入仓库；其他开发者未配置时可在 App 内手动填写。
 - 开启后，高置信度时由百炼 decision 接口接管 `observe` / `wait`，跳过该轮主模型；点击、输入、`finish` 仍由主模型决定，避免分类器误操作。
 - 可调最小置信度（默认 0.75）和最多连续快速步数（默认 3）；连续失败两次会自动停用本次任务的 DECISION。
+- 动作完成后会自动 `observe` 一次，把新页面直接带回上下文；这类步骤不再额外询问 DECISION。`observe` 快速路径使用更低的 0.35 安全阈值，`wait` 仍按配置阈值。
+- DECISION 只在可能 `observe/wait` 的步骤调用：动作后、等待后、页面加载中或无变化时；`load_tools`、`find_text`、`todo` 等结果确定的步骤直接交给主模型。
+- 单次 DECISION 超过 2 秒，或调用 6 次后平均超过 600ms，会自动停用本次任务；每次调用都会记录 action / confidence / latency / used / loading。
 - 本地实测（同一部署、同一把 Key）：路由决策中位数约 **124ms**（手机端稳态约 **200ms**，首次含 TLS 握手约 **1.1s**），`deepseek-v4.1-flash` 做同样的下一步判断约 **955ms**。实际任务提速取决于能跳过主模型的步骤占比。
 - 真实淘宝场景对比（非 Root，同一目标，DDR4 3600 16GB 最低价）：SimpleMode **91.8s / 345.8K tok / 68 步**；DecisionMode 两次为 **134.8s / 487.8K tok / 86 步** 和 **139.8s / 558.5K tok**。这个以点击、滑动、详情页探索为主的场景里 DECISION 反而更慢：快路径只覆盖 `observe/wait`，其余步骤仍要主模型，且分类器可能带来额外观察步骤。建议只在等待/读取型任务开启，点击密集任务保持关闭。
 
@@ -184,7 +187,7 @@ flowchart LR
 - **单动作事务**：每轮最多执行一个 UI mutation；执行前检查工具/坐标，执行后只对 mutation 做自适应稳定等待，并要求下一轮基于新页面验证。
 - **失败安全**：坐标越界、媒体不确定、等待停滞、控件歧义、页面无进展等返回 `BLOCKED/失败` 语义，不会被当成成功继续盲点。
 - **坐标统一**：所有工具使用当前**显示方向**坐标；注入前按 rotation 转成设备 natural 坐标，越界直接拒绝。
-- **上下文预算**：最多 60 条消息 / 40K 字符；system 消息原位更新，工具结果和会话观察缓存按 Agent run 隔离。
+- **上下文预算**：最多 48 条消息 / 32K 字符；system 消息原位更新，工具结果和会话观察缓存按 Agent run 隔离。
 - **证据优先**：页面文字、进度、节点 checked/selected 和动作前后页面指纹优先于颜色或视觉猜测；业务成功条件由用户目标和当前页面证据决定。
 
 ## 工具系统
@@ -193,8 +196,7 @@ flowchart LR
 
 ```text
 observe  tap  tap_node  swipe  input_text  key  launch_app  open_url
-wait  wait_for_text  media_state  media_speed  wait_media
-find_text  scroll_to_text  get_activity  ocr
+wait  wait_for_text  find_text  scroll_to_text  get_activity  ocr
 verify_text  verify_changed  note  todo_write  memory_read  memory_write  finish
 ```
 
@@ -203,6 +205,7 @@ verify_text  verify_changed  note  todo_write  memory_read  memory_write  finish
 | 组 | 工具 | 用途 |
 | --- | --- | --- |
 | `inspect` | `read_page` `screenshot` `long_ocr` `see_screen` | 完整页面、截图、滚动长图、视觉识别 |
+| `media` | `media_state` `media_speed` `wait_media` | 播放进度、倍速、按进度等待 |
 | `form` | `list_options` `verify_option` `verify_question` `answer_form` `ask_llm` `second_opinion` | 通用选项式表单、答题、复核 |
 | `input` | `long_press` `double_tap` `swipe_direction` `clear_text` `set_text_id` | 扩展输入手势 |
 | `apps` | `launch_activity` `stop_app` `list_packages` `app_info` `get_prop` | App / Activity / 包信息 |
@@ -261,8 +264,8 @@ Agent · 第 12 步 · 等待模型
 
 绑定一次后，本地聊天日志、Web 任务日志和远程控制共用同一条设备长连接：
 
-1. 启动 `web/console`，登录后在「设备」页生成一次性注册码；
-2. APK `设置 → 控制台` 填写控制台地址、设备名称和注册码，点 **绑定**；
+1. 启动 `web/console`，登录后在「设备」页生成一次性注册码（8 位 `ABCD-2345`，10 分钟有效），页面同时展示绑定二维码；
+2. APK `设置 → 控制台` 输入注册码点 **绑定**，或点 **扫码绑定** 直接扫描二维码，自动填入地址与注册码；
 3. 绑定成功后自动启用前台长连接；Web「设备」页显示在线即可下发任务。
 
 事件以服务端 `taskId` 写入任务时间线：`task.started`、`agent.task.step`、`task.paused / resumed / stopped / succeeded / failed`。本地聊天任务使用 `local_` 前缀，只写日志，不改变 Web 任务状态。
@@ -297,7 +300,7 @@ app/src/main/java/com/catfee/rootauto/
 │   └── AttachmentAnalyzer.kt    # 图片 OCR / PDF / Office / 文本解析
 ├── ocr/
 │   ├── OcrEngine.kt             # ML Kit + PP-OCR 合并
-│   ├── PaddleOcrEngine.kt       # PP-OCRv3 ONNX 推理
+│   ├── PaddleOcrEngine.kt       # PP-OCRv5 ONNX 推理
 │   └── LongOcr.kt               # 滚动拼接长页 OCR
 ├── root/
 │   ├── RootShell.kt             # libsu root shell
@@ -311,7 +314,7 @@ app/src/main/java/com/catfee/rootauto/
 ├── llm/                         # LlmClient / LlmSettings / UsageSettings
 └── log/                         # AgentTrace → /api/agent/events
 
-app/src/main/assets/ocr/         # PP-OCRv3 det/rec ONNX
+app/src/main/assets/ocr/         # PP-OCRv5 det/rec ONNX
 daemon/                          # native 输入注入守护进程
 magisk/                          # Magisk 模块
 ```
@@ -324,7 +327,7 @@ magisk/                          # Magisk 模块
 | 坐标 | 工具坐标统一为显示坐标；用 `dumpsys input` 的 `SurfaceOrientation` 校准；旋转时优先无障碍手势；越界直接拒绝 |
 | 媒体 | 只有多重播放器证据才认定为媒体；按实测进度分段等待；停滞、不确定或 OCR 冲突时阻断盲等 |
 | 动作安全 | 每轮最多一个 mutation；动作前检查、动作后验证；只对 mutation 做 settle；重复目标无进展时阻断 |
-| 长任务 | `wait_media`/`wait_for_text` 分段执行并可暂停；LLM 超过 20 秒发心跳；任务受步数/总时长预算约束 |
+| 长任务 | `wait_media`/`wait_for_text` 分段执行并可暂停；LLM 超过 20 秒发心跳；Web 任务默认不限制时长（可手动暂停/停止），本地聊天保留默认总预算；步数仍有上限 |
 | 控制 | Agent 可从主界面、通知栏和悬浮窗暂停/继续/停止；暂停不取消原 Job，停止需要重新发起 |
 | 流式 | SSE 增量输出；统一总请求超时和可重试错误分类，服务端不支持 SSE 时回退普通请求 |
 | 安全 | `shell` 禁止 UI 注入；远程日志不上传截图；Key/设备凭证加密存储；源码不含真实密钥 |
@@ -334,19 +337,32 @@ magisk/                          # Magisk 模块
 <details>
 <summary><b>长任务看起来卡住了？</b></summary>
 
-先看会话时间线或通知栏是否还有「等待模型 / 等待页面」心跳。如果有，说明是在等模型或等页面；如果心跳停止且长时间没有新步骤，再检查网络、无障碍服务和 LLM 接口。上下文超过 60 条消息或 40K 字符会自动裁剪，单条工具结果最多保留 10K。
+先看会话时间线或通知栏是否还有「等待模型 / 等待页面」心跳。如果有，说明是在等模型或等页面；如果心跳停止且长时间没有新步骤，再检查网络、无障碍服务和 LLM 接口。上下文超过 48 条消息或 32K 字符会自动裁剪，单条工具结果最多保留 8K。
 </details>
 
 <details>
 <summary><b>安装或强停后无障碍失效？</b></summary>
 
 重新执行第 3 节的 `settings put secure ...` 命令，或手动在系统设置里开启。部分 ROM 每次覆盖安装都会重置无障碍授权。
+Root 设备在 Web 任务启动前会尝试自动恢复本应用的无障碍服务，并在任务日志里提示结果。
+</details>
+
+<details>
+<summary><b>任务反复点输入框，却不输入文字？</b></summary>
+
+`input_text`、`observe`、`tap_text` 等工具依赖无障碍服务。Root 设备覆盖安装或强停后，
+部分 ROM 会重置无障碍授权；新版本会在 Web 任务启动前尝试用 Root 自动恢复，
+失败时任务日志会明确提示「无障碍未开启：文字输入和读屏工具不可用」。
+非 Root 设备请在系统设置中手动开启 CatfeeAgents 的无障碍服务。
+
+Root 只增强 shell、文件、系统设置、停止 App 和 uinput 手势，**不能替代无障碍的中文文本输入**。
+因此 Root 设备同样需要无障碍服务；Root 的价值是可以在授权丢失后自动把无障碍重新打开。
 </details>
 
 <details>
 <summary><b>OCR 读不到浅色题号或小字？</b></summary>
 
-优先用 `long_ocr`：它会滚动扫描并拼接整页，再按真实偏移还原坐标。PP-OCRv3 对浅色文字更敏感，ML Kit 对短选项字母更稳，两个引擎会合并结果。确保测试时屏幕常亮。
+优先用 `long_ocr`：它会滚动扫描并拼接整页，再按真实偏移还原坐标。PP-OCRv5 对浅色文字更敏感，ML Kit 对短选项字母更稳，两个引擎会合并结果。确保测试时屏幕常亮。
 </details>
 
 <details>
@@ -406,7 +422,7 @@ Android 11+ 且无障碍已开启时，无需 Root 即可：
 | 版本 | `1.0.0`（versionCode `10000`） |
 | SDK | compileSdk 36 / targetSdk 34 / minSdk 26 |
 | UI | Jetpack Compose + Material 3 |
-| OCR | ML Kit Chinese + ONNX Runtime（PP-OCRv3） |
+| OCR | ML Kit Chinese + ONNX Runtime（PP-OCRv5） |
 | 网络 | OkHttp |
 | 输入注入 | native daemon + uinput |
 | JDK | 17 |

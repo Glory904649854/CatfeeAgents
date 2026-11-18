@@ -108,14 +108,42 @@ export interface AuditSummary {
 export interface OverviewStats {
   devicesTotal: number
   devicesOnline: number
+  devicesOffline: number
+  devicesPending: number
   tasksRunning: number
   tasksToday: number
+  tasksSucceededToday: number
   tasksFailed: number
   eventsToday: number
+  successRate: number
+  avgDurationMs: number
+}
+
+export interface OverviewTaskStatusCounts {
+  queued: number
+  waiting_device: number
+  accepted: number
+  running: number
+  paused: number
+  stopping: number
+  succeeded: number
+  failed: number
+  stopped: number
+  expired: number
+}
+
+export interface OverviewTrendPoint {
+  date: string
+  label: string
+  created: number
+  succeeded: number
+  failed: number
 }
 
 export interface OverviewPayload {
   stats: OverviewStats
+  taskStatusCounts: OverviewTaskStatusCounts
+  taskTrend: OverviewTrendPoint[]
   devices: DeviceSummary[]
   tasks: TaskSummary[]
   events: EventSummary[]

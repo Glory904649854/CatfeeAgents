@@ -37,6 +37,9 @@ object LlmClient {
 
     private const val TAG = "LlmClient"
 
+    /** 工具调用步骤的单次输出上限, 防止推理模型无限展开; 4096 足够容纳 tool_calls。 */
+    private const val MAX_OUTPUT_TOKENS = 4_096
+
     /** 普通对话/工具调用总超时; 与 OkHttp callTimeout 及 Agent 调用方保持一致。 */
     private const val CHAT_TIMEOUT_MS = 180_000L
 
@@ -179,6 +182,8 @@ object LlmClient {
         if (tools != null && tools.length() > 0) {
             body.put("tools", tools)
             if (toolChoice != null) body.put("tool_choice", toolChoice)
+            // 工具调用步骤限制输出, 防止推理模型无限展开; 4096 足够容纳工具参数和简短说明。
+            body.put("max_tokens", MAX_OUTPUT_TOKENS)
         }
         return body.toString()
     }
@@ -250,6 +255,7 @@ object LlmClient {
         if (tools.length() > 0) {
             body.put("tools", tools)
             body.put("tool_choice", "auto")
+            body.put("max_tokens", MAX_OUTPUT_TOKENS)
         }
         try {
             val req = Request.Builder()

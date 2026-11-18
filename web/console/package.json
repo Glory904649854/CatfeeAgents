@@ -7,7 +7,7 @@
   "engines": {
     "node": ">=22.21.0"
   },
-  "description": "Catfee Agents web console: device, task and event management for authorized Android agents.",
+  "description": "CatfeeAgents web console: device, task and event management for authorized Android agents.",
   "scripts": {
     "dev": "node scripts/check-node.mjs && node node_modules/nuxt/bin/nuxt.mjs dev",
     "build": "node scripts/check-node.mjs && node node_modules/nuxt/bin/nuxt.mjs build",
@@ -22,6 +22,7 @@
     "better-sqlite3": "^13.0.3",
     "naive-ui": "^2.45.3",
     "nuxt": "^4.6.4",
+    "qrcode": "1.5.4",
     "vue": "^3.5.45",
     "vue-router": "^5.4.0",
     "vuex": "^4.1.0",
@@ -30,6 +31,7 @@
   "devDependencies": {
     "@iconify-json/lucide": "^1.2.152",
     "@types/better-sqlite3": "^9.6.0",
+    "@types/qrcode": "1.5.5",
     "@unocss/nuxt": "^66.12.0",
     "typescript": "^5.9.3",
     "unocss": "^66.12.0",

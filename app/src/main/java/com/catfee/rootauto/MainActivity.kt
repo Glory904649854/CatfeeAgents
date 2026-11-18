@@ -102,6 +102,7 @@ import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Psychology
 import androidx.compose.material.icons.rounded.PushPin
+import androidx.compose.material.icons.rounded.QrCodeScanner
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.Share
@@ -190,7 +191,9 @@ import com.catfee.rootauto.agent.AgentController
 import com.catfee.rootauto.agent.AppMemory
 import com.catfee.rootauto.console.ConsoleClient
 import com.catfee.rootauto.console.ConsoleSettings
+import com.catfee.rootauto.console.EnrollQr
 import com.catfee.rootauto.console.RemoteConsoleService
+import com.catfee.rootauto.ui.QrScannerDialog
 import com.catfee.rootauto.device.DeviceCapabilities
 import com.catfee.rootauto.device.DeviceMode
 import com.catfee.rootauto.llm.DecisionClient
@@ -443,6 +446,7 @@ private fun AgentConsole(activity: ComponentActivity) {
     }
     var consoleDeviceId by remember { mutableStateOf(consoleCfg.deviceId) }
     var consoleStatus by remember { mutableStateOf(consoleCfg.lastStatus) }
+    var showConsoleScanner by remember { mutableStateOf(false) }
     val consoleConnected by ConsoleClient.connected.collectAsState()
     val consoleLiveStatus by ConsoleClient.status.collectAsState()
     LaunchedEffect(consoleLiveStatus) {
@@ -491,6 +495,39 @@ private fun AgentConsole(activity: ComponentActivity) {
                 lastStatus = consoleStatus
             )
         )
+    }
+
+    /** 手动输入和扫码共用同一套绑定逻辑。 */
+    fun bindConsole(
+        base: String = consoleBase,
+        code: String = consoleCode,
+        name: String = consoleName
+    ) {
+        if (base.isBlank()) {
+            consoleStatus = "请填写 Web 控制台地址"
+            return
+        }
+        if (code.isBlank()) {
+            consoleStatus = "请填写 Web 控制台生成的一次性注册码"
+            return
+        }
+        consoleStatus = "正在绑定…"
+        scope.launch {
+            val res = ConsoleClient.enroll(activity, base, code, name)
+            withContext(Dispatchers.Main) {
+                res.onSuccess { cfg ->
+                    consoleEnabled = true
+                    consoleBase = cfg.baseUrl
+                    consoleDeviceId = cfg.deviceId
+                    consoleCode = ""
+                    consoleName = cfg.deviceName.ifBlank { name }
+                    consoleStatus = "已绑定 ${cfg.deviceId}"
+                    RemoteConsoleService.ensureStarted(activity)
+                }.onFailure {
+                    consoleStatus = it.message ?: "绑定失败"
+                }
+            }
+        }
     }
 
     fun resetComposer() {
@@ -1043,30 +1080,8 @@ private fun AgentConsole(activity: ComponentActivity) {
             consoleDeviceId = consoleDeviceId,
             consoleStatus = consoleStatus,
             consoleConnected = consoleConnected,
-            onBindConsole = {
-                if (consoleBase.isBlank()) {
-                    consoleStatus = "请填写 Web 控制台地址"
-                } else if (consoleCode.isBlank()) {
-                    consoleStatus = "请填写 Web 控制台生成的一次性注册码"
-                } else {
-                    consoleStatus = "正在绑定…"
-                    scope.launch {
-                        val res = ConsoleClient.enroll(activity, consoleBase, consoleCode, consoleName)
-                        withContext(Dispatchers.Main) {
-                            res.onSuccess { cfg ->
-                                consoleEnabled = true
-                                consoleBase = cfg.baseUrl
-                                consoleDeviceId = cfg.deviceId
-                                consoleCode = ""
-                                consoleStatus = "已绑定 ${cfg.deviceId}"
-                                RemoteConsoleService.ensureStarted(activity)
-                            }.onFailure {
-                                consoleStatus = it.message ?: "绑定失败"
-                            }
-                        }
-                    }
-                }
-            },
+            onBindConsole = { bindConsole() },
+            onScanConsole = { showConsoleScanner = true },
             onSaveConsole = {
                 saveConsole()
                 consoleStatus = "配置已保存"
@@ -1093,6 +1108,24 @@ private fun AgentConsole(activity: ComponentActivity) {
                 consoleStatus = "已解除绑定"
             },
             onDismiss = { showSettings = false }
+        )
+    }
+
+    if (showConsoleScanner) {
+        QrScannerDialog(
+            onResult = { raw ->
+                showConsoleScanner = false
+                val payload = EnrollQr.parse(raw)
+                if (payload == null) {
+                    consoleStatus = "二维码无效，请重新生成"
+                } else {
+                    consoleBase = payload.baseUrl
+                    consoleCode = payload.code
+                    if (!payload.name.isNullOrBlank()) consoleName = payload.name
+                    bindConsole(payload.baseUrl, payload.code, payload.name ?: consoleName)
+                }
+            },
+            onDismiss = { showConsoleScanner = false }
         )
     }
 
@@ -3127,6 +3160,7 @@ private fun SettingsSheet(
     consoleStatus: String,
     consoleConnected: Boolean,
     onBindConsole: () -> Unit,
+    onScanConsole: () -> Unit,
     onSaveConsole: () -> Unit,
     onTestConsole: () -> Unit,
     onUnbindConsole: () -> Unit,
@@ -3380,7 +3414,7 @@ private fun SettingsSheet(
                             fontWeight = FontWeight.SemiBold, color = Ink
                         )
                         Text(
-                            "在 Web 控制台「设备」页生成，绑定成功后立即失效。",
+                            "在 Web 控制台「设备」页生成，可手动输入或扫码绑定，绑定成功后立即失效。",
                             fontSize = 10.sp, color = Muted, lineHeight = 15.sp,
                             modifier = Modifier.padding(top = 2.dp)
                         )
@@ -3406,6 +3440,25 @@ private fun SettingsSheet(
                             ) { Text("绑定", fontSize = 12.sp) }
                         }
                     }
+                }
+
+                Spacer(Modifier.height(8.dp))
+                Button(
+                    onClick = onScanConsole,
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(14.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = Color(0xFFF3F4F6),
+                        contentColor = Ink
+                    )
+                ) {
+                    Icon(
+                        Icons.Rounded.QrCodeScanner,
+                        contentDescription = null,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Text("扫码绑定", fontSize = 12.sp, fontWeight = FontWeight.Medium)
                 }
 
                 Row(verticalAlignment = Alignment.CenterVertically) {

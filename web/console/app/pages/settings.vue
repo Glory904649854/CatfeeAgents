@@ -3,7 +3,7 @@ import { useStore } from 'vuex'
 import type { AuditSummary } from '~~/shared/types'
 import type { RootState } from '~/store'
 
-useHead({ title: '设置 · Catfee 控制台' })
+useHead({ title: '设置 · CatfeeAgents 控制台' })
 
 interface SystemInfo {
   version: string
@@ -232,7 +232,7 @@ const stack = [
       </SectionCard>
     </div>
 
-    <SectionCard class="mt-4" title="关于" subtitle="Catfee Agents · Web Console">
+    <SectionCard class="mt-4" title="关于" subtitle="CatfeeAgents · 控制台">
       <div class="flex flex-wrap gap-1.5">
         <span v-for="item in stack" :key="item" class="chip">{{ item }}</span>
       </div>

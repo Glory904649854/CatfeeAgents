@@ -3,7 +3,7 @@ import { useStore } from 'vuex'
 import type { OverviewPayload } from '~~/shared/types'
 import type { RootState } from '~/store'
 
-useHead({ title: '概览 · Catfee 控制台' })
+useHead({ title: '概览 · CatfeeAgents 控制台' })
 
 const store = useStore<RootState>()
 const router = useRouter()
@@ -16,6 +16,11 @@ const stats = computed(() => data.value?.stats)
 const devices = computed(() => data.value?.devices ?? [])
 const tasks = computed(() => data.value?.tasks ?? [])
 const events = computed(() => data.value?.events ?? [])
+const statusCounts = computed(() => data.value?.taskStatusCounts)
+const taskTrend = computed(() => data.value?.taskTrend ?? [])
+const todayTotal = computed(() =>
+  Object.values(statusCounts.value ?? {}).reduce((sum, value) => sum + Number(value), 0)
+)
 
 watch(
   () => store.state.events.latest?.id,
@@ -91,11 +96,27 @@ const statCards = computed(() => [
       />
     </div>
 
+    <div class="mt-4 grid gap-4 lg:grid-cols-2">
+      <SectionCard title="今日任务状态" subtitle="按当前状态分布">
+        <TaskStatusDonut
+          v-if="statusCounts"
+          :counts="statusCounts"
+          :total="todayTotal"
+          :success-rate="stats?.successRate ?? 0"
+          :avg-duration-ms="stats?.avgDurationMs ?? 0"
+        />
+        <div v-else class="h-[150px] animate-pulse rounded-[12px] bg-subtle" />
+      </SectionCard>
+      <SectionCard title="近 7 天任务趋势" subtitle="创建 / 成功 / 失败">
+        <TaskTrendBars :points="taskTrend" />
+      </SectionCard>
+    </div>
+
     <div class="mt-4 grid gap-4 lg:grid-cols-3">
       <SectionCard
         class="lg:col-span-2"
-        title="最近任务"
-        subtitle="按创建时间倒序"
+        title="运行中的任务"
+        subtitle="只显示未结束的任务"
         flush
       >
         <template #extra>
@@ -105,16 +126,24 @@ const statCards = computed(() => [
         <div v-if="pending && tasks.length === 0" class="space-y-2 p-4">
           <div v-for="index in 3" :key="index" class="h-12 animate-pulse rounded-[10px] bg-subtle" />
         </div>
-        <div v-else-if="tasks.length === 0">
-          <EmptyState
-            icon="i-lucide-list-checks"
-            title="还没有任务"
-            description="创建第一个任务，把目标下发给已接入的 Android Agent。"
-          >
-            <n-button size="small" type="primary" @click="router.push('/tasks?create=1')">
-              新建任务
-            </n-button>
-          </EmptyState>
+        <div
+          v-else-if="tasks.length === 0"
+          class="flex flex-col gap-3 px-4 py-6 sm:flex-row sm:items-center sm:justify-between"
+        >
+          <div class="flex items-center gap-3">
+            <span
+              class="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-subtle text-muted"
+            >
+              <span class="i-lucide-activity text-[16px]" />
+            </span>
+            <div>
+              <p class="text-[12.5px] font-600 text-ink">当前没有运行中的任务</p>
+              <p class="mt-0.5 text-[10.5px] text-faint">
+                新任务下发后会实时出现在这里；已结束的任务可在任务页查看。
+              </p>
+            </div>
+          </div>
+          <n-button size="small" @click="router.push('/tasks?create=1')">新建任务</n-button>
         </div>
         <div v-else>
           <TaskRow v-for="task in tasks" :key="task.id" :task="task" />
@@ -169,7 +198,7 @@ const statCards = computed(() => [
       </SectionCard>
     </div>
 
-    <SectionCard class="mt-4" title="实时事件" subtitle="来自 Agent 的最新执行与安全事件" flush>
+    <SectionCard class="mt-4" title="实时事件" subtitle="最近 8 条执行与安全事件" flush>
       <template #extra>
         <LiveBadge />
       </template>
@@ -181,9 +210,14 @@ const statCards = computed(() => [
           description="设备接入并开始执行任务后，事件会实时出现在这里。"
         />
       </div>
-      <div v-else>
+      <TransitionGroup
+        v-else
+        name="event-list"
+        tag="div"
+        class="relative max-h-[420px] overflow-y-auto"
+      >
         <EventRow v-for="event in events" :key="event.id" :event="event" />
-      </div>
+      </TransitionGroup>
     </SectionCard>
   </div>
 </template>

@@ -76,7 +76,6 @@ object AgentTools {
     private val CORE_TOOLS = setOf(
         "observe", "tap", "tap_node", "swipe", "input_text", "key",
         "launch_app", "open_url", "wait", "wait_for_text",
-        "media_state", "media_speed", "wait_media",
         "find_text", "scroll_to_text", "get_activity", "ocr",
         "verify_text", "verify_changed", "note", "todo_write",
         "memory_read", "memory_write", "finish"
@@ -84,6 +83,7 @@ object AgentTools {
 
     private val GROUP_TOOLS: Map<String, Set<String>> = mapOf(
         "inspect" to setOf("read_page", "screenshot", "long_ocr", "see_screen"),
+        "media" to setOf("media_state", "media_speed", "wait_media"),
         "form" to setOf(
             "list_options", "verify_option", "verify_question",
             "answer_form", "ask_llm", "second_opinion"
@@ -172,6 +172,9 @@ object AgentTools {
         if (hit("视频", "图片", "截图", "ocr", "识别", "长页", "长截图", "画面", "视觉", "看看", "看一下")) {
             session.activeGroups.add("inspect")
         }
+        if (hit("视频", "播放", "暂停", "倍速", "媒体", "音频", "字幕", "课程")) {
+            session.activeGroups.add("media")
+        }
         if (hit("长按", "双击", "清空", "输入框", "方向滑动", "滑动方向")) {
             session.activeGroups.add("input")
         }
@@ -217,17 +220,26 @@ object AgentTools {
         if (names.isEmpty()) return "load_tools 需要 groups, 例如 inspect,form 或 all"
         if ("all" in names) {
             session.activeGroups.add("all")
-            return "已加载全部高级工具组, 下一轮生效。"
+            val blocked = blockedToolSummary(session, GROUP_TOOLS.keys)
+            return buildString {
+                append("已加载全部高级工具组, 下一轮生效。")
+                if (blocked.isNotEmpty()) append(' ').append(blocked)
+            }
         }
         val known = GROUP_TOOLS.keys
         val availableGroups = names.filter { it in known && groupAvailable(session, it) }.toSet()
         val unavailableGroups = names.filter { it in known && !groupAvailable(session, it) }
         val unknown = names.filter { it !in known }
         session.activeGroups.addAll(availableGroups)
+        val blocked = blockedToolSummary(session, availableGroups)
         return buildString {
             if (availableGroups.isNotEmpty()) {
                 append("已加载工具组: ").append(availableGroups.joinToString(", "))
                     .append("; 下一轮生效。")
+            }
+            if (blocked.isNotEmpty()) {
+                if (isNotEmpty()) append(' ')
+                append(blocked)
             }
             if (unavailableGroups.isNotEmpty()) {
                 if (isNotEmpty()) append(' ')
@@ -240,6 +252,19 @@ object AgentTools {
                     .append("。可用: ").append(known.joinToString(", ")).append(", all")
             }
         }
+    }
+
+    /** load_tools 时把被设备能力挡住的工具和原因一起告诉模型, 避免反复重试。 */
+    private fun blockedToolSummary(session: Session, groups: Collection<String>): String {
+        val blocked = mutableListOf<String>()
+        for (group in groups) {
+            for (name in GROUP_TOOLS[group].orEmpty()) {
+                val reason = capabilityBlockReason(session, name) ?: continue
+                blocked.add("$name: ${reason.take(80)}")
+            }
+        }
+        if (blocked.isEmpty()) return ""
+        return "当前不可用: " + blocked.distinct().take(6).joinToString(" | ")
     }
 
     /**
@@ -276,7 +301,7 @@ object AgentTools {
 
     private fun loadToolsDefinition(): JSONObject = tool(
         "load_tools",
-        "加载当前任务需要的高级工具组, 下一轮生效。组: inspect(完整页面/截图/长截图/视觉), form(答题/选项/校验/子模型), input(长按/双击/方向滑动/清空/按id输入), apps(Activity/停止App/包名/应用信息/属性), system(shell/设置读写), files(文件读写), memory(记忆列表/计划读取), all(全部)。",
+        "加载当前任务需要的高级工具组, 下一轮生效。组: inspect(完整页面/截图/长截图/视觉), media(播放进度/倍速/按进度等待), form(答题/选项/校验/子模型), input(长按/双击/方向滑动/清空/按id输入), apps(Activity/停止App/包名/应用信息/属性), system(shell/设置读写), files(文件读写), memory(记忆列表/计划读取), all(全部)。",
         obj()
             .put("groups", prop("string", "逗号分隔的组名, 如 inspect,form; 或 all"))
             .also { it.put("required", JSONArray().put("groups")) }

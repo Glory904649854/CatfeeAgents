@@ -203,7 +203,7 @@ object AgentController {
         allowRootTools: Boolean = true,
         /** Web 任务策略: 是否允许截图/视觉工具 */
         allowScreenshot: Boolean = true,
-        /** Web 任务策略: 超时毫秒; <=0 表示使用 Agent 默认预算 */
+        /** Web 任务策略: 超时毫秒; <0 不限制, 0 使用 Agent 默认预算 */
         timeoutMs: Long = 0
     ): Boolean {
         val key = keyOf(sessionId)

@@ -7,6 +7,7 @@ import com.catfee.rootauto.a11y.UiObserverService
 import com.catfee.rootauto.root.DaemonClient
 import com.catfee.rootauto.root.RootShell
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -124,6 +125,43 @@ object DeviceCapabilities {
             _state.value = caps
             caps
         }
+
+    /**
+     * Root 设备上如果无障碍被系统关闭, 用 root 把本应用的服务重新加回
+     * enabled_accessibility_services。非 Root / 未授权时直接返回 false。
+     *
+     * 典型场景: 覆盖安装、force-stop 后部分 ROM 会重置无障碍授权,
+     * 此时 input_text / observe / tap_text 会被能力过滤掉, Agent 无法输入文字。
+     */
+    suspend fun ensureAccessibility(context: Context): Boolean = withContext(Dispatchers.IO) {
+        if (UiObserverService.instance != null) return@withContext true
+        if (RootShell.appGrantedRoot() != true) return@withContext false
+
+        val component = "com.catfee.rootauto/com.catfee.rootauto.a11y.UiObserverService"
+        val current = RootShell.execText("settings get secure enabled_accessibility_services")
+        val components = current.split(':')
+            .map { it.trim() }
+            .filter { it.isNotEmpty() && it != "null" }
+            .toMutableSet()
+        components.add(component)
+        val value = components.joinToString(":")
+
+        val result = RootShell.exec(
+            "settings put secure enabled_accessibility_services $value; " +
+                "settings put secure accessibility_enabled 1",
+            8_000
+        )
+        if (!result.ok) return@withContext false
+
+        repeat(12) {
+            delay(250)
+            if (UiObserverService.instance != null) {
+                refresh(context, force = true)
+                return@withContext true
+            }
+        }
+        false
+    }
 
     /** 轻量刷新: 仅用于无障碍连接/断开后更新, 不重新探测 Root daemon */
     fun refreshAccessibilityOnly() {

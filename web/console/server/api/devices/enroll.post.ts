@@ -13,7 +13,7 @@ export default defineEventHandler(async (event) => {
   const body = schema.safeParse((await readBody(event)) ?? {})
   if (!body.success) throw badRequest('参数不合法')
 
-  const token = randomToken(18)
+  const token = createEnrollmentCode()
   const createdAt = new Date().toISOString()
   const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString()
 
@@ -32,7 +32,7 @@ export default defineEventHandler(async (event) => {
   })
 
   return {
-    token,
+    token: formatEnrollmentCode(token),
     expiresAt,
     connection: agentConnectionInfo(event)
   }

@@ -90,7 +90,7 @@ for (const device of devices) {
   )
 }
 
-const policy = { allowScreenshot: true, allowRoot: false, timeoutMs: 120000 }
+const policy = { allowScreenshot: true, allowRoot: false, timeoutMs: -1 }
 
 const tasks = [
   {

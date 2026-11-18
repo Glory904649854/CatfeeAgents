@@ -3,7 +3,7 @@ import { useStore } from 'vuex'
 import type { DeviceSummary } from '~~/shared/types'
 import type { RootState } from '~/store'
 
-useHead({ title: '事件日志 · Catfee 控制台' })
+useHead({ title: '事件日志 · CatfeeAgents 控制台' })
 
 const store = useStore<RootState>()
 const { message } = useFeedback()
@@ -153,9 +153,14 @@ async function refresh() {
           description="调整过滤条件，或等待设备回传新的执行事件。"
         />
       </div>
-      <div v-else class="max-h-[70vh] overflow-y-auto">
+      <TransitionGroup
+        v-else
+        name="event-list"
+        tag="div"
+        class="relative max-h-[70vh] overflow-y-auto"
+      >
         <EventRow v-for="event in displayed" :key="event.id" :event="event" />
-      </div>
+      </TransitionGroup>
     </SectionCard>
   </div>
 </template>

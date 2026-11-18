@@ -16,10 +16,10 @@ import kotlin.math.min
 import kotlin.math.roundToInt
 
 /**
- * PaddleOcrEngine —— 本地 PP-OCRv3 推理
+ * PaddleOcrEngine —— 本地 PP-OCRv5 mobile 推理
  *
- * 检测: ch_PP-OCRv3_det_infer.onnx (DB)
- * 识别: ch_PP-OCRv3_rec_infer.onnx (CTC, 字典在 ONNX metadata 里)
+ * 检测: ch_PP-OCRv5_det_mobile.onnx (DB)
+ * 识别: ch_PP-OCRv5_rec_mobile.onnx (CTC, 字典在 ONNX metadata 里)
  *
  * 为什么不用 ML Kit:
  *   ML Kit 对浅灰小题号/小字容易整行漏检; PP-OCR 的检测对小字更敏感。
@@ -33,14 +33,14 @@ import kotlin.math.roundToInt
 object PaddleOcrEngine {
 
     private const val TAG = "PaddleOcr"
-    private const val DET_ASSET = "ocr/ch_PP-OCRv3_det_infer.onnx"
-    private const val REC_ASSET = "ocr/ch_PP-OCRv3_rec_infer.onnx"
+    private const val DET_ASSET = "ocr/ch_PP-OCRv5_det_mobile.onnx"
+    private const val REC_ASSET = "ocr/ch_PP-OCRv5_rec_mobile.onnx"
     private const val DET_MAX_SIDE = 1600
     private const val DET_THRESH = 0.3f
     private const val BOX_THRESH = 0.5f
     private const val UNCLIP_RATIO = 1.6f
     private const val REC_HEIGHT = 48
-    private const val REC_MAX_WIDTH = 640
+    private const val REC_MAX_WIDTH = 960
 
     private val env: OrtEnvironment by lazy { OrtEnvironment.getEnvironment() }
 
@@ -90,13 +90,19 @@ object PaddleOcrEngine {
      */
     suspend fun recognize(context: Context, bitmap: Bitmap): List<OcrEngine.OcrLine> =
         withContext(Dispatchers.Default) {
+            val started = System.currentTimeMillis()
             try {
                 ensure(context)
                 val boxes = detect(bitmap)
                 if (boxes.isEmpty()) return@withContext emptyList()
-                recognizeBoxes(bitmap, boxes)
+                val lines = recognizeBoxes(bitmap, boxes)
                     .filter { it.text.isNotBlank() }
                     .sortedWith(compareBy({ it.box.top }, { it.box.left }))
+                Log.i(
+                    TAG,
+                    "PP-OCRv5 完成: ${lines.size} 行, ${System.currentTimeMillis() - started}ms"
+                )
+                lines
             } catch (e: Exception) {
                 Log.e(TAG, "PP-OCR 识别失败: ${e.message}")
                 emptyList()

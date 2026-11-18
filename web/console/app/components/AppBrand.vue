@@ -16,7 +16,7 @@ withDefaults(
     >
       <img
         src="/brand/logo.png"
-        alt="Catfee"
+        alt="CatfeeAgents"
         class="h-full w-full object-contain"
         :class="dark ? '' : 'brand-logo'"
       >
@@ -25,7 +25,7 @@ withDefaults(
       <span
         class="block font-700 tracking-tight"
         :class="[compact ? 'text-[14px]' : 'text-[15.5px]', dark ? 'text-white' : 'text-ink']"
-      >Catfee</span>
+      >CatfeeAgents</span>
       <span
         v-if="!compact"
         class="mt-1 block text-[8.5px] font-600 tracking-[0.2em]"

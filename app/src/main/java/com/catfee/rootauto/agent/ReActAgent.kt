@@ -51,7 +51,7 @@ object ReActAgent {
     private const val TOTAL_TIMEOUT_MS = 2 * 60 * 60 * 1000L
 
     /** 历史消息上限 (含 system), 超过则滑动窗口丢弃最老的对话, 防止上下文爆掉 */
-    private const val MAX_MESSAGES = 60
+    private const val MAX_MESSAGES = 48
 
     /**
      * 上下文总字符预算。
@@ -59,10 +59,10 @@ object ReActAgent {
      * 表现为请求很慢、超时重试、甚至模型忘记任务目标。
      * 实测长任务会顶到 48K 字符, 模型注意力明显下降; 收紧到 40K。
      */
-    private const val MAX_CONTEXT_CHARS = 40_000
+    private const val MAX_CONTEXT_CHARS = 32_000
 
     /** 单条工具结果回灌上限, 超出部分截断并提示 Agent 用更精确的工具重读 */
-    private const val MAX_TOOL_MESSAGE_CHARS = 10_000
+    private const val MAX_TOOL_MESSAGE_CHARS = 8_000
 
     /** 便签/计划每轮都进 system, 需要限制总长度, 否则长任务会自己把上下文撑爆 */
     private const val MAX_NOTES_CHARS = 4_000
@@ -112,6 +112,55 @@ object ReActAgent {
         "shell", "note", "todo_read", "todo_write", "memory_read", "memory_list", "finish"
     )
 
+    /** 能产出可读页面内容的只读工具; Decision 的 last_observation 只从这些结果里取. */
+    private val OBSERVE_RESULT_TOOLS = setOf(
+        "observe", "read_page", "ocr", "long_ocr", "get_activity",
+        "see_screen", "verify_text", "verify_changed", "media_state"
+    )
+
+    private val WAIT_RESULT_TOOLS = setOf("wait", "wait_for_text", "wait_media")
+
+    /** 动作后自动 observe 的工具; answer_form/media_speed 等自带结果, 不重复观察. */
+    private val AUTO_OBSERVE_TOOLS = setOf(
+        "tap", "tap_text", "tap_node", "tap_id", "tap_desc", "double_tap", "long_press",
+        "swipe", "swipe_direction", "scroll_to_text", "input_text", "clear_text", "set_text_id",
+        "key", "launch_app", "launch_activity", "stop_app", "open_url"
+    )
+
+    private val LOADING_HINTS = listOf(
+        "加载中", "正在加载", "请稍候", "正在生成", "生成中", "处理中", "刷新中", "转圈",
+        "loading", "please wait", "processing", "generating"
+    )
+
+    private fun looksLoading(text: String): Boolean {
+        if (text.isBlank()) return false
+        val lower = text.lowercase()
+        return LOADING_HINTS.any { lower.contains(it) }
+    }
+
+    /**
+     * 只在「下一步很可能是 observe/wait」的步骤调用 Decision。
+     * 点击/输入后的验证、等待后的复查、加载中的页面值得问;
+     * load_tools/find_text/todo 这类结果确定的步骤直接交给主模型, 省掉 150~220ms。
+     */
+    private fun shouldAskDecision(
+        lastTool: String,
+        lastResult: String,
+        lastObservation: String,
+        noChangeCount: Int,
+        autoObserved: Boolean
+    ): Boolean {
+        if (lastTool.isBlank()) return false
+        val observation = lastObservation.ifBlank { lastResult }
+        val loading = looksLoading(observation)
+        // 动作后已经自动 observe, 主模型手里已经有新页面; 再问 Decision 通常只会得到 act.
+        if (lastTool in MUTATION_TOOLS) return !autoObserved
+        if (lastTool in WAIT_RESULT_TOOLS) return true
+        if (lastTool == "scroll_to_text") return !autoObserved
+        if (lastTool in OBSERVE_RESULT_TOOLS) return loading || noChangeCount > 0
+        return false
+    }
+
     /**
      * 任务事件
      * @param type    think=模型思考文本 / action=执行了某工具 / done=任务结束 / error=出错
@@ -157,7 +206,7 @@ object ReActAgent {
         - 同一控件或子目标连续 2 次无效就换方法; 3 次仍失败标记 blocked 并继续下一项;
           不要在一个按钮/一个弹窗上耗超过 5 步。
         - 仅当用户明确提出播放、暂停、控制、查看或处理音视频等媒体需求时, 才启用媒体工具。
-          这类任务先用 media_state 读取当前时间、总时长、倍速和播放状态, 再根据用户目标
+          媒体工具在 media 组, 先 load_tools(media); 这类任务先用 media_state 读取当前时间、总时长、倍速和播放状态, 再根据用户目标
           选择 media_speed 或 wait_media; 不要猜测用户想要的倍速、观看比例或结束条件。
           wait_media 的 target_ratio 只有在用户或当前页面明确给出目标比例时才设置, 否则使用默认目标。
           需要等待时按播放进度分段等待, 不要拿旧页面的进度判断当前媒体, 也不要因控件暂时隐藏
@@ -179,6 +228,8 @@ object ReActAgent {
           先 load_tools 加载对应组 (inspect/form/input/apps/system/files/memory/all),
           不要因为工具不在列表就放弃; 不同 App 优先 tap_node(text/desc/id), 自绘/WebView 用 ocr,
           选项用 list_options, 不假设某个 App 的固定控件。
+        - load_tools 返回「当前不可用」时, 说明该能力被设备或任务策略限制;
+          不要重复加载同一组, 改用可用工具, 或 finish 说明需要开启无障碍/授权 Root/截图。
         - 仅当用户明确要求填写、回答、核对或提交表单/问卷等内容时, 才启用表单工具。
           先让相关内容显示在当前页面, 再按需 load_tools(form) 和 answer_form; 不要把普通页面、
           内容浏览或任何 App 默认当成答题任务。提交前确认目标、填写内容和页面状态; 提交后验证结果。
@@ -223,7 +274,7 @@ object ReActAgent {
         allowRootTools: Boolean = true,
         /** Web 任务策略: 是否允许截图/视觉工具 */
         allowScreenshot: Boolean = true,
-        /** Web 任务策略: 超时毫秒; <=0 表示使用默认总预算 */
+        /** Web 任务策略: 超时毫秒; <0 不限制, 0 使用默认总预算 */
         timeoutMs: Long = 0
     ): String {
         if (!provider.usable) {
@@ -236,8 +287,12 @@ object ReActAgent {
         }
 
         val started = System.currentTimeMillis()
-        // Web 任务可以给更短的预算, 但不能超过 Agent 自己的硬上限
-        val timeoutBudget = if (timeoutMs > 0) minOf(TOTAL_TIMEOUT_MS, timeoutMs) else TOTAL_TIMEOUT_MS
+        // <0 = 不限制; >0 = 取更短预算且不超过 Agent 硬上限; 0 = 本地默认预算
+        val timeoutBudget = when {
+            timeoutMs < 0 -> Long.MAX_VALUE
+            timeoutMs > 0 -> minOf(TOTAL_TIMEOUT_MS, timeoutMs)
+            else -> TOTAL_TIMEOUT_MS
+        }
         val caps = DeviceCapabilities.refresh(context)
         val nonRootHint = if (caps.root) {
             ""
@@ -246,6 +301,14 @@ object ReActAgent {
                 "当前通过无障碍读屏和手势操作：启动 App 后如果出现开屏广告/弹窗，优先点击" +
                 "「跳过 / 关闭 / 稍后再说 / 知道了」；不要用返回键退出 App，返回键可能直接回到桌面。" +
                 "截图/OCR 使用系统无障碍截图，可能偶发限流；失败时改用 observe/read_page。"
+        }
+        val a11yHint = if (caps.accessibility) {
+            ""
+        } else {
+            "\n\n===== 无障碍未连接 =====\n" +
+                "当前 input_text / observe / read_page / find_text / tap_text / tap_node 等无障碍工具不可用。" +
+                "如果任务需要输入文字或读屏，请先让用户开启无障碍服务；" +
+                "不要用 tap/OCR 反复猜测输入框，也不要假装已经输入成功。"
         }
         val startPkg = AppMemory.currentPackage()
         val traceRun = AgentTrace.startTask(
@@ -290,6 +353,14 @@ object ReActAgent {
         var lastToolName = ""
         var lastToolArgs = ""
         var lastToolResult = ""
+        var lastObservation = ""
+        var lastObservationTool = ""
+        var lastAutoObserved = false
+        var lastActionAt = 0L
+        var decisionAttempts = 0
+        var decisionUsed = 0
+        var decisionAct = 0
+        var decisionLatencyTotal = 0L
         var decisionFastRun = 0
         var decisionFailures = 0
         var decisionDisabled = false
@@ -301,7 +372,9 @@ object ReActAgent {
                 mutationCount = 0
                 awaitIfPaused()
                 val stepStart = System.currentTimeMillis()
-                if (System.currentTimeMillis() - started > timeoutBudget) {
+                if (timeoutBudget != Long.MAX_VALUE &&
+                    System.currentTimeMillis() - started > timeoutBudget
+                ) {
                     onPhase("error", step, "任务总时长超时")
                     onEvent(Event("error", "任务总时长超过 $timeoutBudget ms, 已中断"))
                     AgentTrace.finish(context, traceRun, false, "超时中断", step)
@@ -346,6 +419,7 @@ object ReActAgent {
                     "content",
                     SYSTEM_PROMPT +
                         nonRootHint +
+                        a11yHint +
                         "\n\n===== 任务目标 =====\n" + goal +
                         "\n\n===== 设备能力 =====\n" + caps.summary() +
                         (if (notes.isNotEmpty()) "\n\n===== 已记录的信息 =====\n${notes.toString().take(MAX_NOTES_CHARS)}" else "") +
@@ -367,15 +441,30 @@ object ReActAgent {
                         toolSession.agentMode && !toolSession.agentBlocked &&
                         step > 1 && decisionFastRun < decisionConfig.maxFastSteps &&
                         sameCallCount < 3 && noChangeCount < 2 &&
-                        lastToolResult.isNotBlank()
+                        lastToolResult.isNotBlank() &&
+                        shouldAskDecision(
+                            lastToolName, lastToolResult, lastObservation, noChangeCount,
+                            lastAutoObserved
+                        )
                     ) {
                         onPhase("waiting_llm", step, "DECISION 快速判断")
+                        val observation = lastObservation.ifBlank { lastToolResult }
                         val decisionState = JSONObject()
                             .put("goal", goal.take(600))
                             .put("step", step)
                             .put("last_tool", lastToolName.ifBlank { "none" })
                             .put("last_arguments", lastToolArgs.take(240))
-                            .put("observation", lastToolResult.take(1400))
+                            .put("observation", lastToolResult.take(1200))
+                            .put("last_observation", lastObservation.take(1200))
+                            .put("last_observation_tool", lastObservationTool.ifBlank { "none" })
+                            .put(
+                                "elapsed_since_action_ms",
+                                if (lastActionAt > 0) System.currentTimeMillis() - lastActionAt else 0
+                            )
+                            .put("same_call_count", sameCallCount)
+                            .put("no_change_count", noChangeCount)
+                            .put("loading_hint", looksLoading(observation))
+                            .put("auto_observed", lastAutoObserved)
                             .put("foreground_app", AppMemory.currentPackage())
                         DecisionClient.decide(decisionConfig, decisionState).also { outcome ->
                             if (!outcome.ok) {
@@ -384,6 +473,10 @@ object ReActAgent {
                                     decisionDisabled = true
                                     Log.w(TAG, "DECISION disabled after repeated failures: ${outcome.error}")
                                 }
+                            }
+                            if (outcome.latencyMs > 2_000) {
+                                decisionDisabled = true
+                                Log.w(TAG, "DECISION disabled: slow call ${outcome.latencyMs}ms")
                             }
                         }
                     } else {
@@ -398,17 +491,49 @@ object ReActAgent {
                     null
                 }
 
+                // observe 是只读安全动作, 分类器置信度普遍偏低; 用更低的阈值换更多快路径。
+                val requiredConfidence = if (fastDecision?.action == "observe") {
+                    minOf(decisionConfig.minConfidence, 0.35)
+                } else {
+                    decisionConfig.minConfidence
+                }
                 val fastAction = fastDecision?.takeIf {
-                    it.ok && it.confidence >= decisionConfig.minConfidence &&
+                    it.ok && it.confidence >= requiredConfidence &&
                         it.action in setOf("observe", "wait") &&
                         !(it.action == "observe" && lastToolName == "observe") &&
                         !(it.action == "wait" && lastToolName == "wait")
                 }?.action
 
+                if (fastDecision != null) {
+                    decisionAttempts++
+                    decisionLatencyTotal += fastDecision.latencyMs
+                    if (fastAction == null && fastDecision.action == "act") decisionAct++
+                    if (fastAction != null) decisionUsed++
+                    val loading = looksLoading(lastObservation.ifBlank { lastToolResult })
+                    val decisionMsg = "action=${fastDecision.action.ifBlank { "none" }} " +
+                        "conf=${(fastDecision.confidence * 100).toInt()}% " +
+                        "latency=${fastDecision.latencyMs}ms used=${fastAction != null} " +
+                        "loading=$loading"
+                    Log.i(TAG, "decision step=$step $decisionMsg")
+                    AgentTrace.event(context, traceRun, "debug", "DECISION · Step $step", decisionMsg)
+                    if (decisionAttempts >= 6 &&
+                        decisionLatencyTotal / decisionAttempts > 600
+                    ) {
+                        decisionDisabled = true
+                        Log.w(
+                            TAG,
+                            "DECISION disabled: avg latency " +
+                                "${decisionLatencyTotal / decisionAttempts}ms"
+                        )
+                    }
+                }
+
                 var r: LlmClient.LlmResult
                 if (fastAction != null) {
                     decisionFastRun++
-                    val args = if (fastAction == "wait") "{\"ms\":800}" else "{}"
+                    val loading = looksLoading(lastObservation.ifBlank { lastToolResult })
+                    val fastWaitMs = if (loading) 1500L else 800L
+                    val args = if (fastAction == "wait") "{\"ms\":$fastWaitMs}" else "{}"
                     r = LlmClient.LlmResult(
                         ok = true,
                         toolCalls = listOf(
@@ -764,6 +889,7 @@ object ReActAgent {
                         continue
                     }
                     if (call.name in MUTATION_TOOLS) mutationCount++
+                    lastAutoObserved = false
                     val result = AgentTools.execute(
                         context, provider, call.name, call.arguments, toolSession, awaitIfPaused
                     )
@@ -792,13 +918,57 @@ object ReActAgent {
                     lastToolName = call.name
                     lastToolArgs = call.arguments
                     lastToolResult = result
-                    messages.put(toolMessage(call.id, result))
+                    lastActionAt = System.currentTimeMillis()
+                    if (call.name in OBSERVE_RESULT_TOOLS && result.isNotBlank()) {
+                        lastObservation = result
+                        lastObservationTool = call.name
+                    }
                     awaitIfPaused()
                     // 只有可能改变页面的动作才需要 settle；只读工具不能额外固定等待 800ms。
                     if (call.name in SETTLE_TOOLS) {
                         kotlinx.coroutines.delay(AgentTools.DEFAULT_SETTLE_MS)
                         awaitIfPaused()
                     }
+                    // 动作完成后自动 observe 一次, 省掉主模型“要不要 observe”的一轮决策。
+                    var autoObservation = ""
+                    if (call.name in AUTO_OBSERVE_TOOLS && toolOk &&
+                        toolSession.agentMode && !toolSession.agentBlocked
+                    ) {
+                        val autoStart = System.currentTimeMillis()
+                        val observation = try {
+                            AgentTools.execute(
+                                context, provider, "observe", "{}", toolSession, awaitIfPaused
+                            )
+                        } catch (e: Exception) {
+                            ""
+                        }
+                        if (observation.isNotBlank() &&
+                            !observation.startsWith("失败") &&
+                            !observation.startsWith("错误") &&
+                            !observation.startsWith("BLOCKED", ignoreCase = true)
+                        ) {
+                            autoObservation = observation
+                            lastObservation = observation
+                            lastObservationTool = "observe(auto)"
+                            lastAutoObserved = true
+                            val autoElapsed = System.currentTimeMillis() - autoStart
+                            toolTraces.add(
+                                AgentTrace.ToolTrace(
+                                    "observe(auto)", "{}", observation, autoElapsed, true
+                                )
+                            )
+                            onEvent(
+                                Event("result", observation.take(400), tool = "observe(auto)")
+                            )
+                        }
+                    }
+                    val toolContent = if (autoObservation.isNotBlank()) {
+                        result + "\n\n[自动观察 · 动作后页面 · 不需要再调用 observe]\n" +
+                            autoObservation.take(4_000)
+                    } else {
+                        result
+                    }
+                    messages.put(toolMessage(call.id, toolContent))
 
                     // 无进展检测: 只读工具算观察, 动作工具看界面指纹是否变化
                     val readOnly = call.name in READ_ONLY_TOOLS
@@ -862,6 +1032,14 @@ object ReActAgent {
             onEvent(Event("error", "任务异常: ${e.message}"))
             AgentTrace.finish(context, traceRun, false, "任务异常: ${e.message}", currentStep)
             return "任务异常: ${e.message}"
+        } finally {
+            if (decisionAttempts > 0) {
+                Log.i(
+                    TAG,
+                    "decision summary attempts=$decisionAttempts used=$decisionUsed " +
+                        "act=$decisionAct avgLatency=${decisionLatencyTotal / decisionAttempts}ms"
+                )
+            }
         }
     }
 

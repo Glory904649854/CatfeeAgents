@@ -18,9 +18,14 @@ export default defineEventHandler(async (event) => {
   if (!parsed.success) throw badRequest('注册参数不合法')
 
   const db = getDb()
-  const tokenRow = db
-    .prepare('SELECT * FROM enrollment_tokens WHERE token = ?')
-    .get(parsed.data.token) as Record<string, unknown> | undefined
+  const rawToken = parsed.data.token.trim()
+  const canonical = normalizeEnrollmentCode(rawToken)
+  const lookup = (value: string) =>
+    db.prepare('SELECT * FROM enrollment_tokens WHERE token = ?').get(value) as
+      | Record<string, unknown>
+      | undefined
+  // 新注册码以 ABCD-2345 展示、无连字符入库；先按原文查，兼容旧 token。
+  const tokenRow = lookup(rawToken) ?? (canonical && canonical !== rawToken ? lookup(canonical) : undefined)
 
   if (!tokenRow) throw notFound('注册码无效')
   if (tokenRow.used_at) throw conflict('注册码已被使用')
@@ -45,7 +50,10 @@ export default defineEventHandler(async (event) => {
     now
   )
 
-  db.prepare('UPDATE enrollment_tokens SET used_at = ? WHERE token = ?').run(now, parsed.data.token)
+  db.prepare('UPDATE enrollment_tokens SET used_at = ? WHERE token = ?').run(
+    now,
+    String(tokenRow.token)
+  )
 
   recordAudit(event, {
     action: 'device.enrolled_by_agent',

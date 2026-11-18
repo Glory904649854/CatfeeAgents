@@ -23,7 +23,7 @@ export default defineEventHandler((event) => {
          FROM agent_events e
          LEFT JOIN devices d ON d.id = e.device_id
         WHERE e.task_id = ?
-        ORDER BY e.occurred_at ASC`
+        ORDER BY e.occurred_at DESC`
     )
     .all(id) as Array<Record<string, unknown>>
 

@@ -16,7 +16,7 @@ import type {
 export const DEFAULT_TASK_POLICY: TaskPolicy = {
   allowScreenshot: true,
   allowRoot: false,
-  timeoutMs: 120000
+  timeoutMs: -1
 }
 
 export function parseJson<T>(value: unknown, fallback: T): T {

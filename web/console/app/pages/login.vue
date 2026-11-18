@@ -3,7 +3,7 @@ import { useStore } from 'vuex'
 import type { RootState } from '~/store'
 
 definePageMeta({ layout: 'auth' })
-useHead({ title: '登录 · Catfee 控制台' })
+useHead({ title: '登录 · CatfeeAgents 控制台' })
 
 const store = useStore<RootState>()
 const route = useRoute()
@@ -89,7 +89,7 @@ const features = [
       </div>
 
       <div class="relative flex items-center justify-between text-[10px] text-white/30">
-        <span>Catfee Agents · Web Console</span>
+        <span>CatfeeAgents · 控制台</span>
         <span>v0.1.0</span>
       </div>
     </section>

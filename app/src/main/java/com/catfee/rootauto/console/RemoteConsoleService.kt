@@ -71,7 +71,7 @@ class RemoteConsoleService : Service() {
         manager.createNotificationChannel(
             NotificationChannel(
                 CHANNEL_ID,
-                "Catfee 控制台连接",
+                "CatfeeAgents 控制台连接",
                 NotificationManager.IMPORTANCE_LOW
             ).apply {
                 description = "保持设备与 Catfee Web 控制台的长连接"
@@ -88,7 +88,7 @@ class RemoteConsoleService : Service() {
         }
         return builder
             .setSmallIcon(R.drawable.ic_launcher_foreground)
-            .setContentTitle("Catfee 控制台")
+            .setContentTitle("CatfeeAgents 控制台")
             .setContentText("设备连接服务运行中")
             .setOngoing(true)
             .build()

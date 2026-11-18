@@ -139,6 +139,38 @@ body,
   }
 }
 
+/* 新日志入场：下滑淡入 + 品牌色高亮渐隐 */
+.event-list-enter-active {
+  transition: opacity 0.28s ease, transform 0.28s ease;
+  animation: event-flash 1.6s ease-out;
+}
+
+.event-list-enter-from {
+  opacity: 0;
+  transform: translateY(-8px);
+}
+
+.event-list-move {
+  transition: transform 0.28s ease;
+}
+
+@keyframes event-flash {
+  0% {
+    background-color: rgb(225 29 46 / 10%);
+  }
+  100% {
+    background-color: transparent;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .event-list-enter-active,
+  .event-list-move {
+    animation: none;
+    transition: none;
+  }
+}
+
 /* Naive UI 的浮层与卡片统一为扁平描边风格 */
 .n-card {
   --n-border-radius: 16px !important;

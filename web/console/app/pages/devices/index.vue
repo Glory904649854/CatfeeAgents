@@ -1,8 +1,9 @@
 <script setup lang="ts">
+import QRCode from 'qrcode'
 import { useStore } from 'vuex'
 import type { RootState } from '~/store'
 
-useHead({ title: '设备 · Catfee 控制台' })
+useHead({ title: '设备 · CatfeeAgents 控制台' })
 
 const store = useStore<RootState>()
 const route = useRoute()
@@ -16,8 +17,31 @@ const inviteLoading = ref(false)
 const invite = ref<{
   token: string
   expiresAt: string
-  connection: { wsUrl: string; enrollUrl: string }
+  connection: { baseUrl: string; wsUrl: string; enrollUrl: string }
 } | null>(null)
+const inviteQr = ref('')
+
+function enrollPayload(value: { token: string; connection: { baseUrl: string } }) {
+  const base = value.connection.baseUrl.replace(/\/+$/, '')
+  return `catfee://enroll?url=${encodeURIComponent(base)}&code=${encodeURIComponent(value.token)}`
+}
+
+watch(invite, async (value) => {
+  if (!value) {
+    inviteQr.value = ''
+    return
+  }
+  try {
+    inviteQr.value = await QRCode.toDataURL(enrollPayload(value), {
+      width: 480,
+      margin: 1,
+      errorCorrectionLevel: 'M',
+      color: { dark: '#111827', light: '#FFFFFF' }
+    })
+  } catch {
+    inviteQr.value = ''
+  }
+})
 
 const tabs = [
   { value: 'all', label: '全部' },
@@ -43,8 +67,46 @@ watch(keyword, () => {
   clearTimeout(searchTimer)
   searchTimer = setTimeout(() => void load(), 240)
 })
+let bindWatcher: ReturnType<typeof setInterval> | undefined
+let baselineIds = new Set<string>()
+
+function stopBindWatch() {
+  if (bindWatcher) {
+    clearInterval(bindWatcher)
+    bindWatcher = undefined
+  }
+}
+
+function startBindWatch() {
+  stopBindWatch()
+  bindWatcher = setInterval(async () => {
+    if (!inviteOpen.value || !invite.value) {
+      stopBindWatch()
+      return
+    }
+    try {
+      const snapshot = await apiRequest<{ devices: { id: string; name: string }[] }>(
+        '/api/devices',
+        { query: { status: 'all' } }
+      )
+      const added = snapshot.devices.find((device) => !baselineIds.has(device.id))
+      if (!added) return
+      stopBindWatch()
+      inviteOpen.value = false
+      message.success(`设备「${added.name}」已接入`)
+      status.value = 'all'
+      await load()
+    } catch {
+      // 轮询失败时保留弹窗，下一次继续
+    }
+  }, 2000)
+}
+
 watch(inviteOpen, (open) => {
-  if (!open) invite.value = null
+  if (!open) {
+    invite.value = null
+    stopBindWatch()
+  }
 })
 
 onMounted(async () => {
@@ -55,7 +117,10 @@ onMounted(async () => {
   }
 })
 
-onBeforeUnmount(() => clearTimeout(searchTimer))
+onBeforeUnmount(() => {
+  clearTimeout(searchTimer)
+  stopBindWatch()
+})
 
 async function openInvite() {
   if (invite.value) {
@@ -65,11 +130,19 @@ async function openInvite() {
   inviteOpen.value = true
   inviteLoading.value = true
   try {
+    // 先记下当前设备，绑定完成后用新出现的设备判断接入成功
+    baselineIds = await apiRequest<{ devices: { id: string }[] }>('/api/devices', {
+      query: { status: 'all' }
+    })
+      .then((snapshot) => new Set(snapshot.devices.map((device) => device.id)))
+      .catch(() => new Set(devices.value.map((device) => device.id)))
+
     invite.value = await apiRequest<{
       token: string
       expiresAt: string
-      connection: { wsUrl: string; enrollUrl: string }
+      connection: { baseUrl: string; wsUrl: string; enrollUrl: string }
     }>('/api/devices/enroll', { method: 'POST', body: {} })
+    startBindWatch()
   } catch (err: unknown) {
     inviteOpen.value = false
     const requestError = err as { data?: { message?: string } }
@@ -187,10 +260,30 @@ async function regenerate() {
           >
             {{ invite.token }}
           </p>
-          <p class="mt-2 text-[10.5px] text-faint">10 分钟内有效 · 仅可使用一次</p>
+          <p class="mt-2 text-[10.5px] text-faint">
+            10 分钟内有效 · 仅可使用一次 · 支持扫码或手动输入
+          </p>
           <div class="mt-2 flex justify-center">
             <CopyButton :value="invite.token" label="复制注册码" />
           </div>
+        </div>
+
+        <div class="rounded-[12px] border border-line bg-white p-4 text-center">
+          <p class="label-xs">SCAN TO BIND</p>
+          <img
+            v-if="inviteQr"
+            :src="inviteQr"
+            alt="设备绑定二维码"
+            class="mx-auto mt-3 h-[180px] w-[180px] rounded-[8px]"
+          >
+          <div
+            v-else
+            class="mx-auto mt-3 h-[180px] w-[180px] animate-pulse rounded-[8px] bg-subtle"
+          />
+          <p class="mt-3 text-[11px] text-muted">APK：设置 → 控制台 → 扫码绑定</p>
+          <p class="mt-0.5 text-[10px] text-faint">
+            二维码包含控制台地址和一次性注册码 · 绑定成功后本窗口自动关闭
+          </p>
         </div>
 
         <div class="space-y-2">
@@ -217,7 +310,7 @@ async function regenerate() {
         <div
           class="rounded-[10px] border border-warning/20 bg-warning/5 px-3 py-2.5 text-[11px] leading-5 text-warning"
         >
-          在 APK 的远程管理入口输入注册码即可完成接入。设备上线后请核对名称、型号与能力列表。
+          在 APK 的「设置 → 控制台」输入注册码，或直接扫描上方二维码完成接入。设备上线后请核对名称、型号与能力列表。
         </div>
 
         <div class="flex justify-end gap-2 pt-1">

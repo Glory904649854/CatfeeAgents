@@ -3,6 +3,7 @@ package com.catfee.rootauto.console
 import android.content.Context
 import android.util.Log
 import com.catfee.rootauto.agent.AgentController
+import com.catfee.rootauto.device.DeviceCapabilities
 import com.catfee.rootauto.llm.LlmSettings
 import org.json.JSONObject
 import java.util.concurrent.ConcurrentHashMap
@@ -66,10 +67,27 @@ object RemoteTaskRunner {
             return
         }
 
+        // Root 设备覆盖安装/强停后无障碍可能被系统重置。
+        // 先尝试恢复, 否则 input_text / observe 等工具会被能力过滤掉, Agent 只能盲点。
+        val capsBefore = DeviceCapabilities.refresh(context, force = true)
+        val accessibilityReady = DeviceCapabilities.ensureAccessibility(context)
+        if (!capsBefore.accessibility && accessibilityReady) {
+            ConsoleClient.emitEvent(
+                context, taskId, "task.notice", "info",
+                JSONObject().put("summary", "已通过 Root 自动开启无障碍服务，文字输入可用")
+            )
+        } else if (!accessibilityReady) {
+            ConsoleClient.emitEvent(
+                context, taskId, "task.notice", "warn",
+                JSONObject().put("summary", "无障碍未开启：文字输入和读屏工具不可用")
+            )
+        }
+
         val policy = payload.optJSONObject("policy") ?: JSONObject()
         val allowRoot = policy.optBoolean("allowRoot", false)
         val allowScreenshot = policy.optBoolean("allowScreenshot", true)
-        val timeoutMs = policy.optLong("timeoutMs", 120_000L)
+        // -1 = 不限制时长, 由 Web 端手动暂停/停止
+        val timeoutMs = policy.optLong("timeoutMs", -1L)
         val sessionId = "remote_$taskId"
         sessions[taskId] = sessionId
 

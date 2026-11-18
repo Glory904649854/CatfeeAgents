@@ -9,7 +9,7 @@ const supported =
 if (!supported) {
   console.error('')
   console.error(`  ✖ 当前 Node v${process.versions.node} 不受支持。`)
-  console.error('    Catfee Console 需要 Node 22.21+ / 24.11+ / 26+。')
+  console.error('    CatfeeAgents 控制台需要 Node 22.21+ / 24.11+ / 26+。')
   console.error('')
   console.error('    推荐使用仓库提供的 .nvmrc：')
   console.error('      nvm install 22.23.2')

@@ -1,6 +1,6 @@
-# Catfee Console
+# CatfeeAgents 控制台
 
-Catfee Agents 的 Web 管理端。Nuxt 4 单端口同时提供页面、REST API、SSE 与
+CatfeeAgents 的 Web 控制台。Nuxt 4 单端口同时提供页面、REST API、SSE 与
 Android Agent WebSocket，本地 SQLite 存储。
 
 完整文档：[../../docs/web-console.md](../../docs/web-console.md)

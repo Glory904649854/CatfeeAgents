@@ -13,13 +13,13 @@ export default defineNuxtConfig({
 
   app: {
     head: {
-      title: 'Catfee 控制台',
+      title: 'CatfeeAgents 控制台',
       htmlAttrs: { lang: 'zh-CN' },
       meta: [
         { charset: 'utf-8' },
         { name: 'viewport', content: 'width=device-width, initial-scale=1, viewport-fit=cover' },
         { name: 'theme-color', content: '#F7F8FA' },
-        { name: 'description', content: 'Catfee Agents 设备与任务管理控制台' }
+        { name: 'description', content: 'CatfeeAgents 设备与任务管理控制台' }
       ],
       link: [{ rel: 'icon', type: 'image/png', href: '/brand/logo.png' }]
     }

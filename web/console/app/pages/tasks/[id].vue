@@ -2,7 +2,7 @@
 import { useStore } from 'vuex'
 import type { RootState } from '~/store'
 
-useHead({ title: '任务详情 · Catfee 控制台' })
+useHead({ title: '任务详情 · CatfeeAgents 控制台' })
 
 const route = useRoute()
 const router = useRouter()
@@ -22,6 +22,59 @@ const terminalStatuses = ['succeeded', 'failed', 'stopped', 'expired', 'interrup
 const canPause = computed(() => Boolean(task.value && ['accepted', 'running'].includes(task.value.status)))
 const canResume = computed(() => Boolean(task.value && task.value.status === 'paused'))
 const canStop = computed(() => Boolean(task.value && !terminalStatuses.includes(task.value.status)))
+
+const isTerminal = computed(
+  () => Boolean(task.value && terminalStatuses.includes(task.value.status))
+)
+const terminalEvent = computed(
+  () =>
+    events.value.find((event) =>
+      ['task.succeeded', 'task.failed', 'task.stopped', 'task.expired'].includes(event.type)
+    ) ?? null
+)
+const finalResult = computed(() => {
+  const payload = (terminalEvent.value?.payload ?? {}) as Record<string, any>
+  return String(payload.result || payload.summary || payload.error || task.value?.error || '').trim()
+})
+const finalSteps = computed(() => {
+  const payload = (terminalEvent.value?.payload ?? {}) as Record<string, any>
+  const steps = Number(payload.steps)
+  return Number.isFinite(steps) && steps > 0
+    ? steps
+    : events.value.filter((event) => event.type === 'agent.task.step').length
+})
+const resultTone = computed(() => {
+  if (task.value?.status === 'succeeded') {
+    return {
+      panel: 'border-success/20 bg-success/5',
+      icon: 'i-lucide-circle-check',
+      iconClass: 'text-success',
+      title: '任务已完成'
+    }
+  }
+  if (task.value?.status === 'failed') {
+    return {
+      panel: 'border-danger/20 bg-danger/5',
+      icon: 'i-lucide-circle-alert',
+      iconClass: 'text-danger',
+      title: '任务失败'
+    }
+  }
+  if (task.value?.status === 'expired') {
+    return {
+      panel: 'border-warning/20 bg-warning/5',
+      icon: 'i-lucide-clock',
+      iconClass: 'text-warning',
+      title: '任务已过期'
+    }
+  }
+  return {
+    panel: 'border-line bg-soft',
+    icon: 'i-lucide-circle-stop',
+    iconClass: 'text-muted',
+    title: '任务已停止'
+  }
+})
 
 function load() {
   return store.dispatch('tasks/fetchDetail', id.value)
@@ -145,11 +198,49 @@ const infoFields = computed(() => [
         <span>{{ task.error }}</span>
       </div>
 
+      <SectionCard v-if="isTerminal" class="mb-4" title="最终结果" :subtitle="resultTone.title">
+        <template #extra>
+          <div class="flex items-center gap-2">
+            <StatusPill
+              v-if="task"
+              :label="taskStatusMeta(task.status).label"
+              :class-name="taskStatusMeta(task.status).className"
+              :dot-class-name="taskStatusMeta(task.status).dotClassName"
+            />
+            <CopyButton v-if="finalResult" :value="finalResult" label="复制结果" />
+          </div>
+        </template>
+        <div
+          v-if="finalResult"
+          class="max-h-[520px] overflow-y-auto rounded-[14px] border p-4"
+          :class="resultTone.panel"
+        >
+          <div class="mb-3 flex flex-wrap items-center gap-1.5">
+            <span
+              class="inline-flex items-center gap-1 rounded-[6px] bg-white/70 px-2 py-1 text-[10.5px] font-600 text-muted"
+            >
+              <span :class="[resultTone.icon, resultTone.iconClass, 'text-[13px]']" />
+              {{ resultTone.title }}
+            </span>
+            <span class="chip">耗时 {{ formatDuration(task?.startedAt, task?.finishedAt) }}</span>
+            <span class="chip">{{ finalSteps }} 步</span>
+            <span class="chip">{{ task?.policy.allowRoot ? 'Root 已授权' : 'Root 未授权' }}</span>
+          </div>
+          <p class="whitespace-pre-wrap text-[13px] leading-6 text-ink">{{ finalResult }}</p>
+        </div>
+        <EmptyState
+          v-else
+          icon="i-lucide-file-question"
+          title="没有结果文本"
+          description="任务已结束，但事件里没有可展示的最终输出。"
+        />
+      </SectionCard>
+
       <div class="grid gap-4 lg:grid-cols-3">
         <div class="space-y-4 lg:col-span-2">
           <SectionCard
             title="执行时间线"
-            :subtitle="`${events.length} 条事件，按发生顺序排列`"
+            :subtitle="`${events.length} 条事件，最新在最上方`"
             flush
           >
             <template #extra>
@@ -162,9 +253,14 @@ const infoFields = computed(() => [
                 description="任务下发后，设备端 Agent 的步骤会实时回传。"
               />
             </div>
-            <div v-else class="max-h-[560px] overflow-y-auto">
+            <TransitionGroup
+              v-else
+              name="event-list"
+              tag="div"
+              class="relative max-h-[560px] overflow-y-auto"
+            >
               <EventRow v-for="event in events" :key="event.id" :event="event" hide-task />
-            </div>
+            </TransitionGroup>
           </SectionCard>
 
           <SectionCard title="控制指令" subtitle="任务下发与远程控制记录" flush>
@@ -225,12 +321,27 @@ const infoFields = computed(() => [
             <div class="flex flex-wrap gap-1.5">
               <span class="chip">截图回传：{{ task.policy.allowScreenshot ? '允许' : '禁止' }}</span>
               <span class="chip">Root：{{ task.policy.allowRoot ? '允许' : '禁止' }}</span>
-              <span class="chip">超时：{{ formatSeconds(Math.round(task.policy.timeoutMs / 1000)) }}</span>
+              <span class="chip">
+                超时：{{
+                  task.policy.timeoutMs <= 0
+                    ? '不限制'
+                    : formatSeconds(Math.round(task.policy.timeoutMs / 1000))
+                }}
+              </span>
             </div>
           </SectionCard>
 
-          <SectionCard title="下发参数">
-            <JsonBlock :value="task.payload" />
+          <SectionCard title="原始任务参数" subtitle="调试用">
+            <details>
+              <summary
+                class="cursor-pointer list-none text-[11px] font-600 text-muted transition hover:text-ink"
+              >
+                展开 JSON
+              </summary>
+              <div class="mt-2">
+                <JsonBlock :value="task.payload" />
+              </div>
+            </details>
           </SectionCard>
         </div>
       </div>
