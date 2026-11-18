@@ -35,11 +35,6 @@ async function submit() {
   }
 }
 
-const features = [
-  { icon: 'i-lucide-shield-check', text: '设备主动接入，凭证可随时撤销' },
-  { icon: 'i-lucide-radio', text: '实时事件流，任务状态一眼可见' },
-  { icon: 'i-lucide-scroll-text', text: '逐步日志与操作审计，过程可回溯' }
-]
 </script>
 
 <template>
@@ -59,33 +54,9 @@ const features = [
       </div>
 
       <div class="relative max-w-[520px]">
-        <span
-          class="inline-flex items-center gap-2 rounded-full border border-white/15 px-3 py-1 text-[10px] font-600 tracking-[0.16em] text-white/55"
-        >
-          REMOTE AGENT MANAGEMENT
-        </span>
-        <h1 class="mt-5 text-[34px] font-700 leading-[1.28] tracking-tight text-white xl:text-[40px]">
-          把设备 Agent<br>收进一个控制台。
+        <h1 class="text-[34px] font-700 leading-[1.28] tracking-tight text-white xl:text-[40px]">
+          CatfeeAgents<br>控制台
         </h1>
-        <p class="mt-4 max-w-[430px] text-[13px] leading-6 text-white/55">
-          面向已授权 Android 设备的远程 Agent 管理。任务下发、实时事件、暂停继续停止，
-          全部经过权限校验并可审计。
-        </p>
-
-        <div class="mt-8 space-y-3.5">
-          <div
-            v-for="feature in features"
-            :key="feature.text"
-            class="flex items-center gap-3 text-[12.5px] text-white/75"
-          >
-            <span
-              class="flex h-8 w-8 shrink-0 items-center justify-center rounded-[10px] border border-white/10 bg-white/5"
-            >
-              <span :class="feature.icon" class="text-[15px] text-white/85" />
-            </span>
-            {{ feature.text }}
-          </div>
-        </div>
       </div>
 
       <div class="relative flex items-center justify-between text-[10px] text-white/30">
@@ -101,11 +72,7 @@ const features = [
           <AppBrand />
         </div>
 
-        <p class="label-xs">SIGN IN</p>
-        <h2 class="mt-2 text-[24px] font-700 tracking-tight text-ink">登录控制台</h2>
-        <p class="mt-1.5 text-[12.5px] leading-5 text-muted">
-          使用管理员账号进入设备与任务管理工作台。
-        </p>
+        <h2 class="text-[24px] font-700 tracking-tight text-ink">登录控制台</h2>
 
         <form class="mt-7 space-y-4" @submit.prevent="submit">
           <div>
@@ -150,17 +117,9 @@ const features = [
           </n-button>
         </form>
 
-        <p class="mt-5 text-[11px] leading-5 text-faint">
-          初始账号在首次启动时创建，可通过
-          <code class="rounded bg-subtle px-1 py-0.5 font-mono text-[10.5px]">NUXT_ADMIN_USER</code>
-          与
-          <code class="rounded bg-subtle px-1 py-0.5 font-mono text-[10.5px]">NUXT_ADMIN_PASSWORD</code>
-          配置。
-        </p>
-
         <div class="mt-8 flex items-center gap-2 border-t border-line pt-4 text-[10.5px] text-faint">
           <span class="i-lucide-lock text-[13px]" />
-          仅限已授权设备与内部环境使用
+          仅限内部使用
         </div>
       </div>
     </section>

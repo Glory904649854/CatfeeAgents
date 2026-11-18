@@ -159,7 +159,7 @@ async function regenerate() {
 
 <template>
   <div>
-    <PageHeader title="设备" subtitle="管理已授权接入的 Android Agent 设备。">
+    <PageHeader title="设备">
       <template #actions>
         <n-button size="small" :loading="loading" @click="load">
           <template #icon>
@@ -282,35 +282,14 @@ async function regenerate() {
           />
           <p class="mt-3 text-[11px] text-muted">APK：设置 → 控制台 → 扫码绑定</p>
           <p class="mt-0.5 text-[10px] text-faint">
-            二维码包含控制台地址和一次性注册码 · 绑定成功后本窗口自动关闭
+            扫码后自动绑定 · 成功后本窗口关闭
           </p>
-        </div>
-
-        <div class="space-y-2">
-          <div class="rounded-[10px] border border-line px-3 py-2.5">
-            <p class="text-[10px] text-faint">Agent WebSocket</p>
-            <div class="mt-1 flex items-center justify-between gap-2">
-              <span class="truncate font-mono text-[11px] text-ink">
-                {{ invite.connection.wsUrl }}
-              </span>
-              <CopyButton :value="invite.connection.wsUrl" />
-            </div>
-          </div>
-          <div class="rounded-[10px] border border-line px-3 py-2.5">
-            <p class="text-[10px] text-faint">设备注册接口</p>
-            <div class="mt-1 flex items-center justify-between gap-2">
-              <span class="truncate font-mono text-[11px] text-ink">
-                {{ invite.connection.enrollUrl }}
-              </span>
-              <CopyButton :value="invite.connection.enrollUrl" />
-            </div>
-          </div>
         </div>
 
         <div
           class="rounded-[10px] border border-warning/20 bg-warning/5 px-3 py-2.5 text-[11px] leading-5 text-warning"
         >
-          在 APK 的「设置 → 控制台」输入注册码，或直接扫描上方二维码完成接入。设备上线后请核对名称、型号与能力列表。
+          让 APK 扫码或输入注册码完成接入。
         </div>
 
         <div class="flex justify-end gap-2 pt-1">

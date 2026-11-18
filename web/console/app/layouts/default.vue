@@ -45,8 +45,7 @@ watch(
             <span class="text-[10.5px] text-muted">控制台连接</span>
             <LiveBadge />
           </div>
-          <p class="mt-1.5 text-[10px] leading-4 text-faint">单端口 · Nuxt + SQLite</p>
-        </div>
+          </div>
       </div>
 
       <div class="shrink-0 border-t border-line p-3">

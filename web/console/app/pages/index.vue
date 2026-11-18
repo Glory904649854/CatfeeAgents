@@ -35,38 +35,31 @@ const statCards = computed(() => [
     value: `${stats.value?.devicesOnline ?? 0} / ${stats.value?.devicesTotal ?? 0}`,
     icon: 'i-lucide-smartphone',
     tone: 'success' as const,
-    hint: `已登记 ${stats.value?.devicesTotal ?? 0} 台授权设备`
   },
   {
     label: '活跃任务',
     value: stats.value?.tasksRunning ?? 0,
     icon: 'i-lucide-activity',
     tone: 'brand' as const,
-    hint: `今日创建 ${stats.value?.tasksToday ?? 0} 个任务`
   },
   {
     label: '今日事件',
     value: stats.value?.eventsToday ?? 0,
     icon: 'i-lucide-scroll-text',
     tone: 'violet' as const,
-    hint: 'SSE 实时推送到控制台'
   },
   {
     label: '今日失败',
     value: stats.value?.tasksFailed ?? 0,
     icon: 'i-lucide-triangle-alert',
     tone: 'warning' as const,
-    hint: '失败任务需人工确认原因'
   }
 ])
 </script>
 
 <template>
   <div>
-    <PageHeader
-      title="概览"
-      subtitle="设备、任务与事件的一站式运行视图。"
-    >
+    <PageHeader title="概览">
       <template #actions>
         <n-button size="small" :loading="pending" @click="refresh">
           <template #icon>
@@ -92,12 +85,11 @@ const statCards = computed(() => [
         :value="card.value"
         :icon="card.icon"
         :tone="card.tone"
-        :hint="card.hint"
       />
     </div>
 
     <div class="mt-4 grid gap-4 lg:grid-cols-2">
-      <SectionCard title="今日任务状态" subtitle="按当前状态分布">
+      <SectionCard title="今日任务状态">
         <TaskStatusDonut
           v-if="statusCounts"
           :counts="statusCounts"
@@ -107,7 +99,7 @@ const statCards = computed(() => [
         />
         <div v-else class="h-[150px] animate-pulse rounded-[12px] bg-subtle" />
       </SectionCard>
-      <SectionCard title="近 7 天任务趋势" subtitle="创建 / 成功 / 失败">
+      <SectionCard title="近 7 天任务趋势">
         <TaskTrendBars :points="taskTrend" />
       </SectionCard>
     </div>
@@ -116,7 +108,6 @@ const statCards = computed(() => [
       <SectionCard
         class="lg:col-span-2"
         title="运行中的任务"
-        subtitle="只显示未结束的任务"
         flush
       >
         <template #extra>
@@ -136,12 +127,7 @@ const statCards = computed(() => [
             >
               <span class="i-lucide-activity text-[16px]" />
             </span>
-            <div>
-              <p class="text-[12.5px] font-600 text-ink">当前没有运行中的任务</p>
-              <p class="mt-0.5 text-[10.5px] text-faint">
-                新任务下发后会实时出现在这里；已结束的任务可在任务页查看。
-              </p>
-            </div>
+            <p class="text-[12.5px] font-600 text-ink">当前没有运行中的任务</p>
           </div>
           <n-button size="small" @click="router.push('/tasks?create=1')">新建任务</n-button>
         </div>
@@ -150,7 +136,7 @@ const statCards = computed(() => [
         </div>
       </SectionCard>
 
-      <SectionCard class="self-start" title="设备状态" subtitle="授权设备与最近心跳" flush>
+      <SectionCard class="self-start" title="设备状态" flush>
         <template #extra>
           <NuxtLink to="/devices" class="link-quiet text-[11px]">全部设备 →</NuxtLink>
         </template>
@@ -162,7 +148,6 @@ const statCards = computed(() => [
           <EmptyState
             icon="i-lucide-smartphone"
             title="还没有设备"
-            description="在设备页生成注册码，让 APK 主动接入控制台。"
           >
             <n-button size="small" type="primary" @click="router.push('/devices?enroll=1')">
               注册设备
@@ -198,7 +183,7 @@ const statCards = computed(() => [
       </SectionCard>
     </div>
 
-    <SectionCard class="mt-4" title="实时事件" subtitle="最近 8 条执行与安全事件" flush>
+    <SectionCard class="mt-4" title="实时事件" flush>
       <template #extra>
         <LiveBadge />
       </template>

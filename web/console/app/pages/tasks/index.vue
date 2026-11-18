@@ -152,7 +152,7 @@ async function submitCreate() {
 
 <template>
   <div>
-    <PageHeader title="任务" subtitle="向已授权设备下发目标，并跟踪执行状态。">
+    <PageHeader title="任务">
       <template #actions>
         <n-button size="small" :loading="loading" @click="load">
           <template #icon>
@@ -244,7 +244,7 @@ async function submitCreate() {
             placeholder="选择已接入设备"
           />
           <p class="mt-1.5 text-[10.5px] text-faint">
-            离线设备也可以创建任务，指令会排队并在设备重连后下发。
+            离线设备会排队，重连后下发。
           </p>
         </div>
 
@@ -262,7 +262,7 @@ async function submitCreate() {
             <label class="field-label mb-1.5 block">超时时间</label>
             <n-select v-model:value="form.timeoutMs" :options="timeoutOptions" />
             <p class="mt-1.5 text-[10.5px] text-faint">
-              默认不限制时长；任务运行中可在详情页随时暂停或停止。
+              默认不限制，可随时暂停/停止。
             </p>
           </div>
         </div>
@@ -274,7 +274,7 @@ async function submitCreate() {
             type="textarea"
             :autosize="{ minRows: 3, maxRows: 6 }"
             maxlength="4000"
-            placeholder="描述 Agent 需要完成的目标。Web 端只下发意图，具体 UI 操作仍由设备端 Agent 执行。"
+            placeholder="描述要完成的目标"
           />
         </div>
 
@@ -291,7 +291,7 @@ async function submitCreate() {
             <div>
               <p class="text-[11.5px] text-ink">允许 Root 能力</p>
               <p class="mt-0.5 text-[10px] text-faint">
-                仅 owner/admin 可授予；增强 shell/文件/系统设置，文字输入仍依赖无障碍
+                仅管理员可授予；文字输入仍依赖无障碍
               </p>
             </div>
             <n-switch

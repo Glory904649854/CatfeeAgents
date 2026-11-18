@@ -82,7 +82,7 @@ async function refresh() {
 
 <template>
   <div>
-    <PageHeader title="事件日志" subtitle="Agent 执行事件与安全事件的实时流。">
+    <PageHeader title="事件日志">
       <template #actions>
         <LiveBadge />
         <n-button size="small" :loading="loading" @click="refresh">

@@ -197,7 +197,7 @@ const infoFields = computed(() => [
         </SectionCard>
       </div>
 
-      <SectionCard class="mt-4" title="控制指令" subtitle="最近的远程控制与下发记录" flush>
+      <SectionCard class="mt-4" title="控制指令" flush>
         <div v-if="commands.length === 0">
           <EmptyState icon="i-lucide-terminal" title="暂无指令" description="任务下发或控制操作会记录在这里。" />
         </div>

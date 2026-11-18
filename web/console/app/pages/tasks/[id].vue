@@ -240,7 +240,7 @@ const infoFields = computed(() => [
         <div class="space-y-4 lg:col-span-2">
           <SectionCard
             title="执行时间线"
-            :subtitle="`${events.length} 条事件，最新在最上方`"
+            :subtitle="`${events.length} 条`"
             flush
           >
             <template #extra>
@@ -263,7 +263,7 @@ const infoFields = computed(() => [
             </TransitionGroup>
           </SectionCard>
 
-          <SectionCard title="控制指令" subtitle="任务下发与远程控制记录" flush>
+          <SectionCard title="控制指令" flush>
             <div v-if="commands.length === 0">
               <EmptyState icon="i-lucide-terminal" title="暂无指令" />
             </div>
