@@ -8,7 +8,11 @@ import com.catfee.rootauto.llm.DecisionSettings
 import com.catfee.rootauto.llm.LlmClient
 import com.catfee.rootauto.llm.LlmSettings
 import com.catfee.rootauto.log.AgentTrace
+import com.catfee.rootauto.ocr.PaddleOcrEngine
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 import org.json.JSONArray
@@ -38,6 +42,9 @@ import org.json.JSONObject
 object ReActAgent {
 
     private const val TAG = "ReActAgent"
+
+    /** OCR 模型后台预热, 不占用任务主链路。 */
+    private val warmupScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     /**
      * 最大轮数
@@ -230,6 +237,9 @@ object ReActAgent {
           选项用 list_options, 不假设某个 App 的固定控件。
         - load_tools 返回「当前不可用」时, 说明该能力被设备或任务策略限制;
           不要重复加载同一组, 改用可用工具, 或 finish 说明需要开启无障碍/授权 Root/截图。
+        - 查 Android 版本/型号/系统属性时, 先 load_tools(apps,system), 优先用
+          get_prop("ro.build.version.release") / get_prop("ro.product.model") 或 settings_get;
+          不要为了查版本在设置里逐页点。
         - 仅当用户明确要求填写、回答、核对或提交表单/问卷等内容时, 才启用表单工具。
           先让相关内容显示在当前页面, 再按需 load_tools(form) 和 answer_form; 不要把普通页面、
           内容浏览或任何 App 默认当成答题任务。提交前确认目标、填写内容和页面状态; 提交后验证结果。
@@ -309,6 +319,9 @@ object ReActAgent {
                 "当前 input_text / observe / read_page / find_text / tap_text / tap_node 等无障碍工具不可用。" +
                 "如果任务需要输入文字或读屏，请先让用户开启无障碍服务；" +
                 "不要用 tap/OCR 反复猜测输入框，也不要假装已经输入成功。"
+        }
+        if (traceTaskId.isNotBlank()) {
+            warmupScope.launch { PaddleOcrEngine.warmUp(context.applicationContext) }
         }
         val startPkg = AppMemory.currentPackage()
         val traceRun = AgentTrace.startTask(

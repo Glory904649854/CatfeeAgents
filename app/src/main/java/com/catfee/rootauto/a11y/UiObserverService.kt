@@ -112,7 +112,22 @@ class UiObserverService : AccessibilityService() {
                 "Screen: ${screenW}x${screenH} rotation=${ScreenGeometry.rotationLabel()} | " +
                     "App: $packageName | Activity: $activity\n"
             )
-            nodes.forEach { n ->
+            // 保守压缩: 保留所有文字/描述/可输入/可点击/选中节点, 只去掉纯布局容器。
+            // 这样不会丢掉可操作信息, 但能明显减少长页面/WebView 的上下文。
+            val keepClasses = setOf(
+                "Button", "TextView", "EditText", "ImageView", "ImageButton",
+                "CheckBox", "RadioButton", "Switch", "ToggleButton", "Spinner",
+                "SeekBar", "ProgressBar", "WebView"
+            )
+            val seen = HashSet<String>()
+            val meaningful = nodes.asSequence().filter { n ->
+                val cls = n.cls.substringAfterLast('.')
+                val keep = n.text.isNotBlank() || n.desc.isNotBlank() || n.editable ||
+                    n.clickable || n.checked ||
+                    (cls in keepClasses && n.resourceId.isNotBlank())
+                keep && seen.add("$cls|${n.text}|${n.desc}|${n.cx / 8},${n.cy / 8}")
+            }.take(120).toList()
+            meaningful.forEach { n ->
                 append('[').append(n.id).append("] ")
                 append(n.cls.substringAfterLast('.'))
                 val label = n.text.ifBlank { n.desc }
@@ -125,6 +140,9 @@ class UiObserverService : AccessibilityService() {
                     append(" id=").append(n.resourceId.substringAfterLast('/'))
                 }
                 append('\n')
+            }
+            if (nodes.size > meaningful.size) {
+                append("...[已压缩: 原 ${nodes.size} 个节点, 保留 ${meaningful.size} 个有效节点]")
             }
         }
     }

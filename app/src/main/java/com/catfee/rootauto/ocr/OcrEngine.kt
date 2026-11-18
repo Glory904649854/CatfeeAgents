@@ -8,6 +8,8 @@ import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.chinese.ChineseTextRecognizerOptions
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
 import java.util.concurrent.TimeUnit
 
@@ -136,16 +138,26 @@ object OcrEngine {
      * 说明: PP-OCR 对浅色小题号更敏感, ML Kit 对选项字母/短文本更全;
      *       两者结果合并后按行分组, 由解析器按题号/选项字母去重。
      */
-    suspend fun bestRows(context: Context, bitmap: Bitmap): List<OcrRow> {
-        val paddle = try {
-            PaddleOcrEngine.recognize(context, bitmap)
-        } catch (e: Exception) {
-            emptyList()
+    suspend fun bestRows(context: Context, bitmap: Bitmap): List<OcrRow> = coroutineScope {
+        // Paddle 和 ML Kit 互不依赖, 并行跑, 把两路合并的墙钟耗时压到约一半。
+        val paddle = async(Dispatchers.Default) {
+            try {
+                PaddleOcrEngine.recognize(context, bitmap)
+            } catch (e: Exception) {
+                emptyList()
+            }
         }
-        val ml = recognize(bitmap, 2)
+        val ml = async(Dispatchers.Default) {
+            try {
+                recognize(bitmap, 2)
+            } catch (e: Exception) {
+                emptyList()
+            }
+        }
         // 两个引擎各自有序, 合并后必须重排, 否则 rows() 会把不同 y 的行错并成一行
-        val all = (paddle + ml).sortedWith(compareBy({ it.box.top }, { it.box.left }))
-        return if (all.isEmpty()) emptyList() else rows(all)
+        val all = (paddle.await() + ml.await())
+            .sortedWith(compareBy({ it.box.top }, { it.box.left }))
+        if (all.isEmpty()) emptyList() else rows(all)
     }
 
     /**

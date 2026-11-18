@@ -181,6 +181,15 @@ object AgentTools {
         if (hit("包名", "activity", "应用信息", "卸载", "安装", "停止应用", "启动activity", "属性")) {
             session.activeGroups.add("apps")
         }
+        // 查系统版本/型号/设备信息时, 直接走 get_prop / settings_get, 不要逐页点设置。
+        if (hit(
+                "版本", "型号", "系统信息", "设备信息", "android版本", "android version",
+                "version", "about phone", "device info", "model"
+            )
+        ) {
+            session.activeGroups.add("apps")
+            session.activeGroups.add("system")
+        }
         if (hit("shell", "设置", "权限", "系统", "adb")) {
             session.activeGroups.add("system")
         }

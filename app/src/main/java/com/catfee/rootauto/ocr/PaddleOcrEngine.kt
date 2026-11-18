@@ -55,6 +55,16 @@ object PaddleOcrEngine {
 
     fun isReady(): Boolean = detSession != null && recSession != null
 
+    /** 后台预加载 det/rec 模型, 把首次 OCR 的模型加载时间从关键路径移走。 */
+    suspend fun warmUp(context: Context) = withContext(Dispatchers.IO) {
+        try {
+            ensure(context)
+            Log.i(TAG, "PP-OCRv5 预热完成")
+        } catch (e: Exception) {
+            Log.w(TAG, "PP-OCRv5 预热失败: ${e.message}")
+        }
+    }
+
     private fun ensure(context: Context) {
         if (isReady()) return
         synchronized(this) {
