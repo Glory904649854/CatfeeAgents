@@ -285,7 +285,9 @@ object ReActAgent {
         /** Web 任务策略: 是否允许截图/视觉工具 */
         allowScreenshot: Boolean = true,
         /** Web 任务策略: 超时毫秒; <0 不限制, 0 使用默认总预算 */
-        timeoutMs: Long = 0
+        timeoutMs: Long = 0,
+        /** 停止来源 (应用内/通知栏/悬浮窗...); 为空表示不是用户主动停止 */
+        stopSourceProvider: () -> String = { "" }
     ): String {
         if (!provider.usable) {
             onEvent(Event("error", "LLM 配置不完整, 请先填写并保存 BaseUrl / Key / 模型名"))
@@ -1036,9 +1038,12 @@ object ReActAgent {
             AgentTrace.finish(context, traceRun, false, "达到最大轮数, 任务未完成", MAX_STEPS)
             return "达到最大轮数, 任务未完成"
         } catch (e: CancellationException) {
-            // 用户主动停止, 不算错误
-            onEvent(Event("error", "任务已被用户停止"))
-            AgentTrace.finish(context, traceRun, false, "用户停止", currentStep)
+            // 只有从明确的停止入口取消才算「用户停止」; 其他取消(作用域销毁等)单独标记
+            val source = stopSourceProvider()
+            val userStopped = source.isNotBlank()
+            val resultText = if (userStopped) "用户停止($source)" else "任务被中断(未记录来源)"
+            onEvent(Event("error", if (userStopped) "任务已被用户停止 · $source" else "任务被中断"))
+            AgentTrace.finish(context, traceRun, false, resultText, currentStep)
             throw e
         } catch (e: Exception) {
             Log.e(TAG, "任务执行异常: ${e.message}")

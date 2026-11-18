@@ -87,6 +87,8 @@ object AgentController {
         @Volatile var pausePhase: String = "waiting_llm"
         @Volatile var agentClaimed: Boolean = false
         @Volatile var conflictReason: String = ""
+        /** 停止来源: 应用内/通知栏/悬浮窗/退出应用/删除会话; 空 = 非用户停止 */
+        @Volatile var stopSource: String = ""
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -389,7 +391,8 @@ object AgentController {
                     traceTaskId = traceTaskId,
                     allowRootTools = allowRootTools,
                     allowScreenshot = allowScreenshot,
-                    timeoutMs = timeoutMs
+                    timeoutMs = timeoutMs,
+                    stopSourceProvider = { run.stopSource }
                 )
             } catch (e: kotlinx.coroutines.CancellationException) {
                 "已停止"
@@ -584,14 +587,14 @@ object AgentController {
         deferred?.complete(allow)
     }
 
-    /** 停止指定会话; 不传 sessionId 时停止全部 */
-    fun stop(sessionId: String = "") {
+    /** 停止指定会话; 不传 sessionId 时停止全部。source 用于日志区分停止入口。 */
+    fun stop(sessionId: String = "", source: String = "应用内") {
         val targets = if (sessionId.isBlank()) {
             runs.values.toList()
         } else {
             listOfNotNull(runs[keyOf(sessionId)])
         }
-        targets.forEach { stopRun(it) }
+        targets.forEach { stopRun(it, source) }
     }
 
     /** 暂停指定会话; 不取消 Job, 也不释放 Agent owner。 */
@@ -674,13 +677,15 @@ object AgentController {
     }
 
     /** 通知栏/悬浮窗停止按钮: 只停 Agent owner, 不影响其他 chat。 */
-    fun stopAgent(sessionId: String = "") {
+    fun stopAgent(sessionId: String = "", source: String = "通知栏") {
         val key = agentOwnerKey ?: return
         if (sessionId.isNotBlank() && key != keyOf(sessionId)) return
-        runs[key]?.let { stopRun(it) }
+        runs[key]?.let { stopRun(it, source) }
     }
 
-    private fun stopRun(run: Run) {
+    private fun stopRun(run: Run, source: String) {
+        run.stopSource = source
+        android.util.Log.i("AgentController", "stop run=${run.sessionId} source=$source")
         run.confirm?.complete(false)
         run.confirm = null
         synchronized(run) {

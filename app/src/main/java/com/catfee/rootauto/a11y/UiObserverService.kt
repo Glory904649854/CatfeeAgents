@@ -150,6 +150,8 @@ class UiObserverService : AccessibilityService() {
     /** 最近一次窗口事件的包名, 用于快速取 Activity */
     @Volatile
     private var lastPackage: String = ""
+    @Volatile
+    private var lastPackageAt: Long = 0L
 
     override fun onServiceConnected() {
         super.onServiceConnected()
@@ -171,7 +173,10 @@ class UiObserverService : AccessibilityService() {
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         // 只记录包名/类名, 不做任何耗时处理, 避免拖慢系统
         try {
-            event?.packageName?.let { lastPackage = it.toString() }
+            event?.packageName?.let {
+                lastPackage = it.toString()
+                lastPackageAt = android.os.SystemClock.elapsedRealtime()
+            }
             event?.className?.let { lastClass = it.toString() }
         } catch (e: Exception) {
             Log.w(TAG, "处理事件失败: ${e.message}")
@@ -321,7 +326,15 @@ class UiObserverService : AccessibilityService() {
     /** 当前活动窗口的包名, 比每轮跑 root dumpsys 快很多 */
     fun currentPackage(): String {
         return try {
-            chooseRoot()?.packageName?.toString().orEmpty()
+            val self = packageName
+            val rootPkg = chooseRoot()?.packageName?.toString().orEmpty()
+            if (rootPkg.isNotBlank() && rootPkg != self) return rootPkg
+            // 根窗口是本应用(后台界面/悬浮层)或拿不到时, 用最近 5 秒的窗口事件包名兜底,
+            // 否则前台 App 会被一直误报成 com.catfee.rootauto。
+            val last = lastPackage
+            val fresh = android.os.SystemClock.elapsedRealtime() - lastPackageAt in 0..5_000
+            if (fresh && last.isNotBlank() && last != self && !isSystemOverlay(last)) return last
+            rootPkg.ifBlank { last }
         } catch (e: Exception) {
             ""
         }
@@ -446,7 +459,12 @@ class UiObserverService : AccessibilityService() {
                 }
                 ?.filter { !isSystemOverlay(it.root?.packageName?.toString().orEmpty()) }
                 ?.sortedByDescending { it.layer }
-            for (w in appWindows.orEmpty()) {
+                .orEmpty()
+            // 本应用的后台窗口层级可能高于前台 App(悬浮状态条/最近任务动画),
+            // 优先取其他应用窗口; 只剩自己时才回退, 避免前台包名被误判成 com.catfee.rootauto。
+            val external = appWindows.filter { it.root?.packageName?.toString() != packageName }
+            val pool = external.ifEmpty { appWindows }
+            for (w in pool) {
                 val r = w.root
                 if (r != null) return r
             }

@@ -733,7 +733,7 @@ private fun AgentConsole(activity: ComponentActivity) {
     }
 
     fun stop() {
-        AgentController.stop(current?.id.orEmpty())
+        AgentController.stop(current?.id.orEmpty(), "应用内按钮")
         hint = "已停止"
     }
 
@@ -1157,7 +1157,7 @@ private fun AgentConsole(activity: ComponentActivity) {
                         pendingDelete = null
                         val deletingCurrent = current?.id == s.id
                         if (AgentController.isSessionRunning(s.id)) {
-                            AgentController.stop(s.id)
+                            AgentController.stop(s.id, "删除会话")
                         }
                         scope.launch {
                             SessionManager.delete(activity, s.id)
@@ -1399,7 +1399,7 @@ private fun AgentConsole(activity: ComponentActivity) {
                         Button(
                             onClick = {
                                 showExitConfirm = false
-                                if (exitRunning) AgentController.stop(current?.id.orEmpty())
+                                if (exitRunning) AgentController.stop(current?.id.orEmpty(), "退出应用")
                                 SessionManager.flush(activity)
                                 activity.finish()
                             },

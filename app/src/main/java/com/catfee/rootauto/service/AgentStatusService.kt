@@ -211,7 +211,7 @@ class AgentStatusService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val sessionId = intent?.getStringExtra(EXTRA_SESSION_ID).orEmpty()
         when (intent?.action) {
-            ACTION_STOP_AGENT -> if (sessionId.isNotBlank()) AgentController.stopAgent(sessionId)
+            ACTION_STOP_AGENT -> if (sessionId.isNotBlank()) AgentController.stopAgent(sessionId, "通知栏")
             ACTION_PAUSE_AGENT -> if (sessionId.isNotBlank()) AgentController.pauseAgent(sessionId)
             ACTION_RESUME_AGENT -> if (sessionId.isNotBlank()) AgentController.resumeAgent(sessionId)
             ACTION_REFRESH_OVERLAY -> {
@@ -371,6 +371,12 @@ class AgentStatusService : Service() {
         try {
             val wm = getSystemService(WINDOW_SERVICE) as WindowManager
             val view = LayoutInflater.from(this).inflate(R.layout.agent_status_overlay, null)
+            // 状态条只做展示: 不可触摸, 也不向无障碍暴露节点。
+            // 之前按钮可点击且窗口在右上角, Agent 的点击/用户的误触落到 × 上会直接停掉任务。
+            view.importantForAccessibility =
+                View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
+            view.findViewById<View>(R.id.overlay_pause)?.visibility = View.GONE
+            view.findViewById<View>(R.id.overlay_stop)?.visibility = View.GONE
             val statusBar = resources.getIdentifier("status_bar_height", "dimen", "android")
                 .takeIf { it > 0 }?.let { resources.getDimensionPixelSize(it) } ?: 0
             val lp = WindowManager.LayoutParams(
@@ -378,7 +384,8 @@ class AgentStatusService : Service() {
                 WindowManager.LayoutParams.WRAP_CONTENT,
                 WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                    WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
                 PixelFormat.TRANSLUCENT
             ).apply {
                 gravity = Gravity.TOP or Gravity.END
@@ -402,7 +409,7 @@ class AgentStatusService : Service() {
             }
             view.findViewById<View>(R.id.overlay_stop)?.setOnClickListener {
                 val s = lastState ?: return@setOnClickListener
-                if (s.sessionId.isNotBlank()) AgentController.stopAgent(s.sessionId)
+                if (s.sessionId.isNotBlank()) AgentController.stopAgent(s.sessionId, "悬浮窗")
             }
         } catch (e: Exception) {
             android.util.Log.w(TAG, "添加悬浮窗失败: ${e.message}")

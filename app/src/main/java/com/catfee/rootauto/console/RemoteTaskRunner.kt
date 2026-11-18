@@ -136,7 +136,7 @@ object RemoteTaskRunner {
             "resume" -> AgentController.resume(sessionId)
             "stop" -> {
                 ConsoleClient.markFinalStatus(taskId, "task.stopped")
-                AgentController.stop(sessionId)
+                AgentController.stop(sessionId, "Web 控制台")
                 true
             }
             else -> false
