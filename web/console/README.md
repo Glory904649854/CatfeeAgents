@@ -14,7 +14,7 @@ pnpm dev
 ```
 
 要求 Node.js ≥ 22.21（见 `.nvmrc`；版本不符时脚本会给出提示）。
-默认管理员：`admin / change-me`。
+默认管理员用户名 `admin`；未设置 `NUXT_ADMIN_PASSWORD` 时，初始密码会随机生成并打印在启动日志中。
 
 ## 常用命令
 

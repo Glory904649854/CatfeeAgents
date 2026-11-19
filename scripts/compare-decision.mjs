@@ -23,8 +23,8 @@ const DECISION_MODEL = process.env.DECISION_MODEL || 'decision-model-preview'
 const MIN_CONFIDENCE = 0.75
 const SAMPLES = Number(process.env.SAMPLES || 4)
 
-if (!MAIN_KEY || !DECISION_KEY) {
-  console.error('缺少 CATFEE_MAIN_API_KEY 或 DASHSCOPE_API_KEY')
+if (!MAIN_BASE || !MAIN_KEY || !DECISION_KEY) {
+  console.error('缺少 CATFEE_MAIN_BASE_URL / CATFEE_MAIN_API_KEY 或 DASHSCOPE_API_KEY')
   process.exit(1)
 }
 

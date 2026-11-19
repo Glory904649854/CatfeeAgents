@@ -21,6 +21,15 @@
 *.pem
 *.key
 
+# Web console
+web/console/node_modules/
+web/console/.nuxt/
+web/console/.output/
+web/console/data/
+web/console/.env
+web/console/.env.*
+!web/console/.env.example
+
 # OS / editor
 .DS_Store
 Thumbs.db

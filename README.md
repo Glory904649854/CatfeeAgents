@@ -163,7 +163,7 @@ pnpm install
 pnpm dev        # http://localhost:9777
 ```
 
-首次启动会创建管理员账号 `admin / change-me`，可以用环境变量覆盖。公网部署建议放在 HTTPS 反向代理后面，设备使用 WSS。
+首次启动会创建管理员 `admin`；未设置 `NUXT_ADMIN_PASSWORD` 时密码随机生成，只在启动日志中输出一次。公网部署建议放在 HTTPS 反向代理后面，设备使用 WSS。
 
 绑定方式：Web 设备页生成一次性注册码和二维码，APK 在「设置 → 控制台」输入注册码，或直接扫码完成绑定。绑定后设备会保持长连接，Web 端可以下发任务、查看事件、暂停或停止任务。
 
@@ -204,6 +204,7 @@ magisk/                          # Magisk 模块
 - Web 端日志包含页面文字、工具参数和结果，请限制控制台账号权限。
 - 不上传截图二进制，文本和工具结果按长度截断。
 - 源码不包含真实 API Key，`local.properties` 已加入 `.gitignore`。
+- 漏洞报告和部署检查见 [SECURITY.md](SECURITY.md)。
 
 ## 构建信息
 

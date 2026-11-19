@@ -36,6 +36,8 @@ export function initDatabase(options: {
 
   const userCount = db.prepare('SELECT COUNT(*) AS count FROM users').get() as { count: number }
   if (userCount.count === 0) {
+    // 没有显式配置密码时随机生成，避免仓库或部署环境带着默认口令上线
+    const initialPassword = options.adminPassword || randomBytes(12).toString('base64url')
     db.prepare(
       `INSERT INTO users (id, username, display_name, password_hash, role, created_at)
        VALUES (?, ?, ?, ?, ?, ?)`
@@ -43,13 +45,14 @@ export function initDatabase(options: {
       'usr_owner',
       options.adminUser,
       '管理员',
-      hashPassword(options.adminPassword),
+      hashPassword(initialPassword),
       'owner',
       new Date().toISOString()
     )
     console.warn(
-      `[catfee] 已创建初始管理员账号：${options.adminUser} / ${options.adminPassword}（请尽快修改）`
+      `[catfee] 已创建初始管理员账号：${options.adminUser} / ${initialPassword}`
     )
+    console.warn('[catfee] 该密码只显示一次，请妥善保存')
   }
 
   holder().db = db

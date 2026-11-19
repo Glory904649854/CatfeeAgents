@@ -32,7 +32,7 @@ export default defineNuxtConfig({
   runtimeConfig: {
     dbPath: './data/catfee.db',
     adminUser: 'admin',
-    adminPassword: 'change-me',
+    adminPassword: '',
     publicUrl: 'http://localhost:9777',
     sessionDays: 30
   },

@@ -51,13 +51,13 @@ cp .env.example .env        # Windows: copy .env.example .env
 pnpm dev                    # http://localhost:9777
 ```
 
-首次启动会自动建表，并创建管理员：
+首次启动会自动建表，并创建管理员。未设置 `NUXT_ADMIN_PASSWORD` 时会随机生成密码，并且只输出一次：
 
 ```text
-admin / change-me
+[catfee] 已创建初始管理员账号：admin / <随机密码>
 ```
 
-请通过 `NUXT_ADMIN_USER` / `NUXT_ADMIN_PASSWORD` 修改部署环境中的初始账号。
+请妥善保存该密码；也可以通过 `NUXT_ADMIN_USER` / `NUXT_ADMIN_PASSWORD` 指定初始账号。
 
 ### 演示数据（可选）
 
@@ -110,7 +110,7 @@ web/console/
 | `NUXT_PUBLIC_URL` | `http://localhost:9777` | 对外地址，用于生成 WS / 注册地址 |
 | `NUXT_DB_PATH` | `./data/catfee.db` | SQLite 路径 |
 | `NUXT_ADMIN_USER` | `admin` | 首次启动创建的管理员 |
-| `NUXT_ADMIN_PASSWORD` | `change-me` | 首次启动密码 |
+| `NUXT_ADMIN_PASSWORD` | 随机生成 | 首次启动密码；留空时输出到启动日志 |
 | `NUXT_SESSION_DAYS` | `30` | 控制台会话有效期 |
 
 `NUXT_PUBLIC_URL` 为 `https://` 时会自动启用 Secure Cookie。

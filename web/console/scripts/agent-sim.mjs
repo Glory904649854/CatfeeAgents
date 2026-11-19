@@ -3,11 +3,15 @@
  * 仅用于本地开发，不包含任何真实设备数据。
  *
  * 运行：pnpm agent:sim
- * 前置：控制台已启动，且管理员账号可用（默认 admin / change-me）。
+ * 前置：控制台已启动，管理员账号可用，密码通过 CATFEE_ADMIN_PASSWORD 传入。
  */
 const BASE = (process.env.CATFEE_BASE_URL || 'http://localhost:9777').replace(/\/+$/, '')
 const USERNAME = process.env.CATFEE_ADMIN_USER || 'admin'
-const PASSWORD = process.env.CATFEE_ADMIN_PASSWORD || 'change-me'
+const PASSWORD = process.env.CATFEE_ADMIN_PASSWORD || ''
+if (!PASSWORD) {
+  console.error('[sim] 请通过 CATFEE_ADMIN_PASSWORD 传入管理员密码')
+  process.exit(1)
+}
 
 function fail(message) {
   console.error(`[sim] ${message}`)

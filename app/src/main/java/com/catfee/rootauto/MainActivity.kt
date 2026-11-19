@@ -263,6 +263,7 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+// 不内置任何私有服务地址; 首次使用请在 设置 → 模型 里填写
 private const val DEFAULT_BASE_URL = ""
 // 不把真实 API Key 提交到仓库; 首次使用请在 Settings 里填写
 private const val DEFAULT_API_KEY = ""
