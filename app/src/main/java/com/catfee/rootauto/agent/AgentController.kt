@@ -2,6 +2,7 @@ package com.catfee.rootauto.agent
 
 import android.content.Context
 import android.os.SystemClock
+import com.catfee.rootauto.device.DeviceCapabilities
 import com.catfee.rootauto.llm.LlmClient
 import com.catfee.rootauto.llm.LlmSettings
 import com.catfee.rootauto.root.ScreenGeometry
@@ -264,6 +265,11 @@ object AgentController {
         val appContext = run.context
         val sessionId = run.sessionId
         val startedAt = System.currentTimeMillis()
+        // Root 设备覆盖安装/强停后无障碍可能被系统重置; 任务开始前先静默恢复。
+        // 非 Root 下这里会快速返回 false, 由 Agent 的 request_capability/enter_agent_mode 引导开启。
+        if (DeviceCapabilities.current().accessibility.not()) {
+            DeviceCapabilities.ensureAccessibility(appContext)
+        }
         var phoneGranted = phoneAllowed
         var runTokens = 0
         var result = ""

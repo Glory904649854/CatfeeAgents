@@ -5,6 +5,8 @@ import android.util.Log
 import com.catfee.rootauto.agent.memory.MemoryCurator
 import com.catfee.rootauto.agent.memory.MemoryInjector
 import com.catfee.rootauto.agent.memory.MemoryStore
+import com.catfee.rootauto.device.Capability
+import com.catfee.rootauto.device.CapabilityManager
 import com.catfee.rootauto.device.DeviceCapabilities
 import com.catfee.rootauto.llm.DecisionClient
 import com.catfee.rootauto.llm.DecisionSettings
@@ -238,8 +240,10 @@ object ReActAgent {
           先 load_tools 加载对应组 (inspect/form/input/apps/system/files/memory/all),
           不要因为工具不在列表就放弃; 不同 App 优先 tap_node(text/desc/id), 自绘/WebView 用 ocr,
           选项用 list_options, 不假设某个 App 的固定控件。
-        - load_tools 返回「当前不可用」时, 说明该能力被设备或任务策略限制;
-          不要重复加载同一组, 改用可用工具, 或 finish 说明需要开启无障碍/授权 Root/截图。
+        - 能力不足时: 先 request_capability(name=accessibility|overlay|notification|battery|screenshot);
+          它会自动尝试开启或打开系统设置并等待。Root 无法自动开启, 但 Root 只是可选项,
+          禁止因为没有 Root 直接 finish。只有用户明确拒绝或等待超时, 才改用可用工具继续或说明限制。
+        - load_tools 返回「当前不可用」时, 不要重复加载同一组, 改用可用工具; 需要无障碍/截图时先 request_capability。
         - 查 Android 版本/型号/系统属性时, 先 load_tools(apps,system), 优先用
           get_prop("ro.build.version.release") / get_prop("ro.product.model") 或 settings_get;
           不要为了查版本在设置里逐页点。
@@ -315,15 +319,18 @@ object ReActAgent {
             "\n\n===== 非 Root 模式提示 =====\n" +
                 "当前通过无障碍读屏和手势操作：启动 App 后如果出现开屏广告/弹窗，优先点击" +
                 "「跳过 / 关闭 / 稍后再说 / 知道了」；不要用返回键退出 App，返回键可能直接回到桌面。" +
-                "截图/OCR 使用系统无障碍截图，可能偶发限流；失败时改用 observe/read_page。"
+                "截图/OCR 使用系统无障碍截图，可能偶发限流；失败时改用 observe/read_page。" +
+                "没有 Root 不是停止任务的理由：只有 stop_app/shell/settings_put/file_* 等增强工具不可用，" +
+                "请改用无障碍和 UI 操作完成，禁止因为“非 Root”直接 finish。"
         }
         val a11yHint = if (caps.accessibility) {
             ""
         } else {
             "\n\n===== 无障碍未连接 =====\n" +
                 "当前 input_text / observe / read_page / find_text / tap_text / tap_node 等无障碍工具不可用。" +
-                "如果任务需要输入文字或读屏，请先让用户开启无障碍服务；" +
-                "不要用 tap/OCR 反复猜测输入框，也不要假装已经输入成功。"
+                "先调用 request_capability(name=accessibility)：它会自动尝试 Root 恢复，或打开系统无障碍设置并等待开启。" +
+                "开启后继续任务；如果用户没有开启，改用 ocr + tap 坐标继续，不要直接 finish。" +
+                "等待期间不要重复调用 request_capability。"
         }
         if (traceTaskId.isNotBlank()) {
             warmupScope.launch { PaddleOcrEngine.warmUp(context.applicationContext) }
@@ -687,7 +694,9 @@ object ReActAgent {
                         messages.put(toolMessage(call.id, blocked))
                         continue
                     }
-                    if (!toolSession.agentMode && call.name != "enter_agent_mode") {
+                    if (!toolSession.agentMode &&
+                        call.name != "enter_agent_mode" && call.name != "request_capability"
+                    ) {
                         val blocked = "BLOCKED: 聊天模式没有设备工具。需要查看/操作手机时先调用 enter_agent_mode。"
                         onEvent(Event("system", blocked))
                         toolTraces.add(
@@ -725,13 +734,23 @@ object ReActAgent {
                             messages.put(toolMessage(call.id, already))
                             continue
                         }
-                        if (!toolSession.caps.accessibility && !toolSession.caps.root) {
-                            val blocked = "当前设备未开启无障碍且没有 Root，无法操作手机。" +
-                                "请让用户到系统设置-无障碍中开启 CatfeeAgents 后重试。"
-                            onEvent(Event("conflict", blocked, tool = call.name))
-                            toolSession.agentBlocked = true
-                            messages.put(toolMessage(call.id, blocked))
-                            continue
+                        if (!toolSession.caps.accessibility) {
+                            // 不再直接判定“无法操作手机”: 先自动开启/引导开启无障碍
+                            onEvent(Event("system", "无障碍未开启，正在尝试自动开启或打开系统设置…"))
+                            val waitMs = if (traceTaskId.isNotBlank()) 8_000L else 90_000L
+                            val enabled = CapabilityManager.ensure(
+                                context, Capability.ACCESSIBILITY, waitMs
+                            ) { msg -> onEvent(Event("system", msg)) }
+                            toolSession.caps = DeviceCapabilities.refresh(context, force = true)
+                            if (!enabled) {
+                                onEvent(
+                                    Event(
+                                        "system",
+                                        "无障碍仍未开启，将以 OCR/坐标模式继续；" +
+                                            "文字输入和读屏可能不可用，不要因此直接结束任务。"
+                                    )
+                                )
+                            }
                         }
                         val denied = claimAgentMode()
                         if (denied != null) {

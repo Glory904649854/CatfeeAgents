@@ -195,6 +195,8 @@ import com.catfee.rootauto.console.ConsoleSettings
 import com.catfee.rootauto.console.EnrollQr
 import com.catfee.rootauto.console.RemoteConsoleService
 import com.catfee.rootauto.ui.QrScannerDialog
+import com.catfee.rootauto.device.Capability
+import com.catfee.rootauto.device.CapabilityManager
 import com.catfee.rootauto.device.DeviceCapabilities
 import com.catfee.rootauto.device.DeviceMode
 import com.catfee.rootauto.llm.DecisionClient
@@ -1029,6 +1031,10 @@ private fun AgentConsole(activity: ComponentActivity) {
                 }
             },
             onRequestOverlay = { requestOverlayPermission() },
+            onRequestAccessibility = {
+                CapabilityManager.openSettings(activity, Capability.ACCESSIBILITY)
+                hint = "请在系统设置中开启 CatfeeAgents 无障碍；也可以直接对 Agent 说“帮我开启无障碍”"
+            },
             testResult = testResult,
             onSaveModel = {
                 val p = currentProvider()
@@ -3148,6 +3154,7 @@ private fun SettingsSheet(
     overlayGranted: Boolean,
     onOverlayEnabled: (Boolean) -> Unit,
     onRequestOverlay: () -> Unit,
+    onRequestAccessibility: () -> Unit,
     testResult: String,
     onSaveModel: () -> Unit,
     onTestModel: () -> Unit,
@@ -3263,6 +3270,23 @@ private fun SettingsSheet(
                 CapabilityChip("截图", caps.hasScreenshot)
                 CapabilityChip("Root", caps.root)
                 CapabilityChip("悬浮窗", overlayGranted)
+            }
+            if (!caps.accessibility) {
+                TextButton(
+                    onClick = onRequestAccessibility,
+                    contentPadding = PaddingValues(0.dp)
+                ) {
+                    Text("开启无障碍", fontSize = 10.5.sp, color = Accent)
+                }
+            }
+            if (!caps.root) {
+                Text(
+                    "Root 是可选项；没有 Root 也可以用无障碍完成任务，只有强制停止/读写系统设置等增强工具不可用。",
+                    fontSize = 9.5.sp,
+                    color = Muted,
+                    lineHeight = 14.sp,
+                    modifier = Modifier.padding(top = 2.dp)
+                )
             }
             Spacer(Modifier.height(10.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {

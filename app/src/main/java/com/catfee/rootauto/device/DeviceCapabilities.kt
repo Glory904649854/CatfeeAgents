@@ -52,7 +52,7 @@ data class Capabilities(
     /** 给 Agent system prompt 用的能力摘要 */
     fun summary(): String = buildString {
         append("模式=").append(modeLabel())
-        append("; Root=").append(if (root) "是" else "否")
+        append("; Root=").append(if (root) "是(增强)" else "否(可选, 不是运行前提)")
         append("; 无障碍=").append(if (accessibility) "是" else "否")
         append("; 手势=").append(if (gestures) "是" else "否")
         append("; 截图=").append(
@@ -62,6 +62,9 @@ data class Capabilities(
                 ScreenshotSource.NONE -> "不可用"
             }
         )
+        if (!accessibility) {
+            append("; 提示=先调用 request_capability(name=accessibility), 不要直接结束任务")
+        }
     }
 }
 

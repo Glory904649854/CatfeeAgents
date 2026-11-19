@@ -197,7 +197,7 @@ flowchart LR
 ```text
 observe  tap  tap_node  swipe  input_text  key  launch_app  open_url
 wait  wait_for_text  find_text  scroll_to_text  get_activity  ocr
-verify_text  verify_changed  note  todo_write  memory_read  memory_write  memory_search  finish
+verify_text  verify_changed  note  todo_write  memory_read  memory_write  memory_search  request_capability  finish
 ```
 
 其余能力按组加载（`load_tools`，也可由任务关键词自动激活）：
@@ -261,6 +261,15 @@ Agent · 第 12 步 · 等待模型
 阶段包括 `等待模型 / 操作中 / 等待确认 / 已暂停 / 已完成 / 已停止 / 异常`。通知提供 **打开、暂停/继续、停止**；控制动作带当前 session id，只影响当前 Agent owner。
 
 设置中可开启 **悬浮状态窗**（需授予悬浮窗权限）。悬浮窗显示步骤、阶段、耗时，并提供 **暂停/继续、停止** 按钮；Agent 注入手势命中悬浮窗时会临时让点击穿透到下层 App，手势结束自动恢复。停止需要两步确认（第一次点 `×` 变成「确认」，3 秒内再点一次），避免误触或 Agent 点击把任务停掉。暂停是进程内协作式暂停，不会取消原任务 Job；停止后需要重新发起任务。
+
+### 能力缺失时会主动引导
+
+任务遇到能力缺失不会直接结束：
+
+- **无障碍**：Root 设备先用 `settings put secure` 自动恢复服务；非 Root 打开系统无障碍详情页并轮询等待（本地任务 90 秒，远程任务 90 秒）。如果系统里已勾选但服务未连接，会提示关闭再重新开启。
+- **悬浮窗 / 通知 / 后台运行**：打开对应系统设置并等待授权；设置页也提供「开启无障碍」入口。
+- **Root**：无法由 App 自动开启，但只作为增强项，不是运行前提。没有 Root 时提示模型改用无障碍完成，不会因此结束任务。
+- 模型可以主动调用 `request_capability(name=accessibility|overlay|notification|battery|screenshot|root)`；开启成功后刷新能力快照，下一轮工具列表自动放行。
 
 ## 通用表单与选项任务
 

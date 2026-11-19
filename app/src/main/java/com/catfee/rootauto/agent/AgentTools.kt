@@ -7,6 +7,8 @@ import android.util.Log
 import com.catfee.rootauto.a11y.UiObserverService
 import com.catfee.rootauto.device.AppLauncher
 import com.catfee.rootauto.device.Capabilities
+import com.catfee.rootauto.device.Capability
+import com.catfee.rootauto.device.CapabilityManager
 import com.catfee.rootauto.device.DeviceCapabilities
 import com.catfee.rootauto.llm.LlmSettings
 import com.catfee.rootauto.ocr.LongOcr
@@ -78,7 +80,7 @@ object AgentTools {
         "launch_app", "open_url", "wait", "wait_for_text",
         "find_text", "scroll_to_text", "get_activity", "ocr",
         "verify_text", "verify_changed", "note", "todo_write",
-        "memory_read", "memory_write", "memory_search", "finish"
+        "memory_read", "memory_write", "memory_search", "request_capability", "finish"
     )
 
     private val GROUP_TOOLS: Map<String, Set<String>> = mapOf(
@@ -127,8 +129,8 @@ object AgentTools {
     fun capabilityBlockReason(session: Session, name: String): String? {
         val caps = session.caps
         if (name in ROOT_ONLY_TOOLS && !caps.root) {
-            return "当前为非 Root 模式，$name 不可用。改用 observe/find_text/tap_text/" +
-                "input_text 等无障碍工具，不要反复尝试系统级工具。"
+            return "当前为非 Root 模式，$name 不可用。Root 只是可选项，不是运行前提；" +
+                "改用无障碍工具 observe/find_text/tap_text/input_text 继续，不要因此结束任务。"
         }
         if (name in ROOT_ONLY_TOOLS && !session.allowRootTools) {
             return "该 Web 任务未授权 Root 增强能力，$name 不可用。" +
@@ -147,7 +149,8 @@ object AgentTools {
                 "请先开启无障碍服务，或改用 tap_text/tap_node。"
         }
         if (name in A11Y_TOOLS && !caps.accessibility) {
-            return "无障碍服务未连接，$name 不可用。请让用户在系统设置-无障碍中开启 CatfeeAgents。"
+            return "无障碍服务未连接，$name 不可用。先调用 request_capability(name=accessibility)：" +
+                "它会通过 Root 自动恢复，或打开系统无障碍设置并等待开启；开启后重试，不要直接结束任务。"
         }
         if (name == "get_activity" && !caps.accessibility && !caps.root) {
             return "当前模式无法可靠读取前台 Activity，请改用 observe/read_page。"
@@ -211,7 +214,9 @@ object AgentTools {
     /** 当前会话是否允许调用某个工具 (防止模型幻觉出未加载的工具) */
     fun isToolEnabled(session: Session, name: String): Boolean {
         if (session.agentBlocked) return false
-        if (name == "enter_agent_mode" || name == "load_tools") return true
+        if (name == "enter_agent_mode" || name == "load_tools" || name == "request_capability") {
+            return true
+        }
         if (!session.agentMode) return false
         if (capabilityBlockReason(session, name) != null) return false
         if (name in CORE_TOOLS) return true
@@ -284,7 +289,16 @@ object AgentTools {
     fun definitions(session: Session): JSONArray {
         if (session.agentBlocked) return JSONArray()
         if (!session.agentMode) {
-            return JSONArray().put(enterAgentModeDefinition())
+            // 聊天模式也允许直接请求能力, 例如“帮我开启无障碍”
+            val chatTools = JSONArray().put(enterAgentModeDefinition())
+            for (i in 0 until allDefinitions.length()) {
+                val item = allDefinitions.optJSONObject(i) ?: continue
+                if (item.optJSONObject("function")?.optString("name") == "request_capability") {
+                    chatTools.put(item)
+                    break
+                }
+            }
+            return chatTools
         }
         val allowed = HashSet(CORE_TOOLS)
         if ("all" in session.activeGroups) {
@@ -785,6 +799,22 @@ object AgentTools {
         )
         .put(
             tool(
+                "request_capability",
+                "开启任务所需的系统能力。无障碍/悬浮窗/通知/后台会打开系统设置并等待开启; Root 无法自动开启, 只返回状态。遇到能力缺失时先调用它, 不要直接 finish。",
+                obj()
+                    .put(
+                        "name",
+                        prop(
+                            "string",
+                            "accessibility | overlay | notification | battery | screenshot | root"
+                        )
+                    )
+                    .put("timeout_ms", prop("integer", "等待开启毫秒数, 默认 45000"))
+                    .also { it.put("required", JSONArray().put("name")) }
+            )
+        )
+        .put(
+            tool(
                 "note", "把关键信息记录到长期便签。上下文被裁剪后便签仍会保留, 最后汇总时使用。",
                 obj()
                     .put("text", prop("string", "要记录的内容"))
@@ -904,6 +934,27 @@ object AgentTools {
                     }
                 }
                 "todo_write", "todo_read" -> "由 Agent 循环直接处理"
+                "request_capability" -> {
+                    val cap = Capability.parse(args.optString("name"))
+                    if (cap == null) {
+                        "未知能力「${args.optString("name")}」; 可选: accessibility / overlay / notification / battery / screenshot / root"
+                    } else {
+                        val timeout = args.optLong("timeout_ms", 45_000)
+                            .coerceIn(3_000, 180_000)
+                        val ok = CapabilityManager.ensure(context, cap, timeout)
+                        // 能力变化后刷新本轮快照, 下一轮工具列表/门控才会放行
+                        session.caps = DeviceCapabilities.refresh(context, force = true)
+                        when {
+                            ok -> "${cap.label}已开启，继续任务。"
+                            cap == Capability.ROOT ->
+                                "Root 未授权。Root 只是可选项，不是运行前提；" +
+                                    "请继续用无障碍/OCR 完成，不要因此结束任务。"
+                            else ->
+                                "${cap.label}尚未开启。已尝试打开系统设置，任务不中断；" +
+                                    "可以先用现有能力继续，稍后再重试。"
+                        }
+                    }
+                }
                 "memory_read" -> {
                     val pkg = args.optString("package").ifBlank { AppMemory.currentPackage() }
                     val mem = AppMemory.readForTool(context, pkg)

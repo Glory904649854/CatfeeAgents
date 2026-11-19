@@ -4,6 +4,8 @@ import android.content.Context
 import android.util.Log
 import com.catfee.rootauto.agent.AgentController
 import com.catfee.rootauto.agent.AppMemory
+import com.catfee.rootauto.device.Capability
+import com.catfee.rootauto.device.CapabilityManager
 import com.catfee.rootauto.device.DeviceCapabilities
 import com.catfee.rootauto.llm.LlmSettings
 import org.json.JSONObject
@@ -113,19 +115,41 @@ object RemoteTaskRunner {
             return
         }
 
-        // Root 设备覆盖安装/强停后无障碍可能被系统重置。
-        // 先尝试恢复, 否则 input_text / observe 等工具会被能力过滤掉, Agent 只能盲点。
+        // 无障碍被系统重置时不要直接失败: 先尝试 Root 恢复, 再打开系统设置等待用户开启。
+        // 远程任务无人值守时最多等 90 秒, 期间持续把提示写进任务时间线。
         val capsBefore = DeviceCapabilities.refresh(context, force = true)
-        val accessibilityReady = DeviceCapabilities.ensureAccessibility(context)
-        if (!capsBefore.accessibility && accessibilityReady) {
-            ConsoleClient.emitEvent(
-                context, taskId, "task.notice", "info",
-                JSONObject().put("summary", "已通过 Root 自动开启无障碍服务，文字输入可用")
-            )
-        } else if (!accessibilityReady) {
+        if (!capsBefore.accessibility) {
             ConsoleClient.emitEvent(
                 context, taskId, "task.notice", "warn",
-                JSONObject().put("summary", "无障碍未开启：文字输入和读屏工具不可用")
+                JSONObject().put("summary", "无障碍未开启，正在尝试自动开启并等待…")
+            )
+            val ready = CapabilityManager.ensure(
+                context, Capability.ACCESSIBILITY, 90_000
+            ) { msg ->
+                ConsoleClient.emitEvent(
+                    context, taskId, "task.notice", "info",
+                    JSONObject().put("summary", msg)
+                )
+            }
+            if (!ready) {
+                ConsoleClient.sendCommandAck(
+                    context, commandId, taskId, "rejected", "accessibility not enabled"
+                )
+                ConsoleClient.emitEvent(
+                    context, taskId, "task.failed", "error",
+                    JSONObject()
+                        .put("summary", "无障碍未开启，已等待 90 秒")
+                        .put(
+                            "error",
+                            "请到系统设置-无障碍开启 CatfeeAgents 后重新下发；" +
+                                "Root 设备可尝试通过控制台重新连接触发自动恢复"
+                        )
+                )
+                return
+            }
+            ConsoleClient.emitEvent(
+                context, taskId, "task.notice", "info",
+                JSONObject().put("summary", "无障碍已开启，任务继续")
             )
         }
 
