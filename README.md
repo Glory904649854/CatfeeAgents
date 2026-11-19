@@ -220,4 +220,4 @@ magisk/                          # Magisk 模块
 
 ## License
 
-内部项目，未声明开源许可证。
+[Apache License 2.0](LICENSE)
