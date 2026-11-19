@@ -1,9 +1,12 @@
 package com.catfee.rootauto
 
 import android.content.BroadcastReceiver
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.util.Log
+import android.view.accessibility.AccessibilityNodeInfo
 import com.catfee.rootauto.a11y.UiObserverService
 import com.catfee.rootauto.agent.MediaState
 import com.catfee.rootauto.agent.ToolRuntime
@@ -21,6 +24,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import java.io.File
 
 /**
  * DebugReceiver —— adb 调试入口
@@ -45,6 +49,23 @@ class DebugReceiver : BroadcastReceiver() {
         Log.i(TAG, "cmd=$cmd")
         when (cmd) {
             "dump" -> dumpTree()
+            "dumpfocus" -> dumpFocus()
+            "clipset" -> clipSet(context, intent)
+            "settext" -> {
+                val text = intent.getStringExtra("text").orEmpty()
+                val ok = UiObserverService.instance?.setTextOnFocused(text) ?: false
+                val line = "SETTEXT ok=$ok text=$text"
+                Log.i(TAG, line)
+                debugOut(context, line)
+            }
+            "paste" -> scope.launch {
+                val text = intent.getStringExtra("text").orEmpty()
+                val x = intent.getIntExtra("x", 630)
+                val y = intent.getIntExtra("y", 1700)
+                val result = ToolRuntime.pasteText(context.applicationContext, text, x, y)
+                Log.i(TAG, "PASTE=$result")
+                debugOut(context, "PASTE=$result")
+            }
             "dumpcaps" -> scope.launch { dumpCaps(context) }
             "coords" -> scope.launch {
                 ScreenGeometry.displaySize()
@@ -285,6 +306,43 @@ class DebugReceiver : BroadcastReceiver() {
         Log.i(TAG, "===== END =====")
     }
 
+    private fun debugOut(context: Context, text: String) {
+        try {
+            File(context.filesDir, "debug.log").appendText(text + "\n")
+        } catch (_: Exception) {
+        }
+    }
+
+    /** 检查当前焦点节点是否可编辑; 用于排查微信这类无障碍树为空的 App */
+    private fun dumpFocus() {
+        val svc = UiObserverService.instance
+        if (svc == null) {
+            Log.w(TAG, "无障碍服务未连接")
+            return
+        }
+        val root = svc.rootInActiveWindow
+        val focus = root?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+        val rect = android.graphics.Rect()
+        focus?.getBoundsInScreen(rect)
+        val line = "FOCUS rootPkg=${root?.packageName} children=${root?.childCount} " +
+            "node=${focus?.className} pkg=${focus?.packageName} " +
+            "editable=${focus?.isEditable} text=${focus?.text} bounds=$rect"
+        Log.i(TAG, line)
+        debugOut(svc, line)
+    }
+
+    /** 测试后台能否写剪贴板 (微信输入兜底方案) */
+    private fun clipSet(context: Context, intent: Intent) {
+        val text = intent.getStringExtra("text").orEmpty()
+        try {
+            val cm = context.getSystemService(ClipboardManager::class.java)
+            cm.setPrimaryClip(ClipData.newPlainText("catfee", text))
+            Log.i(TAG, "CLIPBOARD set ok len=${text.length}")
+        } catch (e: Exception) {
+            Log.w(TAG, "CLIPBOARD set failed: ${e.message}")
+        }
+    }
+
     /** 截图并 OCR */
     private suspend fun runOcr() {
         val (bmp, err) = ScreenVision.captureBitmap()
@@ -295,9 +353,12 @@ class DebugReceiver : BroadcastReceiver() {
         try {
             val rows = OcrEngine.rowsOf(bmp)
             Log.i(TAG, "===== OCR ${rows.size} =====")
+            val sb = StringBuilder("OCR ${rows.size}\n")
             rows.forEachIndexed { i, r ->
                 Log.i(TAG, "O|$i|${r.box.left},${r.box.top},${r.box.right},${r.box.bottom}|${r.text}")
+                sb.append("O|${r.box.left},${r.box.top},${r.box.right},${r.box.bottom}|${r.text}\n")
             }
+            UiObserverService.instance?.let { debugOut(it, sb.toString()) }
             Log.i(TAG, "===== OCR END =====")
         } finally {
             bmp.recycle()

@@ -32,10 +32,11 @@ object InputDispatcher {
      * - 有 daemon + 竖屏: 返回 null, 保持 uinput 低延迟
      */
     private fun a11yForGesture(): UiObserverService? {
+        // 以服务实例为准; DeviceCapabilities 的快照可能还没刷新
+        val svc = UiObserverService.instance ?: return null
         val caps = DeviceCapabilities.current()
-        if (!caps.accessibility) return null
         if (caps.daemon && !rotated()) return null
-        return UiObserverService.instance
+        return svc
     }
 
     private suspend fun waitGestureGap() {

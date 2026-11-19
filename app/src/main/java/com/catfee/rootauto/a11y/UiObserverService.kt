@@ -323,6 +323,29 @@ class UiObserverService : AccessibilityService() {
         return null
     }
 
+    /**
+     * 键盘弹出后输入框中心的估算位置。
+     * 输入法窗口上沿往上约 42dp 就是微信/大多数 App 的输入框中心。
+     * 用于无障碍树为空的 App 做长按粘贴。
+     */
+    fun focusedInputHint(): android.graphics.Point? {
+        return try {
+            val ime = windows
+                ?.filter { it.type == android.view.accessibility.AccessibilityWindowInfo.TYPE_INPUT_METHOD }
+                ?.maxByOrNull { it.layer }
+                ?: return null
+            val top = android.graphics.Rect().also { ime.getBoundsInScreen(it) }.top
+            if (top <= 0) return null
+            val dm = resources.displayMetrics
+            android.graphics.Point(
+                dm.widthPixels / 2,
+                (top - (42 * dm.density).toInt()).coerceAtLeast(0)
+            )
+        } catch (_: Exception) {
+            null
+        }
+    }
+
     /** 当前活动窗口的包名, 比每轮跑 root dumpsys 快很多 */
     fun currentPackage(): String {
         return try {
@@ -460,6 +483,17 @@ class UiObserverService : AccessibilityService() {
                 ?.filter { !isSystemOverlay(it.root?.packageName?.toString().orEmpty()) }
                 ?.sortedByDescending { it.layer }
                 .orEmpty()
+            // 有焦点的活动应用窗口优先; 排除输入法/系统浮层(它们的 root 可能带 EditText),
+            // 即使内容为空(微信这类屏蔽无障碍的 App)也不能退回本应用后台窗口。
+            val active = windows?.firstOrNull {
+                it.isActive &&
+                    it.type == android.view.accessibility.AccessibilityWindowInfo.TYPE_APPLICATION
+            }
+            val activeRoot = active?.root
+            val activePkg = activeRoot?.packageName?.toString().orEmpty()
+            if (activeRoot != null && activePkg.isNotBlank() && activePkg != packageName) {
+                return activeRoot
+            }
             // 本应用的后台窗口层级可能高于前台 App(悬浮状态条/最近任务动画),
             // 优先取其他应用窗口; 只剩自己时才回退, 避免前台包名被误判成 com.catfee.rootauto。
             val external = appWindows.filter { it.root?.packageName?.toString() != packageName }
@@ -468,8 +502,25 @@ class UiObserverService : AccessibilityService() {
                 val r = w.root
                 if (r != null) return r
             }
-            // 没有应用窗口时(如锁屏、桌面动画中)退回系统默认
-            rootInActiveWindow
+            // 没有应用窗口时(如锁屏、桌面动画中)退回系统默认;
+            // 但如果当前前台不是本应用, 而默认根又是本应用后台窗口, 返回 null 让上层走 OCR,
+            // 绝不能把输入写进我们自己的输入框。
+            val fallback = rootInActiveWindow
+            val fallbackPkg = fallback?.packageName?.toString().orEmpty()
+            // 输入法窗口也可能成为 rootInActiveWindow, 绝不能拿它当 App 根节点
+            val imeRoots = windows
+                ?.filter {
+                    it.type == android.view.accessibility.AccessibilityWindowInfo.TYPE_INPUT_METHOD
+                }
+                ?.mapNotNull { it.root }
+                .orEmpty()
+            if (fallback != null && imeRoots.any { it == fallback }) return null
+            if (fallbackPkg == packageName &&
+                lastPackage.isNotBlank() && lastPackage != packageName
+            ) {
+                return null
+            }
+            fallback
         } catch (e: Exception) {
             Log.w(TAG, "选择根窗口失败: ${e.message}")
             try {
@@ -689,6 +740,14 @@ class UiObserverService : AccessibilityService() {
      *     中文无法用 KEYCODE 逐字模拟, 必须经过输入法, 而输入法联想会污染内容;
      *     ACTION_SET_TEXT 直接改控件的 Editable, 不经过输入法, 中文与特殊字符都能精确写入。
      */
+    private fun dLog(text: String) {
+        if (!com.catfee.rootauto.BuildConfig.DEBUG) return
+        try {
+            java.io.File(filesDir, "debug.log").appendText(text + "\n")
+        } catch (_: Exception) {
+        }
+    }
+
     @Suppress("DEPRECATION")
     fun setTextOnFocused(text: String): Boolean {
         return try {
@@ -702,6 +761,51 @@ class UiObserverService : AccessibilityService() {
                 ?: findFirstEditable(root, 0)
             if (target == null) {
                 Log.w(TAG, "setText 失败: 没有可编辑控件")
+                return false
+            }
+            // 微信等 App 会返回 className=null 的幽灵节点, performAction 返回 true 但不生效
+            if (target.className == null) {
+                dLog("setText 拒绝幽灵节点: pkg=${target.packageName} class=null")
+                return false
+            }
+            val targetBounds = android.graphics.Rect()
+            target.getBoundsInScreen(targetBounds)
+            if (targetBounds.isEmpty) {
+                dLog("setText 拒绝空节点: pkg=${target.packageName} bounds=$targetBounds")
+                return false
+            }
+            // 只允许写当前活动的应用窗口; 拒绝本应用后台窗口/输入法/系统浮层里的输入框
+            val targetPkg = target.packageName?.toString().orEmpty()
+            val fgPkg = rootInActiveWindow?.packageName?.toString().orEmpty()
+                .ifBlank { lastPackage }
+            if (targetPkg == packageName && fgPkg.isNotBlank() && fgPkg != packageName) {
+                Log.w(TAG, "setText 拒绝写入本应用后台窗口: target=$targetPkg fg=$fgPkg")
+                return false
+            }
+            val imePkgs = windows
+                ?.filter {
+                    it.type == android.view.accessibility.AccessibilityWindowInfo.TYPE_INPUT_METHOD
+                }
+                ?.mapNotNull { it.root?.packageName?.toString() }
+                ?.toSet()
+                .orEmpty()
+            if (targetPkg.isNotBlank() && targetPkg in imePkgs) {
+                Log.w(TAG, "setText 拒绝写入输入法窗口: target=$targetPkg")
+                return false
+            }
+            val activePkg = windows?.firstOrNull {
+                it.isActive &&
+                    it.type == android.view.accessibility.AccessibilityWindowInfo.TYPE_APPLICATION
+            }?.root?.packageName?.toString().orEmpty()
+            dLog(
+                "setText target=$targetPkg/${target.className} fg=$fgPkg " +
+                    "active=$activePkg ime=$imePkgs"
+            )
+            if (activePkg.isNotBlank() && targetPkg.isNotBlank() && targetPkg != activePkg) {
+                Log.w(
+                    TAG,
+                    "setText 拒绝写入非活动窗口: target=$targetPkg active=$activePkg"
+                )
                 return false
             }
             val args = Bundle().apply {

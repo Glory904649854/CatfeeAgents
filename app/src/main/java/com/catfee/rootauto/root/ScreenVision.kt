@@ -10,6 +10,7 @@ import com.catfee.rootauto.device.ScreenshotSource
 import com.catfee.rootauto.llm.LlmClient
 import com.catfee.rootauto.llm.LlmSettings
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
@@ -110,6 +111,17 @@ object ScreenVision {
      * 注意: 调用方负责 recycle 返回的 Bitmap
      */
     suspend fun captureBitmap(): Pair<Bitmap?, String> = withContext(Dispatchers.IO) {
+        // 截图前临时隐藏本应用悬浮状态条, 避免它进入 OCR/视觉结果干扰模型
+        val hidden = com.catfee.rootauto.service.AgentStatusService.hideOverlayForCapture()
+        try {
+            if (hidden) delay(90)
+            captureRaw()
+        } finally {
+            if (hidden) com.catfee.rootauto.service.AgentStatusService.showOverlayAfterCapture()
+        }
+    }
+
+    private suspend fun captureRaw(): Pair<Bitmap?, String> = withContext(Dispatchers.IO) {
         val caps = DeviceCapabilities.current()
 
         // 1) Root daemon 是首选: 更快, 且不受无障碍截图频率限制。

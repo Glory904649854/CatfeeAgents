@@ -57,6 +57,7 @@ class AgentStatusService : Service() {
         private const val EXTRA_SESSION_ID = "session_id"
 
         @Volatile private var alive = false
+        @Volatile private var instance: AgentStatusService? = null
 
         fun start(context: Context) {
             val intent = Intent(context, AgentStatusService::class.java)
@@ -72,6 +73,22 @@ class AgentStatusService : Service() {
                 )
             } catch (_: Exception) {
             }
+        }
+
+        /**
+         * 截图/OCR 前临时隐藏悬浮状态条, 避免状态条文字进入识别结果。
+         * 返回 true 表示当前确实有悬浮窗, 调用方截图后要 restore。
+         */
+        fun hideOverlayForCapture(): Boolean {
+            val service = instance ?: return false
+            val view = service.overlayView ?: return false
+            service.captureHandler.post { view.visibility = View.INVISIBLE }
+            return true
+        }
+
+        fun showOverlayAfterCapture() {
+            val service = instance ?: return
+            service.captureHandler.post { service.overlayView?.visibility = View.VISIBLE }
         }
 
         private fun phaseLabel(phase: String): String = when (phase) {
@@ -109,6 +126,7 @@ class AgentStatusService : Service() {
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private val captureHandler = android.os.Handler(android.os.Looper.getMainLooper())
     private var wasRunning = false
     private var lastState: AgentController.State? = null
 
@@ -124,6 +142,7 @@ class AgentStatusService : Service() {
     override fun onCreate() {
         super.onCreate()
         alive = true
+        instance = this
         createChannel()
         startForeground(
             NOTIFICATION_ID,
@@ -245,6 +264,7 @@ class AgentStatusService : Service() {
 
     override fun onDestroy() {
         alive = false
+        instance = null
         removeOverlay()
         scope.cancel()
         super.onDestroy()
@@ -386,8 +406,6 @@ class AgentStatusService : Service() {
             // 触摸不受影响, 暂停/停止按钮仍可正常点击。
             view.importantForAccessibility =
                 View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
-            val statusBar = resources.getIdentifier("status_bar_height", "dimen", "android")
-                .takeIf { it > 0 }?.let { resources.getDimensionPixelSize(it) } ?: 0
             val lp = WindowManager.LayoutParams(
                 WindowManager.LayoutParams.WRAP_CONTENT,
                 WindowManager.LayoutParams.WRAP_CONTENT,
@@ -396,10 +414,10 @@ class AgentStatusService : Service() {
                     WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
                 PixelFormat.TRANSLUCENT
             ).apply {
-                gravity = Gravity.TOP or Gravity.END
-                x = (12 * resources.displayMetrics.density).toInt()
-                // 避开顶部标题栏/菜单按钮, 固定在其下方
-                y = statusBar + (64 * resources.displayMetrics.density).toInt()
+                // 贴右侧垂直居中: 避开顶部关闭按钮和底部 tab, 不挡广告关闭
+                gravity = Gravity.END or Gravity.CENTER_VERTICAL
+                x = (10 * resources.displayMetrics.density).toInt()
+                y = 0
                 setTitle("Catfee Agent Status")
             }
             wm.addView(view, lp)
@@ -431,7 +449,7 @@ class AgentStatusService : Service() {
                     stopConfirmUntil = now + 3_000
                     (btn as? TextView)?.apply {
                         text = "确认"
-                        textSize = 10f
+                        textSize = 9f
                     }
                     scope.launch {
                         delay(3_100)
@@ -455,7 +473,7 @@ class AgentStatusService : Service() {
     private fun resetStopButton(view: View?) {
         (view as? TextView)?.apply {
             text = "×"
-            textSize = 18f
+            textSize = 14f
         }
     }
 
@@ -497,7 +515,9 @@ class AgentStatusService : Service() {
     private fun updateOverlay(s: AgentController.State) {
         val view = overlayView ?: return
         view.findViewById<TextView>(R.id.overlay_title)?.text =
-            "Step ${s.stepNumber} · ${phaseLabel(s.phase)} · ${elapsedText(s.startedAtElapsed)}"
+            "Step ${s.stepNumber} · ${phaseLabel(s.phase)}"
+        view.findViewById<TextView>(R.id.overlay_time)?.text =
+            elapsedText(s.startedAtElapsed)
         view.findViewById<TextView>(R.id.overlay_pause)?.apply {
             text = if (s.paused) "▶" else "Ⅱ"
             contentDescription = if (s.paused) "继续" else "暂停"
@@ -509,10 +529,15 @@ class AgentStatusService : Service() {
             alpha = if (s.running) 1f else 0.45f
         }
         val age = eventAgeSec(s)
+        val raw = s.lastEventText.ifBlank { s.currentTool }.ifBlank { "运行中" }.trim()
+        val detailText = if (raw.startsWith("{") || raw.startsWith("[")) {
+            s.currentTool.ifBlank { "执行中" }
+        } else {
+            raw.take(38)
+        }
         val detail = buildString {
-            append(s.lastEventText.ifBlank { s.currentTool }.ifBlank { "运行中" }.take(60))
+            append(detailText)
             if (age > 0) append(" · ").append(age).append("s前")
-            if (s.phase == "waiting_llm" && age > 60) append(" · 等待较久")
         }
         view.findViewById<TextView>(R.id.overlay_detail)?.text = detail
         view.findViewById<View>(R.id.overlay_dot)?.backgroundTintList =

@@ -1,5 +1,7 @@
 package com.catfee.rootauto.agent
 
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Rect
@@ -212,8 +214,8 @@ object ToolRuntime {
         return ScreenGeometry.displaySize()
     }
 
-    /** 按文字/描述查找节点, 返回前 20 条 */
-    fun findText(keyword: String, exact: Boolean, byDesc: Boolean): String {
+    /** 按文字/描述查找节点, 无障碍无命中时自动降级 OCR (微信等自绘/隐藏节点 App) */
+    suspend fun findText(keyword: String, exact: Boolean, byDesc: Boolean): String {
         val svc = UiObserverService.instance ?: return "无障碍服务未连接"
         if (keyword.isBlank()) return "keyword 为空"
         val tree = svc.dumpTree(800)
@@ -221,7 +223,7 @@ object ToolRuntime {
             val v = if (byDesc) n.desc else n.text
             if (exact) v == keyword else v.contains(keyword)
         }.take(20)
-        if (hits.isEmpty()) return "未找到「$keyword」"
+        if (hits.isEmpty()) return findTextByOcr(keyword, exact)
         return buildString {
             append("找到 ${hits.size} 个「$keyword」:\n")
             hits.forEach { n ->
@@ -234,6 +236,34 @@ object ToolRuntime {
                 append(" bounds=(").append(n.bounds.centerX()).append(',').append(n.bounds.centerY()).append(')')
                 append('\n')
             }
+        }
+    }
+
+    /** 无障碍树读不到时用 OCR 找文字, 返回坐标供 tap 使用 */
+    private suspend fun findTextByOcr(keyword: String, exact: Boolean): String {
+        val (bmp, err) = ScreenVision.captureBitmap()
+        if (bmp == null) {
+            return "未找到「$keyword」(无障碍无命中, OCR 截图失败: $err)"
+        }
+        return try {
+            val rows = OcrEngine.rowsOf(bmp)
+            val hits = rows.filter {
+                if (exact) it.text.trim() == keyword else it.text.contains(keyword)
+            }.take(12)
+            if (hits.isEmpty()) {
+                "未找到「$keyword」(无障碍树和 OCR 均无命中)"
+            } else {
+                buildString {
+                    append("OCR 找到 ${hits.size} 个「$keyword」(无障碍树无命中):\n")
+                    hits.forEach { r ->
+                        append("  \"").append(r.text.take(80)).append("\" (")
+                        append(r.cx).append(',').append(r.cy).append(")\n")
+                    }
+                    append("可用 tap(x,y) 点击上面的坐标")
+                }
+            }
+        } finally {
+            bmp.recycle()
         }
     }
 
@@ -433,8 +463,9 @@ object ToolRuntime {
         val picked = pickClickTarget(tree, w, h, matches)
         if (picked.target == null) {
             if (picked.ambiguous.isNotEmpty()) return ambiguousHint(keyword, picked.ambiguous)
-            return if (tree.any(matches)) offscreenHint(keyword)
-            else "未找到「$keyword」, 先用 find_text 看候选"
+            if (tree.any(matches)) return offscreenHint(keyword)
+            // 微信等 App 不暴露无障碍节点时, 用 OCR 找到文字再点坐标
+            return tapTextByOcr(keyword, exact)
         }
         val target = picked.target
         val cx = target.bounds.centerX()
@@ -444,6 +475,133 @@ object ToolRuntime {
         val ok = InputDispatcher.tap(cx, cy)
         return if (ok) "已发送点击「$keyword」($cx,$cy); 请用 observe/verify_changed 确认界面是否变化"
         else "点击失败: 坐标无法注入或 daemon 无响应"
+    }
+
+    /**
+     * 无障碍无法输入时: 写剪贴板 → 点输入框聚焦 → 点输入法工具栏里的剪贴板建议。
+     * 微信这类不暴露节点、但允许后台写剪贴板的 App 可以用这条路径。
+     * 如果输入法没有剪贴板建议, 再退回长按输入框 → 点「粘贴」。
+     */
+    suspend fun pasteText(context: Context, text: String, x: Int, y: Int): String {
+        try {
+            val cm = context.getSystemService(ClipboardManager::class.java)
+            cm.setPrimaryClip(ClipData.newPlainText("CatfeeAgents", text))
+        } catch (e: Exception) {
+            return "剪贴板写入失败: ${e.message}; 无法自动输入"
+        }
+        // 先点输入框让它聚焦并弹出键盘
+        InputDispatcher.tap(x, y)
+        delay(900)
+
+        // 键盘弹出后输入框会上移; 输入法窗口不可见时按屏幕高度估算输入框位置
+        val (sw, sh) = displaySize()
+        val hint = UiObserverService.instance?.focusedInputHint()
+        val px = hint?.x ?: (sw / 2)
+        val py = hint?.y ?: (sh * 0.59f).toInt()
+        dLog(context, "pasteText hint=$hint px=$px py=$py")
+
+        val needle = text.trim().take(6)
+        val suggestion = findSuggestionHit(needle, py)
+        if (suggestion != null) {
+            // OCR 行可能把整个输入法工具栏合并成一行, 必须点具体词块的位置
+            val ok = InputDispatcher.tap(suggestion.box.centerX(), suggestion.box.centerY())
+            delay(700)
+            if (ok && pastedConfirmed(needle, py)) {
+                return "已通过输入法剪贴板建议粘贴 ${text.length} 个字符; 输入框已出现内容"
+            }
+            dLog(context, "pasteText suggestion tap ok=$ok but not confirmed")
+        }
+
+        // 输入法没有剪贴板建议时的兜底: 长按 → 粘贴
+        val longPressOk = InputDispatcher.longPress(px, py, 650)
+        dLog(context, "pasteText longPress=$longPressOk at $px,$py")
+        if (!longPressOk) {
+            return "剪贴板已写入, 但长按输入框失败"
+        }
+        delay(1100)
+        val tapped = tapTextByOcr("粘贴", exact = false)
+        if (!tapped.startsWith("未找到")) {
+            delay(500)
+            return "已通过长按粘贴 ${text.length} 个字符; 请 observe/OCR 确认输入框内容"
+        }
+        // 部分 ROM 的截图不包含系统弹出菜单, OCR 看不到「粘贴」;
+        // 菜单固定在输入框上方, 第一项就是粘贴, 按输入框位置盲点。
+        val blindX = (sw * 0.07f).toInt()
+        val blindY = (py - 80).coerceAtLeast(0)
+        val blindOk = InputDispatcher.tap(blindX, blindY)
+        dLog(context, "pasteText blind tap=$blindOk at $blindX,$blindY")
+        delay(500)
+        return if (blindOk) {
+            "已通过剪贴板粘贴 ${text.length} 个字符 (菜单坐标); 请 observe/OCR 确认输入框内容"
+        } else {
+            "剪贴板已写入, 但粘贴菜单点击失败"
+        }
+    }
+
+    /** 调试输出到 files/debug.log; vivo 的 logcat 缓冲区经常拿不到应用日志 */
+    private fun dLog(context: Context, text: String) {
+        if (!com.catfee.rootauto.BuildConfig.DEBUG) return
+        try {
+            File(context.filesDir, "debug.log").appendText(text + "\n")
+        } catch (_: Exception) {
+        }
+    }
+
+    /** 粘贴后确认: 输入框区域出现文本, 或出现发送按钮 */
+    private suspend fun pastedConfirmed(needle: String, inputY: Int): Boolean {
+        val (bmp, _) = ScreenVision.captureBitmap()
+        if (bmp == null) return false
+        return try {
+            val rows = OcrEngine.rowsOf(bmp)
+            rows.any { it.text.contains("发送") } ||
+                rows.any {
+                    it.text.contains(needle) &&
+                        it.cy in (inputY - 220)..(inputY + 180)
+                }
+        } finally {
+            bmp.recycle()
+        }
+    }
+
+    /** 在输入框下方的输入法工具栏区域找剪贴板建议; 返回具体词块而不是整行 */
+    private suspend fun findSuggestionHit(
+        needle: String,
+        inputY: Int
+    ): OcrEngine.OcrLine? {
+        if (needle.isBlank()) return null
+        val (bmp, _) = ScreenVision.captureBitmap()
+        if (bmp == null) return null
+        return try {
+            val rows = OcrEngine.rowsOf(bmp)
+            val row = rows.firstOrNull { r ->
+                r.text.contains(needle) && r.cy > inputY && r.cy < inputY + 480
+            } ?: rows.firstOrNull { r -> r.text.contains(needle) && r.cy > inputY }
+            val part = row?.parts?.firstOrNull { it.text.contains(needle) }
+            part ?: row?.let { OcrEngine.OcrLine(it.text, it.box) }
+        } finally {
+            bmp.recycle()
+        }
+    }
+
+    /** 无障碍无命中时用 OCR 找到文字并点坐标 */
+    private suspend fun tapTextByOcr(keyword: String, exact: Boolean): String {
+        val (bmp, err) = ScreenVision.captureBitmap()
+        if (bmp == null) return "未找到「$keyword」(无障碍无命中, OCR 截图失败: $err)"
+        val hit = try {
+            OcrEngine.rowsOf(bmp).firstOrNull {
+                if (exact) it.text.trim() == keyword else it.text.contains(keyword)
+            }
+        } finally {
+            bmp.recycle()
+        }
+        if (hit == null) return "未找到「$keyword」, 无障碍树和 OCR 都没有"
+        val ok = InputDispatcher.tap(hit.cx, hit.cy)
+        return if (ok) {
+            "OCR 命中「${hit.text.take(40)}」(${hit.cx},${hit.cy}), 已发送点击; " +
+                "请 observe/verify_changed 确认"
+        } else {
+            "OCR 命中「${hit.text.take(40)}」但点击失败"
+        }
     }
 
     /** 按 contentDescription 点击 */
@@ -535,6 +693,12 @@ object ToolRuntime {
             if (tree.any { it.text.contains(keyword) || it.desc.contains(keyword) }) {
                 return "第 ${i + 1} 次滚动前已看到「$keyword」"
             }
+            // 无障碍树为空的 App (如微信) 用 OCR 判断当前屏
+            if (tree.none { it.text.isNotBlank() || it.desc.isNotBlank() } &&
+                ocrContains(keyword)
+            ) {
+                return "第 ${i + 1} 次滚动前 OCR 看到「$keyword」"
+            }
             val (w, h) = displaySize()
             val startY = (h * 0.82f).toInt()
             val endY = (h * 0.34f).toInt()
@@ -543,10 +707,23 @@ object ToolRuntime {
             delay(700)
         }
         val tree = UiObserverService.instance?.dumpTree(800).orEmpty()
-        return if (tree.any { it.text.contains(keyword) || it.desc.contains(keyword) }) {
-            "滚动 ${maxScrolls} 次后找到「$keyword」"
-        } else {
-            "滚动 ${maxScrolls} 次仍未找到「$keyword」"
+        return when {
+            tree.any { it.text.contains(keyword) || it.desc.contains(keyword) } ->
+                "滚动 $maxScrolls 次后找到「$keyword」"
+            tree.none { it.text.isNotBlank() || it.desc.isNotBlank() } &&
+                ocrContains(keyword) -> "滚动 $maxScrolls 次后 OCR 找到「$keyword」"
+            else -> "滚动 $maxScrolls 次仍未找到「$keyword」"
+        }
+    }
+
+    /** OCR 当前屏幕是否包含关键词; 仅用于无障碍树为空的降级路径 */
+    private suspend fun ocrContains(keyword: String): Boolean {
+        val (bmp, _) = ScreenVision.captureBitmap()
+        if (bmp == null) return false
+        return try {
+            OcrEngine.rowsOf(bmp).any { it.text.contains(keyword) }
+        } finally {
+            bmp.recycle()
         }
     }
 

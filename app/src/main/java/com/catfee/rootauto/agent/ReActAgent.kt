@@ -243,6 +243,11 @@ object ReActAgent {
         - 能力不足时: 先 request_capability(name=accessibility|overlay|notification|battery|screenshot);
           它会自动尝试开启或打开系统设置并等待。Root 无法自动开启, 但 Root 只是可选项,
           禁止因为没有 Root 直接 finish。只有用户明确拒绝或等待超时, 才改用可用工具继续或说明限制。
+        - 如果 observe 提示「无障碍树为空, 已切换本地 OCR」(微信等屏蔽无障碍的 App):
+          用 OCR 坐标 + tap 操作; 输入文字先 OCR 找到输入框中心, 再 input_text(text, x, y)
+          走剪贴板粘贴; 发送按钮同样用 OCR 的「发送」坐标或 tap_text。不要反复尝试不存在的节点。
+          OCR 能读页面时不要用 see_screen, 它很慢; 只在 OCR 无法判断时调用一次。
+        - launch_app 遇到应用分身选择框会自动选主应用; 如果仍停在选择框, 用 tap_text(应用名) 选不带「Ⅱ」的那个。
         - load_tools 返回「当前不可用」时, 不要重复加载同一组, 改用可用工具; 需要无障碍/截图时先 request_capability。
         - 查 Android 版本/型号/系统属性时, 先 load_tools(apps,system), 优先用
           get_prop("ro.build.version.release") / get_prop("ro.product.model") 或 settings_get;

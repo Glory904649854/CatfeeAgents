@@ -12,11 +12,13 @@ import com.catfee.rootauto.device.CapabilityManager
 import com.catfee.rootauto.device.DeviceCapabilities
 import com.catfee.rootauto.llm.LlmSettings
 import com.catfee.rootauto.ocr.LongOcr
+import com.catfee.rootauto.ocr.OcrEngine
 import com.catfee.rootauto.root.DaemonClient
 import com.catfee.rootauto.root.InputDispatcher
 import com.catfee.rootauto.root.RootShell
 import com.catfee.rootauto.root.ScreenGeometry
 import com.catfee.rootauto.root.ScreenVision
+import kotlinx.coroutines.delay
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -380,9 +382,12 @@ object AgentTools {
         )
         .put(
             tool(
-                "input_text", "向当前聚焦的输入框写入文本, 支持中文。会先清空原有内容。",
+                "input_text",
+                "向当前聚焦的输入框写入文本, 支持中文。无障碍不可用的 App(如微信)可传输入框中心 x,y, 自动走剪贴板粘贴。",
                 obj()
                     .put("text", prop("string", "要写入的完整文本"))
+                    .put("x", prop("integer", "可选: 输入框中心 x, 从 observe/ocr 坐标获取"))
+                    .put("y", prop("integer", "可选: 输入框中心 y"))
                     .also { it.put("required", JSONArray().put("text")) }
             )
         )
@@ -1158,11 +1163,15 @@ object AgentTools {
                 "input_text" -> {
                     val text = args.optString("text")
                     val svc = UiObserverService.instance
+                    val x = args.optInt("x", -1)
+                    val y = args.optInt("y", -1)
                     when {
                         svc == null -> "输入失败: 无障碍服务未连接"
                         text.isEmpty() -> "输入失败: text 为空"
                         svc.setTextOnFocused(text) -> "已输入 ${text.length} 个字符"
-                        else -> "输入失败: 当前没有可编辑的输入框, 请先点击输入框"
+                        x >= 0 && y >= 0 -> ToolRuntime.pasteText(context, text, x, y)
+                        else -> "输入失败: 当前页面没有可编辑节点(该 App 可能屏蔽无障碍)。" +
+                            "从 observe/ocr 取得输入框中心坐标后, 用 input_text(text, x, y) 走剪贴板粘贴。"
                     }
                 }
                 "key" -> keyEvent(args.optString("name"))
@@ -1402,13 +1411,56 @@ object AgentTools {
             session.lastObservedHash = hash
             return "$text\nhash=$hash"
         }
-        // 完整树也没有可用文字 (纯画布 / Surface / 自绘控件) → 视觉降级
+        // 完整树也没有可用文字 (纯画布 / Surface / 自绘控件 / 微信这类隐藏节点) → 先本地 OCR
+        val ocrText = try {
+            ocrScreenText()
+        } catch (e: Exception) {
+            Log.w(TAG, "observe OCR 降级失败: ${e.message}")
+            ""
+        }
+        if (ocrText.isNotBlank()) {
+            val text = buildString {
+                append("Screen: ${screenW}x${screenH} rotation=${ScreenGeometry.rotationLabel()}")
+                if (svc.currentActivityName().isNotBlank()) {
+                    append(" | Activity: ").append(svc.currentActivityName())
+                }
+                append("\n[无障碍树为空, 已切换本地 OCR; 用 tap(x,y) 或 tap_text 操作]\n")
+                append(ocrText)
+            }
+            val hash = Integer.toHexString(text.hashCode())
+            if (hash == session.lastObservedHash) {
+                return "界面未变化 (hash=$hash)。不要重复 observe; " +
+                    "需要定位用 find_text, 确认动作是否生效用 verify_changed。"
+            }
+            session.lastObservedHash = hash
+            return "$text\nhash=$hash"
+        }
         if (provider == null || !provider.usable) {
-            return "无障碍读到 0 个元素, 且未配置可用的视觉模型, 无法降级识别。"
+            return "无障碍读到 0 个元素, 本地 OCR 也未识别到文字, 且未配置可用的视觉模型, 无法降级识别。"
         }
         val v = ScreenVision.describeScreen(provider)
         return if (v.ok) "[视觉降级识别, 耗时 ${v.elapsedMs}ms]\n${v.text}"
         else "无障碍读到 0 个元素, 视觉降级也失败: ${v.error}"
+    }
+
+    /** 本地 OCR 当前屏幕, 返回 "x,y 文本" 行; 用于无障碍树为空的 App */
+    private suspend fun ocrScreenText(maxLines: Int = 80): String {
+        val (bmp, err) = ScreenVision.captureBitmap()
+        if (bmp == null) {
+            Log.w(TAG, "OCR 截图失败: $err")
+            return ""
+        }
+        return try {
+            val rows = OcrEngine.rowsOf(bmp)
+            if (rows.isEmpty()) "" else buildString {
+                rows.take(maxLines).forEach { r ->
+                    append('(').append(r.cx).append(',').append(r.cy).append(") ")
+                    append(r.text).append('\n')
+                }
+            }
+        } finally {
+            bmp.recycle()
+        }
     }
 
     /**
@@ -1469,6 +1521,12 @@ object AgentTools {
     private suspend fun launchApp(context: Context, pkg: String): String {
         if (pkg.isBlank()) return "启动失败: 包名为空"
         val intentError = AppLauncher.launchPackage(context, pkg)
+        delay(900)
+        // vivo/部分 ROM 的应用分身会先弹「选择要使用的应用」; 自动选主应用, 不让模型卡住
+        if (pickDualAppChooser(context, pkg)) {
+            delay(900)
+            return "已启动 $pkg (已自动选择主应用, 跳过应用分身选择框)"
+        }
         if (intentError == null) return "已启动 $pkg"
 
         if (RootShell.isAvailable()) {
@@ -1480,5 +1538,40 @@ object AgentTools {
             return "启动 $pkg 可能失败: ${r.stdout.take(160)}"
         }
         return intentError
+    }
+
+    /**
+     * 应用分身选择框: 选主应用（文案与 App 名称完全一致，且不含 Ⅱ/分身）。
+     * 只处理系统分身选择器, 不碰普通分享/打开方式弹窗。
+     */
+    private suspend fun pickDualAppChooser(context: Context, pkg: String): Boolean {
+        val foreground = try {
+            AppMemory.currentPackage()
+        } catch (_: Exception) {
+            ""
+        }
+        val chooserPackages = setOf(
+            "com.vivo.doubleinstance",
+            "com.android.intentresolver",
+            "com.android.internal.app"
+        )
+        if (foreground !in chooserPackages) return false
+        val svc = UiObserverService.instance ?: return false
+        val label = try {
+            val info = context.packageManager.getApplicationInfo(pkg, 0)
+            context.packageManager.getApplicationLabel(info).toString()
+        } catch (_: Exception) {
+            ""
+        }
+        val candidates = svc.dumpTree(400).filter { n ->
+            val t = n.text.ifBlank { n.desc }
+            t.isNotBlank() &&
+                !t.contains("Ⅱ") && !t.contains("分身") &&
+                (t == label || (label.isNotBlank() && t.contains(label)))
+        }
+        val target = candidates.firstOrNull { it.clickable }
+            ?: candidates.firstOrNull()
+            ?: return false
+        return InputDispatcher.tap(target.bounds.centerX(), target.bounds.centerY())
     }
 }
