@@ -337,18 +337,14 @@ object ReActAgent {
                 "开启后继续任务；如果用户没有开启，改用 ocr + tap 坐标继续，不要直接 finish。" +
                 "等待期间不要重复调用 request_capability。"
         }
-        val leanHint = if (AgentTools.LEAN_MODE) {
-            "\n\n===== 精简工具模式 =====\n" +
-                "可用工具: observe, tap, swipe, input, key, wait, find, scroll, open, " +
-                "todo_write/todo_read, note, memory, request_capability, finish。\n" +
-                "- 看页面只用 observe（无障碍为空会自动 OCR），不要找 see_screen/read_page。\n" +
-                "- 点击用 tap(by=text|desc|id|xy, value=...)，滑动用 swipe(direction=...)。\n" +
-                "- 打开应用用 open(app=\"中国移动\")，支持应用名关键字，不需要先查包名。\n" +
-                "- 输入用 input(text=..., x=..., y=...)，无节点时自动剪贴板粘贴。\n" +
-                "- 没有 load_tools，所有需要的工具已常驻。"
-        } else {
-            ""
-        }
+        val leanHint = "\n\n===== 轻量工具集 =====\n" +
+            "可用工具: observe, ocr, tap, swipe, input, key, wait, find, scroll, open, " +
+            "todo_write/todo_read, note, memory, request_capability, finish。\n" +
+            "- 看页面用 observe（无障碍为空会自动 OCR）；需要整屏 OCR 时用 ocr。\n" +
+            "- 点击用 tap(by=text|desc|id|xy, value=...)，滑动用 swipe(direction=...)。\n" +
+            "- 打开应用用 open(app=\"中国移动\")，支持应用名关键字，不需要先查包名。\n" +
+            "- 输入用 input(text=..., x=..., y=...)，无节点时自动剪贴板粘贴。\n" +
+            "- 没有 load_tools/see_screen/read_page，所有需要的工具已常驻。"
         if (traceTaskId.isNotBlank()) {
             warmupScope.launch { PaddleOcrEngine.warmUp(context.applicationContext) }
         }
@@ -796,12 +792,7 @@ object ReActAgent {
                         }
                         toolSession.agentMode = true
                         AgentTools.activateForGoal(toolSession, goal)
-                        val entered = if (AgentTools.LEAN_MODE) {
-                            "已进入手机操作模式，精简工具已就绪。先 observe 当前页面。"
-                        } else {
-                            "已进入手机操作模式, 核心工具已加载。先 observe 确认页面; " +
-                                "需要长截图/视觉/答题/文件/shell 等高级能力时调用 load_tools。"
-                        }
+                        val entered = "已进入手机操作模式，轻量工具集已就绪。先 observe 当前页面。"
                         onEvent(Event("result", entered, tool = call.name))
                         toolTraces.add(
                             AgentTrace.ToolTrace(

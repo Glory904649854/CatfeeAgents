@@ -192,56 +192,26 @@ flowchart LR
 
 ## 工具系统
 
-默认启用 **精简工具模式**（15 个工具，见下节）。关闭精简模式（`AgentTools.LEAN_MODE = false`）时才加载下面的完整核心工具：
+工具集固定为 16 个轻量工具，不再提供“精简/完整”模式切换：
 
 ```text
-observe  tap  tap_node  swipe  input_text  key  launch_app  open_url
-wait  wait_for_text  find_text  scroll_to_text  get_activity  ocr
-verify_text  verify_changed  note  todo_write  memory_read  memory_write  memory_search  request_capability  finish
-```
-
-### 精简工具模式（默认）
-
-为减少每轮 schema 与选择成本，默认只暴露：
-
-```text
-enter_agent_mode  observe  tap  swipe  input  key  wait  find  scroll  open
-todo_write  todo_read  note  memory  request_capability  finish
+enter_agent_mode  observe  ocr  tap  swipe  input  key  wait
+find  scroll  open  todo_write  todo_read  note  memory
+request_capability  finish
 ```
 
 - `tap(by=text|desc|id|xy, value=...)` 合并了 `tap_text/tap_node/tap_desc/tap_id/long_press/double_tap`
 - `swipe(direction=...)` 合并了坐标滑动与方向滑动
 - `open(app="中国移动")` 支持应用名关键字，不需要先 `list_packages` 查包名
+- `input(text, x, y)` 在无障碍没有可编辑节点时自动走剪贴板粘贴
 - `observe` 在无障碍树为空时自动 OCR；`find/tap/scroll` 也会 OCR 兜底
+- `ocr` 保留为整屏 OCR 入口，用于图片/WebView 等需要读文字的场景
 - `memory` 统一了 read/write/search/list/delete
 - 不再暴露 `load_tools/see_screen/read_page/screenshot/verify_*` 等慢速或低频入口
-- 旧工具实现保留在分发表里，`LEAN_MODE=false` 可随时回退
 
-实测（V2302A）：中国移动三项拨测 **35 步**完成（旧模式 49 步）；微信朋友圈完整读取 **13 步**完成。
+旧的 60 个工具定义与实现仍保留在代码内部，仅用于兼容历史会话，不暴露给模型。
 
-其余能力按组加载（`load_tools`，也可由任务关键词自动激活）：
-
-| 组 | 工具 | 用途 |
-| --- | --- | --- |
-| `inspect` | `read_page` `screenshot` `long_ocr` `see_screen` | 完整页面、截图、滚动长图、视觉识别 |
-| `media` | `media_state` `media_speed` `wait_media` | 播放进度、倍速、按进度等待 |
-| `form` | `list_options` `verify_option` `verify_question` `answer_form` `ask_llm` `second_opinion` | 通用选项式表单、答题、复核 |
-| `input` | `long_press` `double_tap` `swipe_direction` `clear_text` `set_text_id` | 扩展输入手势 |
-| `apps` | `launch_activity` `stop_app` `list_packages` `app_info` `get_prop` | App / Activity / 包信息 |
-| `system` | `shell` `settings_get` `settings_put` | 只读 shell、系统设置读写 |
-| `files` | `file_list` `file_read` `file_write` | 应用沙箱内文件 |
-| `memory` | `memory_list` `memory_delete` `todo_read` | 记忆归档与计划读取 |
-
-`load_tools("all")` 可一次性加载全部高级工具。`shell` 只允许只读查询，禁止 `input tap/swipe/keyevent`、`sendevent` 等 UI 注入，避免绕过坐标校验。
-
-### 视频 / 播放任务
-
-播放页不再靠猜“有没有播完”：
-
-- `media_state` 读取当前时间、总时长、倍速、播放状态和控件坐标；只认播放器底部/边缘的纯时间文本，画面里的日期和时间戳会被排除；控制条自动隐藏后用上一次时长补全，切换视频时自动清掉旧缓存，不会点画面导致暂停。
-- `media_speed(2.0)` 自动找“倍速/速度”控件并选择目标倍速，选项通过无障碍点击完成，避免横屏坐标偏移。
-- `wait_media(target_ratio)` 每 15 秒重新读一次进度：按 `(总时长 × 目标比例 - 当前时间) / 实测倍速` 计算等待，播放暂停/缓冲会提前返回，不会盲目长时间等待。
-- 找不到倍速选项或媒体证据不足时不会擅自点击/切页，会返回可行动结果；结束条件必须来自用户目标或页面明确证据，Agent 不假设课程、任务点或固定完成比例。
+实测（V2302A）：中国移动三项拨测 **35 步 / 142.9s** 完成（旧工具集 49 步 / 202.9s）；微信朋友圈完整读取 **13 步 / 36.1s** 完成。
 
 ## 会话、记忆与成本
 

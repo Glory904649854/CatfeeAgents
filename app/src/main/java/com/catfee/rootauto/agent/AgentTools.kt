@@ -46,14 +46,11 @@ object AgentTools {
     private const val TAG = "AgentTools"
 
     /**
-     * 精简工具模式: 只暴露拨测/自绘 App 任务真正需要的 15 个工具,
-     * 去掉 load_tools/see_screen/read_page/verify_* 等低频或慢速入口。
-     * 旧工具名仍保留在分发表里, 便于回退; 置 false 即恢复旧模式。
+     * 轻量工具集: 只保留拨测/自绘 App 任务真正需要的工具。
+     * 旧的 60 个工具定义与实现仍保留在代码里用于兼容历史会话, 但不再暴露给模型。
      */
-    const val LEAN_MODE = true
-
     private val LEAN_TOOLS = setOf(
-        "observe", "tap", "swipe", "input", "key", "wait", "find", "scroll", "open",
+        "observe", "ocr", "tap", "swipe", "input", "key", "wait", "find", "scroll", "open",
         "todo_write", "todo_read", "note", "memory", "request_capability", "finish"
     )
 
@@ -141,7 +138,7 @@ object AgentTools {
     )
     /** 能力不足时返回给 Agent 的可行动原因; null 表示可用 */
     fun capabilityBlockReason(session: Session, name: String): String? {
-        if (LEAN_MODE && (name in LEAN_TOOLS || name == "request_capability")) return null
+        if (name in LEAN_TOOLS || name == "request_capability") return null
         val caps = session.caps
         if (name in ROOT_ONLY_TOOLS && !caps.root) {
             return "当前为非 Root 模式，$name 不可用。Root 只是可选项，不是运行前提；" +
@@ -179,72 +176,14 @@ object AgentTools {
     }
 
     /** 按任务目标自动加载常用高级组; 模型仍可用 load_tools 手动补 */
-    fun activateForGoal(session: Session, goal: String) {
-        if (LEAN_MODE) return
-        val text = goal.lowercase()
-        fun hit(vararg keys: String) = keys.any { text.contains(it) }
+    /** 轻量工具集已常驻, 无需按目标加载工具组。 */
+    fun activateForGoal(session: Session, goal: String) {}
 
-        if (hit("答题", "题目", "考试", "测验", "问卷", "作业", "表单", "选项", "提交", "填空")) {
-            session.activeGroups.add("form")
-            session.activeGroups.add("inspect")
-        }
-        if (hit("视频", "图片", "截图", "ocr", "识别", "长页", "长截图", "画面", "视觉", "看看", "看一下")) {
-            session.activeGroups.add("inspect")
-        }
-        if (hit("视频", "播放", "暂停", "倍速", "媒体", "音频", "字幕", "课程")) {
-            session.activeGroups.add("media")
-        }
-        if (hit("长按", "双击", "清空", "输入框", "方向滑动", "滑动方向")) {
-            session.activeGroups.add("input")
-        }
-        if (hit("包名", "activity", "应用信息", "卸载", "安装", "停止应用", "启动activity", "属性")) {
-            session.activeGroups.add("apps")
-        }
-        // 查系统版本/型号/设备信息时, 直接走 get_prop / settings_get, 不要逐页点设置。
-        if (hit(
-                "版本", "型号", "系统信息", "设备信息", "android版本", "android version",
-                "version", "about phone", "device info", "model"
-            )
-        ) {
-            session.activeGroups.add("apps")
-            session.activeGroups.add("system")
-        }
-        if (hit("shell", "设置", "权限", "系统", "adb")) {
-            session.activeGroups.add("system")
-        }
-        if (hit("文件", "目录", "路径", "读写", "保存到")) {
-            session.activeGroups.add("files")
-        }
-        if (hit("记忆", "计划", "清单")) {
-            session.activeGroups.add("memory")
-        }
-        if (hit("全部工具", "所有工具", "高级工具")) {
-            session.activeGroups.add("all")
-        }
-        // 当前设备能力不足的组不要自动加载, 否则模型会反复尝试不可用工具
-        session.activeGroups.removeAll { group ->
-            group != "all" && !groupAvailable(session, group)
-        }
-    }
-
-    /** 当前会话是否允许调用某个工具 (防止模型幻觉出未加载的工具) */
     fun isToolEnabled(session: Session, name: String): Boolean {
         if (session.agentBlocked) return false
-        if (LEAN_MODE) {
-            if (name == "enter_agent_mode" || name == "request_capability") return true
-            if (!session.agentMode) return false
-            return name in LEAN_TOOLS
-        }
-        if (name == "enter_agent_mode" || name == "load_tools" || name == "request_capability") {
-            return true
-        }
+        if (name == "enter_agent_mode" || name == "request_capability") return true
         if (!session.agentMode) return false
-        if (capabilityBlockReason(session, name) != null) return false
-        if (name in CORE_TOOLS) return true
-        if ("all" in session.activeGroups) {
-            return GROUP_TOOLS.values.any { name in it }
-        }
-        return session.activeGroups.any { name in GROUP_TOOLS[it].orEmpty() }
+        return name in LEAN_TOOLS
     }
 
     /** 处理 load_tools 的参数, 返回给模型的结果 */
@@ -309,43 +248,16 @@ object AgentTools {
      */
     fun definitions(session: Session): JSONArray {
         if (session.agentBlocked) return JSONArray()
-        if (LEAN_MODE) {
-            if (!session.agentMode) {
-                val chatTools = JSONArray().put(enterAgentModeDefinition())
-                defOf("request_capability")?.let { chatTools.put(it) }
-                return chatTools
-            }
-            val arr = JSONArray()
-            for (i in 0 until leanDefinitions.length()) {
-                leanDefinitions.optJSONObject(i)?.let { arr.put(it) }
-            }
-            return arr
-        }
         if (!session.agentMode) {
             // 聊天模式也允许直接请求能力, 例如“帮我开启无障碍”
             val chatTools = JSONArray().put(enterAgentModeDefinition())
-            for (i in 0 until allDefinitions.length()) {
-                val item = allDefinitions.optJSONObject(i) ?: continue
-                if (item.optJSONObject("function")?.optString("name") == "request_capability") {
-                    chatTools.put(item)
-                    break
-                }
-            }
+            defOf("request_capability")?.let { chatTools.put(it) }
             return chatTools
         }
-        val allowed = HashSet(CORE_TOOLS)
-        if ("all" in session.activeGroups) {
-            GROUP_TOOLS.values.forEach { allowed.addAll(it) }
-        } else {
-            session.activeGroups.forEach { allowed.addAll(GROUP_TOOLS[it].orEmpty()) }
-        }
         val out = JSONArray()
-        for (i in 0 until allDefinitions.length()) {
-            val item = allDefinitions.optJSONObject(i) ?: continue
-            val name = item.optJSONObject("function")?.optString("name").orEmpty()
-            if (name in allowed && capabilityBlockReason(session, name) == null) out.put(item)
+        for (i in 0 until leanDefinitions.length()) {
+            leanDefinitions.optJSONObject(i)?.let { out.put(it) }
         }
-        out.put(loadToolsDefinition())
         return out
     }
 
@@ -883,7 +795,7 @@ object AgentTools {
     private fun buildLeanDefinitions(): JSONArray {
         val arr = JSONArray()
         listOf(
-            "observe", "key", "todo_write", "todo_read", "note",
+            "observe", "ocr", "key", "todo_write", "todo_read", "note",
             "request_capability", "finish"
         ).forEach { name -> defOf(name)?.let { arr.put(it) } }
 
