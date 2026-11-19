@@ -224,12 +224,17 @@ class UiObserverService : AccessibilityService() {
                 .mapIndexed { idx, n -> n.copy(id = idx + 1) }
 
             val (displayW, displayH) = ScreenGeometry.displaySize()
+            val rootPkg = root.packageName?.toString()?.takeIf { it.isNotBlank() }
+                ?: lastPackage
+            // 后台 App 的 Activity 缓存不能带到前台 App 上; 包名不一致时只显示包名
+            val activityLabel = cachedActivity
+                .takeIf { rootPkg.isNotBlank() && it.startsWith(rootPkg) }
+                ?: rootPkg
             Snapshot(
                 // 优先用当前活动窗口自己的包名; lastPackage 会被通知栏等 SystemUI 事件污染,
                 // 只有拿不到 root 包名时才退回它
-                packageName = root.packageName?.toString()?.takeIf { it.isNotBlank() }
-                    ?: lastPackage,
-                activity = cachedActivity,
+                packageName = rootPkg,
+                activity = activityLabel,
                 screenW = displayW,
                 screenH = displayH,
                 nodes = top
@@ -627,7 +632,41 @@ class UiObserverService : AccessibilityService() {
      * 说明: 无障碍 API 拿不到 Activity 名, 由 Agent 通过 root dumpsys 定期刷新缓存,
      *       避免每次都执行 shell 命令拖慢 observe
      */
-    fun currentActivityName(): String = cachedActivity
+    fun currentActivityName(): String {
+        val rootPkg = chooseRoot()?.packageName?.toString().orEmpty()
+        return cachedActivity
+            .takeIf { rootPkg.isNotBlank() && it.startsWith(rootPkg) }
+            .orEmpty()
+    }
+
+    /**
+     * 当前可见的系统通知横幅/通知栏窗口范围。
+     * 点击落在这些区域会被 SystemUI 吃掉, 常见表现是「点搜索栏却跳进了微信/别的 App」。
+     */
+    fun systemOverlayBounds(): List<Rect> {
+        val out = ArrayList<Rect>()
+        try {
+            val screenH = resources.displayMetrics.heightPixels
+            windows?.forEach { w ->
+                val pkg = w.root?.packageName?.toString().orEmpty()
+                val isSystemWindow =
+                    w.type == android.view.accessibility.AccessibilityWindowInfo.TYPE_SYSTEM
+                if (pkg != "com.android.systemui" && !isSystemWindow) return@forEach
+                val r = Rect()
+                w.getBoundsInScreen(r)
+                if (r.isEmpty) return@forEach
+                // 排除底部导航栏和全屏通知栏; 保留顶部状态栏和 heads-up 横幅
+                if (r.bottom >= screenH - 40) return@forEach
+                if (r.height() > screenH / 3) return@forEach
+                out.add(r)
+            }
+        } catch (_: Exception) {
+        }
+        return out
+    }
+
+    fun systemOverlayAt(x: Int, y: Int): Boolean =
+        systemOverlayBounds().any { it.contains(x, y) }
 
     /** 前台 Activity 缓存, 由 Agent 的 observe 流程定期刷新 */
     @Volatile

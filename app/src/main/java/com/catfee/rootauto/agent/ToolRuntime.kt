@@ -472,6 +472,7 @@ object ToolRuntime {
         val cy = target.bounds.centerY()
         if (!onScreen(target, w, h)) return offscreenHint(keyword)
         ScreenGeometry.invalid(cx, cy)?.let { return "找到「$keyword」但 $it" }
+        overlayTapBlocked(cx, cy)?.let { return it }
         val ok = InputDispatcher.tap(cx, cy)
         return if (ok) "已发送点击「$keyword」($cx,$cy); 请用 observe/verify_changed 确认界面是否变化"
         else "点击失败: 坐标无法注入或 daemon 无响应"
@@ -490,6 +491,9 @@ object ToolRuntime {
             return "剪贴板写入失败: ${e.message}; 无法自动输入"
         }
         // 先点输入框让它聚焦并弹出键盘
+        if (UiObserverService.instance?.systemOverlayAt(x, y) == true) {
+            return "输入框被系统通知横幅覆盖; 请先 wait 3 秒再试"
+        }
         InputDispatcher.tap(x, y)
         delay(900)
 
@@ -583,6 +587,14 @@ object ToolRuntime {
         }
     }
 
+    /** 点击点被系统通知横幅覆盖时返回可行动提示, 否则 null */
+    private fun overlayTapBlocked(x: Int, y: Int): String? =
+        if (UiObserverService.instance?.systemOverlayAt(x, y) == true) {
+            "目标被系统通知横幅覆盖 ($x,$y); 请先 wait 3 秒或换位置, 不要重复点击"
+        } else {
+            null
+        }
+
     /** 无障碍无命中时用 OCR 找到文字并点坐标 */
     private suspend fun tapTextByOcr(keyword: String, exact: Boolean): String {
         val (bmp, err) = ScreenVision.captureBitmap()
@@ -621,6 +633,7 @@ object ToolRuntime {
         val cy = target.bounds.centerY()
         if (!onScreen(target, w, h)) return offscreenHint(keyword)
         ScreenGeometry.invalid(cx, cy)?.let { return "找到「$keyword」但 $it" }
+        overlayTapBlocked(cx, cy)?.let { return it }
         val ok = InputDispatcher.tap(cx, cy)
         return if (ok) "已发送点击描述「$keyword」($cx,$cy); 请确认界面变化"
         else "点击失败: 坐标无法注入或 daemon 无响应"
@@ -643,6 +656,7 @@ object ToolRuntime {
         val cy = target.bounds.centerY()
         if (!onScreen(target, w, h)) return offscreenHint("id=$idSuffix")
         ScreenGeometry.invalid(cx, cy)?.let { return "找到 id=$idSuffix 但 $it" }
+        overlayTapBlocked(cx, cy)?.let { return it }
         val ok = InputDispatcher.tap(cx, cy)
         return if (ok) "已发送点击 id=$idSuffix ($cx,$cy); 请确认界面变化"
         else "点击失败: 坐标无法注入或 daemon 无响应"

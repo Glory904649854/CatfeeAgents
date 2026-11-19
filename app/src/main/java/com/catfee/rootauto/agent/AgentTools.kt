@@ -1218,6 +1218,10 @@ object AgentTools {
                     if (bad != null) {
                         bad
                     } else {
+                        if (UiObserverService.instance?.systemOverlayAt(x, y) == true) {
+                            return "点击位置被系统通知横幅覆盖 ($x,$y); " +
+                                "请先 wait 3 秒或换位置, 不要重复点击"
+                        }
                         val ok = InputDispatcher.tap(x, y)
                         if (ok) "已发送点击 ($x,$y); 请用 observe/verify_changed 确认界面变化"
                         else "点击失败: 坐标无法注入或 daemon 无响应"
@@ -1543,7 +1547,7 @@ object AgentTools {
             } catch (e: Exception) {
                 Log.w(TAG, "缓存媒体时间失败: ${e.message}")
             }
-            val text = snap.toPromptText()
+            val text = snap.toPromptText() + systemOverlayHint(svc)
             val hash = Integer.toHexString(text.hashCode())
             if (hash == session.lastObservedHash) {
                 return "界面未变化 (hash=$hash)。不要重复 observe; " +
@@ -1580,7 +1584,7 @@ object AgentTools {
                     }
                     append('\n')
                 }
-            }
+            } + systemOverlayHint(svc)
             val hash = Integer.toHexString(text.hashCode())
             if (hash == session.lastObservedHash) {
                 return "界面未变化 (hash=$hash)。不要重复 observe; " +
@@ -1604,7 +1608,7 @@ object AgentTools {
                 }
                 append("\n[无障碍树为空, 已切换本地 OCR; 用 tap(x,y) 或 tap_text 操作]\n")
                 append(ocrText)
-            }
+            } + systemOverlayHint(svc)
             val hash = Integer.toHexString(text.hashCode())
             if (hash == session.lastObservedHash) {
                 return "界面未变化 (hash=$hash)。不要重复 observe; " +
@@ -1619,6 +1623,16 @@ object AgentTools {
         val v = ScreenVision.describeScreen(provider)
         return if (v.ok) "[视觉降级识别, 耗时 ${v.elapsedMs}ms]\n${v.text}"
         else "无障碍读到 0 个元素, 视觉降级也失败: ${v.error}"
+    }
+
+    /** 系统通知横幅提示: 点击这些区域会跳到别的 App */
+    private fun systemOverlayHint(svc: UiObserverService): String {
+        val bounds = svc.systemOverlayBounds()
+        if (bounds.isEmpty()) return ""
+        val desc = bounds.joinToString("; ") {
+            "${it.left},${it.top}-${it.right},${it.bottom}"
+        }
+        return "\n[系统通知横幅覆盖: $desc · 不要点击该区域, 可先 wait 3s]"
     }
 
     /** 本地 OCR 当前屏幕, 返回 "x,y 文本" 行; 用于无障碍树为空的 App */

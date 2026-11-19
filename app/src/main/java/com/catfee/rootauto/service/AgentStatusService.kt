@@ -19,7 +19,9 @@ import android.os.SystemClock
 import android.provider.Settings
 import android.view.Gravity
 import android.view.LayoutInflater
+import android.view.MotionEvent
 import android.view.View
+import android.view.ViewConfiguration
 import android.view.WindowManager
 import android.widget.TextView
 import androidx.core.app.NotificationCompat
@@ -37,6 +39,7 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.distinctUntilChangedBy
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlin.math.abs
 
 /**
  * AgentStatusService —— 前台通知 + 可选悬浮状态条
@@ -406,18 +409,20 @@ class AgentStatusService : Service() {
             // 触摸不受影响, 暂停/停止按钮仍可正常点击。
             view.importantForAccessibility =
                 View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
+            val savedPosition = DisplaySettings.overlayPosition(this)
+            val overlayWidth = (200 * resources.displayMetrics.density).toInt()
             val lp = WindowManager.LayoutParams(
-                WindowManager.LayoutParams.WRAP_CONTENT,
+                overlayWidth,
                 WindowManager.LayoutParams.WRAP_CONTENT,
                 WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                     WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
                 PixelFormat.TRANSLUCENT
             ).apply {
-                // 贴右侧垂直居中: 避开顶部关闭按钮和底部 tab, 不挡广告关闭
-                gravity = Gravity.END or Gravity.CENTER_VERTICAL
-                x = (10 * resources.displayMetrics.density).toInt()
-                y = 0
+                // 绝对坐标, 便于拖动; 没保存过时在 post 里放到右侧居中
+                gravity = Gravity.TOP or Gravity.START
+                x = savedPosition?.first ?: 0
+                y = savedPosition?.second ?: 0
                 setTitle("Catfee Agent Status")
             }
             wm.addView(view, lp)
@@ -427,7 +432,22 @@ class AgentStatusService : Service() {
             view.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
                 updateOverlayBounds()
             }
-            view.post { updateOverlayBounds() }
+            view.post {
+                val dm = resources.displayMetrics
+                val maxX = (dm.widthPixels - view.width).coerceAtLeast(0)
+                val maxY = (dm.heightPixels - view.height).coerceAtLeast(0)
+                if (savedPosition == null) {
+                    lp.x = (dm.widthPixels - view.width - (10 * dm.density).toInt())
+                        .coerceIn(0, maxX)
+                    lp.y = ((dm.heightPixels - view.height) / 2).coerceIn(0, maxY)
+                } else {
+                    lp.x = lp.x.coerceIn(0, maxX)
+                    lp.y = lp.y.coerceIn(0, maxY)
+                }
+                wm.updateViewLayout(view, lp)
+                updateOverlayBounds()
+                setupOverlayDrag(view, wm, lp)
+            }
             view.findViewById<TextView>(R.id.overlay_title)?.maxWidth =
                 (200 * resources.displayMetrics.density).toInt()
             view.findViewById<TextView>(R.id.overlay_detail)?.maxWidth =
@@ -509,6 +529,56 @@ class AgentStatusService : Service() {
         if (rect != lastOverlayBounds) {
             lastOverlayBounds = Rect(rect)
             android.util.Log.i(TAG, "overlay bounds=$rect")
+        }
+    }
+
+    /** 拖动悬浮窗: 按住标题/详情区域即可拖, 暂停/停止按钮仍可点击 */
+    private fun setupOverlayDrag(
+        view: View,
+        wm: WindowManager,
+        lp: WindowManager.LayoutParams
+    ) {
+        val slop = ViewConfiguration.get(this).scaledTouchSlop
+        var downX = 0f
+        var downY = 0f
+        var startX = 0
+        var startY = 0
+        var dragging = false
+        view.setOnTouchListener { _, event ->
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    downX = event.rawX
+                    downY = event.rawY
+                    startX = lp.x
+                    startY = lp.y
+                    dragging = false
+                    true
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    val dx = event.rawX - downX
+                    val dy = event.rawY - downY
+                    if (!dragging && (abs(dx) > slop || abs(dy) > slop)) {
+                        dragging = true
+                    }
+                    if (dragging) {
+                        val dm = resources.displayMetrics
+                        val maxX = (dm.widthPixels - view.width).coerceAtLeast(0)
+                        val maxY = (dm.heightPixels - view.height).coerceAtLeast(0)
+                        lp.x = (startX + dx).toInt().coerceIn(0, maxX)
+                        lp.y = (startY + dy).toInt().coerceIn(0, maxY)
+                        wm.updateViewLayout(view, lp)
+                        updateOverlayBounds()
+                    }
+                    true
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    if (dragging) {
+                        DisplaySettings.setOverlayPosition(this, lp.x, lp.y)
+                    }
+                    true
+                }
+                else -> true
+            }
         }
     }
 
