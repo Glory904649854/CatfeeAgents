@@ -45,6 +45,18 @@ object AgentTools {
 
     private const val TAG = "AgentTools"
 
+    /**
+     * 精简工具模式: 只暴露拨测/自绘 App 任务真正需要的 15 个工具,
+     * 去掉 load_tools/see_screen/read_page/verify_* 等低频或慢速入口。
+     * 旧工具名仍保留在分发表里, 便于回退; 置 false 即恢复旧模式。
+     */
+    const val LEAN_MODE = true
+
+    private val LEAN_TOOLS = setOf(
+        "observe", "tap", "swipe", "input", "key", "wait", "find", "scroll", "open",
+        "todo_write", "todo_read", "note", "memory", "request_capability", "finish"
+    )
+
     /** observe/read_page/see_screen 的去重状态必须按任务隔离, 不能让上一个会话污染当前会话。 */
 
     /** observe 之后等待界面稳定的默认时间, 太短会读到旧界面 */
@@ -129,6 +141,7 @@ object AgentTools {
     )
     /** 能力不足时返回给 Agent 的可行动原因; null 表示可用 */
     fun capabilityBlockReason(session: Session, name: String): String? {
+        if (LEAN_MODE && (name in LEAN_TOOLS || name == "request_capability")) return null
         val caps = session.caps
         if (name in ROOT_ONLY_TOOLS && !caps.root) {
             return "当前为非 Root 模式，$name 不可用。Root 只是可选项，不是运行前提；" +
@@ -167,6 +180,7 @@ object AgentTools {
 
     /** 按任务目标自动加载常用高级组; 模型仍可用 load_tools 手动补 */
     fun activateForGoal(session: Session, goal: String) {
+        if (LEAN_MODE) return
         val text = goal.lowercase()
         fun hit(vararg keys: String) = keys.any { text.contains(it) }
 
@@ -216,6 +230,11 @@ object AgentTools {
     /** 当前会话是否允许调用某个工具 (防止模型幻觉出未加载的工具) */
     fun isToolEnabled(session: Session, name: String): Boolean {
         if (session.agentBlocked) return false
+        if (LEAN_MODE) {
+            if (name == "enter_agent_mode" || name == "request_capability") return true
+            if (!session.agentMode) return false
+            return name in LEAN_TOOLS
+        }
         if (name == "enter_agent_mode" || name == "load_tools" || name == "request_capability") {
             return true
         }
@@ -290,6 +309,18 @@ object AgentTools {
      */
     fun definitions(session: Session): JSONArray {
         if (session.agentBlocked) return JSONArray()
+        if (LEAN_MODE) {
+            if (!session.agentMode) {
+                val chatTools = JSONArray().put(enterAgentModeDefinition())
+                defOf("request_capability")?.let { chatTools.put(it) }
+                return chatTools
+            }
+            val arr = JSONArray()
+            for (i in 0 until leanDefinitions.length()) {
+                leanDefinitions.optJSONObject(i)?.let { arr.put(it) }
+            }
+            return arr
+        }
         if (!session.agentMode) {
             // 聊天模式也允许直接请求能力, 例如“帮我开启无障碍”
             val chatTools = JSONArray().put(enterAgentModeDefinition())
@@ -838,6 +869,124 @@ object AgentTools {
     /** 全部工具只构建一次, 每轮按 Session 过滤 */
     private val allDefinitions: JSONArray by lazy { buildAllDefinitions() }
 
+    /** 精简模式只构建一次 */
+    private val leanDefinitions: JSONArray by lazy { buildLeanDefinitions() }
+
+    private fun defOf(name: String): JSONObject? {
+        for (i in 0 until allDefinitions.length()) {
+            val item = allDefinitions.optJSONObject(i) ?: continue
+            if (item.optJSONObject("function")?.optString("name") == name) return item
+        }
+        return null
+    }
+
+    private fun buildLeanDefinitions(): JSONArray {
+        val arr = JSONArray()
+        listOf(
+            "observe", "key", "todo_write", "todo_read", "note",
+            "request_capability", "finish"
+        ).forEach { name -> defOf(name)?.let { arr.put(it) } }
+
+        arr.put(
+            tool(
+                "tap",
+                "点击/长按/双击。by=text|desc|id|xy; text/desc/id 时用 value; xy 时用 x,y。无障碍读不到会自动 OCR。",
+                obj()
+                    .put("by", prop("string", "text|desc|id|xy; 有 x,y 时默认 xy"))
+                    .put("value", prop("string", "目标文字/描述/id 后缀"))
+                    .put("x", prop("integer", "坐标 x"))
+                    .put("y", prop("integer", "坐标 y"))
+                    .put("gesture", prop("string", "tap|long|double, 默认 tap"))
+                    .put("exact", prop("boolean", "text/desc 精确匹配, 默认 false"))
+                    .put("hold_ms", prop("integer", "长按毫秒, 默认 700"))
+            )
+        )
+        arr.put(
+            tool(
+                "swipe",
+                "滑动。direction=up|down|left|right, 或传 x1,y1,x2,y2。",
+                obj()
+                    .put("direction", prop("string", "up|down|left|right"))
+                    .put("distance", prop("number", "滑动距离比例, 默认 0.6"))
+                    .put("duration_ms", prop("integer", "滑动时长, 默认 400"))
+                    .put("x1", prop("integer", "起点 x")).put("y1", prop("integer", "起点 y"))
+                    .put("x2", prop("integer", "终点 x")).put("y2", prop("integer", "终点 y"))
+            )
+        )
+        arr.put(
+            tool(
+                "input",
+                "输入文字。无障碍不可用时传输入框中心 x,y, 自动走剪贴板粘贴; action=type|clear。",
+                obj()
+                    .put("text", prop("string", "要输入的文字"))
+                    .put("x", prop("integer", "输入框中心 x"))
+                    .put("y", prop("integer", "输入框中心 y"))
+                    .put("action", prop("string", "type|clear, 默认 type"))
+            )
+        )
+        arr.put(
+            tool(
+                "wait",
+                "等待。until=time 用 ms; until=text 用 value + timeout_ms 等文字出现。",
+                obj()
+                    .put("until", prop("string", "time|text, 默认 time"))
+                    .put("ms", prop("integer", "等待毫秒, 默认 1000"))
+                    .put("value", prop("string", "until=text 时要等的文字"))
+                    .put("timeout_ms", prop("integer", "文字等待超时, 默认 30000"))
+            )
+        )
+        arr.put(
+            tool(
+                "find",
+                "查找文字/描述, 返回坐标和可点击状态; 无障碍无命中自动 OCR。",
+                obj()
+                    .put("by", prop("string", "text|desc, 默认 text"))
+                    .put("value", prop("string", "要查找的文字"))
+                    .put("exact", prop("boolean", "精确匹配, 默认 false"))
+                    .put("all", prop("boolean", "返回全部候选, 默认 false"))
+                    .also { it.put("required", JSONArray().put("value")) }
+            )
+        )
+        arr.put(
+            tool(
+                "scroll",
+                "滚动。until=text 滚动直到看到 value; 或 direction=up|down。",
+                obj()
+                    .put("until", prop("string", "text|direction, 默认 direction"))
+                    .put("value", prop("string", "until=text 时要找的文字"))
+                    .put("direction", prop("string", "up|down"))
+                    .put("max_scrolls", prop("integer", "最多滚动次数, 默认 8"))
+            )
+        )
+        arr.put(
+            tool(
+                "open",
+                "打开应用/URL/Activity。app 可传包名或应用名关键字(如 中国移动); url=...; activity=包名/Activity。",
+                obj()
+                    .put("app", prop("string", "包名或应用名关键字"))
+                    .put("url", prop("string", "要打开的 URL"))
+                    .put("activity", prop("string", "包名/Activity"))
+            )
+        )
+        arr.put(
+            tool(
+                "memory",
+                "记忆: op=read|write|search|list|delete。pkg 空=当前前台 App; write 可带 kind/page/text/selector/confidence。",
+                obj()
+                    .put("op", prop("string", "read|write|search|list|delete, 默认 read"))
+                    .put("package", prop("string", "包名; 空=当前前台 App"))
+                    .put("query", prop("string", "search 关键词"))
+                    .put("id", prop("string", "delete 的记忆 id"))
+                    .put("kind", prop("string", "entry|control|pitfall|flow|preference"))
+                    .put("page", prop("string", "页面/路径"))
+                    .put("text", prop("string", "记忆正文"))
+                    .put("selector", prop("string", "控件定位"))
+                    .put("confidence", prop("number", "置信度 0~1"))
+            )
+        )
+        return arr
+    }
+
     /** 构造一个 function 工具定义 */
     private fun tool(name: String, desc: String, params: JSONObject) = JSONObject()
         .put("type", "function")
@@ -1129,8 +1278,30 @@ object AgentTools {
                 }
                 "tool_list" -> ToolRuntime.catalog()
                 "tap" -> {
-                    val x = args.optInt("x")
-                    val y = args.optInt("y")
+                    val by = args.optString("by")
+                        .ifBlank { if (args.has("x") || args.has("y")) "xy" else "text" }
+                    if (by != "xy") {
+                        val value = args.optString("value")
+                        if (value.isBlank()) {
+                            return "tap 缺少 value"
+                        }
+                        return when (by) {
+                            "text" -> ToolRuntime.tapText(value, args.optBoolean("exact", false))
+                            "desc" -> ToolRuntime.tapDesc(value)
+                            "id" -> ToolRuntime.tapId(value)
+                            else -> "未知 by=$by; 可选 text|desc|id|xy"
+                        }
+                    }
+                    val x0 = args.optInt("x")
+                    val y0 = args.optInt("y")
+                    when (args.optString("gesture", "tap")) {
+                        "long" -> return ToolRuntime.longPress(
+                            x0, y0, args.optInt("hold_ms", 700).coerceIn(100, 10_000)
+                        )
+                        "double" -> return ToolRuntime.doubleTap(x0, y0)
+                    }
+                    val x = x0
+                    val y = y0
                     val bad = invalidCoord(x, y)
                     if (bad != null) {
                         bad
@@ -1145,6 +1316,14 @@ object AgentTools {
                     args.optBoolean("exact", false)
                 )
                 "swipe" -> {
+                    val direction = args.optString("direction")
+                    if (direction.isNotBlank()) {
+                        return ToolRuntime.swipeDirection(
+                            direction,
+                            args.optDouble("distance", 0.6).toFloat(),
+                            args.optInt("duration_ms", 400)
+                        )
+                    }
                     val x1 = args.optInt("x1")
                     val y1 = args.optInt("y1")
                     val x2 = args.optInt("x2")
@@ -1174,9 +1353,96 @@ object AgentTools {
                             "从 observe/ocr 取得输入框中心坐标后, 用 input_text(text, x, y) 走剪贴板粘贴。"
                     }
                 }
+                "input" -> {
+                    if (args.optString("action", "type") == "clear") {
+                        ToolRuntime.clearText()
+                    } else {
+                        val text = args.optString("text")
+                        val svc = UiObserverService.instance
+                        val x = args.optInt("x", -1)
+                        val y = args.optInt("y", -1)
+                        when {
+                            svc == null -> "输入失败: 无障碍服务未连接"
+                            text.isEmpty() -> "输入失败: text 为空"
+                            svc.setTextOnFocused(text) -> "已输入 ${text.length} 个字符"
+                            x >= 0 && y >= 0 -> ToolRuntime.pasteText(context, text, x, y)
+                            else -> "输入失败: 没有可编辑节点; 请传输入框中心 x,y 走剪贴板粘贴"
+                        }
+                    }
+                }
+                "find" -> {
+                    val value = args.optString("value")
+                    if (value.isBlank()) {
+                        "find 缺少 value"
+                    } else {
+                        ToolRuntime.findText(
+                            value,
+                            args.optBoolean("exact", false),
+                            byDesc = args.optString("by") == "desc"
+                        )
+                    }
+                }
+                "scroll" -> {
+                    if (args.optString("until") == "text") {
+                        ToolRuntime.scrollToText(
+                            args.optString("value"),
+                            args.optInt("max_scrolls", 8)
+                        )
+                    } else {
+                        ToolRuntime.swipeDirection(
+                            args.optString("direction", "up"),
+                            0.6f,
+                            420
+                        )
+                    }
+                }
+                "open" -> {
+                    val app = args.optString("app")
+                    val url = args.optString("url")
+                    val activity = args.optString("activity")
+                    when {
+                        activity.isNotBlank() -> ToolRuntime.launchActivity(context, activity)
+                        url.isNotBlank() -> ToolRuntime.openUrl(context, url)
+                        app.isNotBlank() -> openAppByQuery(context, app)
+                        else -> "open 参数为空"
+                    }
+                }
+                "memory" -> {
+                    val pkg = args.optString("package").ifBlank { AppMemory.currentPackage() }
+                    when (args.optString("op", "read")) {
+                        "read" -> {
+                            val mem = AppMemory.readForTool(context, pkg)
+                            if (mem.isBlank()) "「$pkg」暂无记忆" else "「$pkg」记忆:\n$mem"
+                        }
+                        "write" -> AppMemory.addEntry(
+                            context = context,
+                            pkg = pkg,
+                            kind = args.optString("kind"),
+                            page = args.optString("page"),
+                            text = args.optString("text"),
+                            selector = args.optString("selector"),
+                            confidence = args.optDouble("confidence", 0.7)
+                        )
+                        "search" -> AppMemory.search(context, pkg, args.optString("query"))
+                        "list" -> AppMemory.list(context)
+                        "delete" -> if (AppMemory.removeEntry(context, pkg, args.optString("id"))) {
+                            "已删除该记忆"
+                        } else {
+                            "未找到该记忆"
+                        }
+                        else -> "未知 memory op"
+                    }
+                }
                 "key" -> keyEvent(args.optString("name"))
                 "launch_app" -> launchApp(context, args.optString("package"))
                 "wait" -> {
+                    if (args.optString("until") == "text") {
+                        return ToolRuntime.waitForText(
+                            args.optString("value"),
+                            args.optLong("timeout_ms", 30_000),
+                            awaitIfPaused
+                        )
+                    }
                     // 单次最多 5 分钟; 分段等待并每 15 秒发进度, 避免界面长时间无反馈
                     val ms = args.optInt("ms", 1000).coerceIn(200, 300_000).toLong()
                     // 播放页的长等待必须基于播放进度, 不能盲等 60s/300s。
@@ -1518,6 +1784,39 @@ object AgentTools {
      * 返回: 结果描述
      * 说明: 优先 PackageManager Intent（非 Root 可用），Root 下失败再用 monkey 兜底。
      */
+    /** 精简 open: 支持包名、应用名关键字、URL、Activity */
+    private suspend fun openAppByQuery(context: Context, query: String): String {
+        if (query.contains("/")) return ToolRuntime.launchActivity(context, query)
+        if (query.startsWith("http://") || query.startsWith("https://")) {
+            return ToolRuntime.openUrl(context, query)
+        }
+        val pm = context.packageManager
+        try {
+            pm.getPackageInfo(query, 0)
+            return launchApp(context, query)
+        } catch (_: Exception) {
+        }
+        val apps = try {
+            pm.getInstalledApplications(0)
+        } catch (_: Exception) {
+            emptyList()
+        }
+        val hit = apps.firstOrNull { info ->
+            val label = try {
+                pm.getApplicationLabel(info).toString()
+            } catch (_: Exception) {
+                ""
+            }
+            label.contains(query, ignoreCase = true) ||
+                info.packageName.contains(query, ignoreCase = true)
+        }
+        return if (hit != null) {
+            launchApp(context, hit.packageName)
+        } else {
+            "未找到应用「$query」，请改用包名"
+        }
+    }
+
     private suspend fun launchApp(context: Context, pkg: String): String {
         if (pkg.isBlank()) return "启动失败: 包名为空"
         val intentError = AppLauncher.launchPackage(context, pkg)

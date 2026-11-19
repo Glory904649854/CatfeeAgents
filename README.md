@@ -192,13 +192,32 @@ flowchart LR
 
 ## 工具系统
 
-进入设备模式后默认加载 **核心工具**：
+默认启用 **精简工具模式**（15 个工具，见下节）。关闭精简模式（`AgentTools.LEAN_MODE = false`）时才加载下面的完整核心工具：
 
 ```text
 observe  tap  tap_node  swipe  input_text  key  launch_app  open_url
 wait  wait_for_text  find_text  scroll_to_text  get_activity  ocr
 verify_text  verify_changed  note  todo_write  memory_read  memory_write  memory_search  request_capability  finish
 ```
+
+### 精简工具模式（默认）
+
+为减少每轮 schema 与选择成本，默认只暴露：
+
+```text
+enter_agent_mode  observe  tap  swipe  input  key  wait  find  scroll  open
+todo_write  todo_read  note  memory  request_capability  finish
+```
+
+- `tap(by=text|desc|id|xy, value=...)` 合并了 `tap_text/tap_node/tap_desc/tap_id/long_press/double_tap`
+- `swipe(direction=...)` 合并了坐标滑动与方向滑动
+- `open(app="中国移动")` 支持应用名关键字，不需要先 `list_packages` 查包名
+- `observe` 在无障碍树为空时自动 OCR；`find/tap/scroll` 也会 OCR 兜底
+- `memory` 统一了 read/write/search/list/delete
+- 不再暴露 `load_tools/see_screen/read_page/screenshot/verify_*` 等慢速或低频入口
+- 旧工具实现保留在分发表里，`LEAN_MODE=false` 可随时回退
+
+实测（V2302A）：中国移动三项拨测 **35 步**完成（旧模式 49 步）；微信朋友圈完整读取 **13 步**完成。
 
 其余能力按组加载（`load_tools`，也可由任务关键词自动激活）：
 
