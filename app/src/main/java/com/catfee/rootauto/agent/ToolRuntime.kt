@@ -766,7 +766,7 @@ object ToolRuntime {
         |LLM: ask_llm, second_opinion
         |表单: answer_form
         |流程: todo_write, todo_read, note, wait, finish
-        |记忆: memory_read, memory_write, memory_list
+        |记忆: memory_read, memory_write, memory_search, memory_delete, memory_list
     """.trimMargin()
 
     // ---------------- 内部 ----------------

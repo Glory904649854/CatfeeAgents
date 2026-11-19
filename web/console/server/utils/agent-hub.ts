@@ -226,7 +226,13 @@ export function insertAgentEvent(deviceId: string, input: AgentEventInput): Even
 export function createCommand(input: {
   deviceId: string
   taskId: string
-  type: 'TASK_ASSIGN' | 'TASK_PAUSE' | 'TASK_RESUME' | 'TASK_STOP'
+  type:
+    | 'TASK_ASSIGN'
+    | 'TASK_PAUSE'
+    | 'TASK_RESUME'
+    | 'TASK_STOP'
+    | 'MEMORY_UPDATE'
+    | 'MEMORY_DELETE'
   payload: Record<string, unknown>
 }): { id: string; delivered: boolean } {
   const id = createId('cmd')
@@ -397,6 +403,23 @@ export function detachAgent(peer: AgentPeer): void {
   publishDeviceUpdate(deviceId, 'offline')
 }
 
+/** 设备侧记忆快照 upsert; 由 Agent 在整理完成/手动编辑后主动上传 */
+function handleMemorySync(deviceId: string, message: Record<string, unknown>): void {
+  const pkg = String(message.package ?? '').trim().slice(0, 120)
+  if (!pkg) return
+  const entries = parseMemoryEntries(JSON.stringify(message.entries ?? []))
+  const appVersion = String(message.appVersion ?? '').slice(0, 80) || null
+  if (entries.length === 0) {
+    // 设备清空该 App 记忆时同步删除控制台快照
+    getDb()
+      .prepare('DELETE FROM device_memories WHERE device_id = ? AND package = ?')
+      .run(deviceId, pkg)
+  } else {
+    upsertMemoryPackage(deviceId, pkg, appVersion, entries)
+  }
+  publishDeviceUpdate(deviceId, 'memory')
+}
+
 export function handleAgentMessage(peer: AgentPeer, raw: string): void {
   let message: Record<string, unknown>
   try {
@@ -477,6 +500,11 @@ export function handleAgentMessage(peer: AgentPeer, raw: string): void {
         payload: (event.payload as Record<string, unknown>) ?? {},
         occurredAt: event.occurredAt ? String(event.occurredAt) : undefined
       })
+      return
+    }
+    case 'memory_sync': {
+      if (!deviceId) return
+      handleMemorySync(deviceId, message)
       return
     }
     default: {

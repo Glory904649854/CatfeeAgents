@@ -4,6 +4,7 @@ import android.content.Context
 import android.os.Build
 import android.util.Log
 import com.catfee.rootauto.BuildConfig
+import com.catfee.rootauto.agent.AppMemory
 import com.catfee.rootauto.device.DeviceCapabilities
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -199,6 +200,8 @@ object ConsoleClient {
                 _connected.value = true
                 setStatus(context, "已连接 Web 控制台")
                 startHeartbeat(context)
+                // 重连后把本地结构化记忆同步给控制台（多设备聚合用）
+                syncMemories(context.applicationContext)
             }
             "error" -> {
                 val code = message.optString("code")
@@ -228,6 +231,34 @@ object ConsoleClient {
     } catch (e: Exception) {
         Log.w(TAG, "WS 发送失败: ${e.message}")
         false
+    }
+
+    /**
+     * 把本地记忆快照同步给控制台。
+     * pkg 为空时同步全部 App；控制台按 (deviceId, package) 存储，便于多设备聚合查看。
+     */
+    fun syncMemories(context: Context, pkg: String? = null) {
+        if (!_connected.value || !started) return
+        val app = context.applicationContext
+        scope.launch {
+            try {
+                val packages = if (pkg.isNullOrBlank()) AppMemory.packages(app) else listOf(pkg)
+                packages.forEach { name ->
+                    val snapshot = AppMemory.snapshot(app, name)
+                    val entries = snapshot.optJSONArray("entries") ?: JSONArray()
+                    send(
+                        JSONObject()
+                            .put("type", "memory_sync")
+                            .put("package", name)
+                            .put("appVersion", snapshot.optString("appVersion"))
+                            .put("updatedAt", snapshot.optLong("updatedAt"))
+                            .put("entries", entries)
+                    )
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "同步记忆失败: ${e.message}")
+            }
+        }
     }
 
     /**

@@ -2,6 +2,9 @@ package com.catfee.rootauto.agent
 
 import android.content.Context
 import android.util.Log
+import com.catfee.rootauto.agent.memory.MemoryCurator
+import com.catfee.rootauto.agent.memory.MemoryInjector
+import com.catfee.rootauto.agent.memory.MemoryStore
 import com.catfee.rootauto.device.DeviceCapabilities
 import com.catfee.rootauto.llm.DecisionClient
 import com.catfee.rootauto.llm.DecisionSettings
@@ -334,8 +337,9 @@ object ReActAgent {
         var lastCallSig = ""
         var sameCallCount = 0
         var targetPkg = startPkg
-        var memoryWritten = false
         var usedDeviceTool = false
+        val injectedMemoryIds = LinkedHashSet<String>()
+        val failureNotes = ArrayList<String>()
         val firstUser = buildString {
             append("任务目标: ").append(goal)
             if (priorContext.isNotBlank()) {
@@ -419,15 +423,21 @@ object ReActAgent {
                     hints.append("\n\n[系统提醒] 连续观察 $observationOnly 次仍未动作, 当前页面信息已经足够; " +
                         "立即执行一个动作, 或 finish 说明障碍。")
                 }
-                // 按当前前台 App 注入它的简短记忆 (入口/关键控件/坑)
+                // 按任务相关性和当前页面挑选 App 核心记忆; 完整归档留给 memory_search
                 val fgPkg = AppMemory.currentPackage()
                 if (fgPkg.isNotBlank() && fgPkg != context.packageName) {
                     targetPkg = fgPkg
                 }
-                val appMem = AppMemory.read(context, fgPkg)
-                if (appMem.isNotBlank()) {
-                    hints.append("\n\n===== 当前 App 记忆 (").append(fgPkg).append(") =====\n").append(appMem)
-                    Log.i(TAG, "memory inject pkg=$fgPkg len=${appMem.length}")
+                if (fgPkg.isNotBlank()) {
+                    val rendered = MemoryInjector.render(
+                        context, fgPkg, goal, lastObservation.take(300), AppMemory.MAX_INJECT
+                    )
+                    if (rendered.text.isNotBlank()) {
+                        hints.append("\n\n===== 当前 App 核心记忆 (")
+                            .append(fgPkg).append(") =====\n").append(rendered.text)
+                        injectedMemoryIds.addAll(rendered.ids)
+                        Log.i(TAG, "memory inject pkg=$fgPkg len=${rendered.text.length}")
+                    }
                 }
                 // 复用同一个 system 消息；不要每轮 put(0) 生成孤儿历史并让裁剪越来越重。
                 systemMessage.put(
@@ -588,6 +598,11 @@ object ReActAgent {
                     if (!r.ok) {
                         onPhase("error", step, "LLM 请求失败")
                         onEvent(Event("error", "第 $step 轮请求失败(已重试 2 次): ${r.error}"))
+                        rememberRun(
+                            context, targetPkg, goal, "LLM 请求失败: ${r.error}", false,
+                            usedDeviceTool, notes.toString(), failureNotes,
+                            traceRun.task.taskId, injectedMemoryIds
+                        )
                         AgentTrace.finish(context, traceRun, false, "LLM 请求失败: ${r.error}", step)
                         return "LLM 请求失败: ${r.error}"
                     }
@@ -601,12 +616,10 @@ object ReActAgent {
                 // 没有工具调用: 普通聊天/问答/附件分析到此结束, 直接把回答作为最终结果
                 if (r.toolCalls.isEmpty()) {
                     if (r.content.isNotBlank()) {
-                        if (!memoryWritten && usedDeviceTool) {
-                            autoWriteMemory(
-                                context, provider, targetPkg, goal, r.content,
-                                notes.toString(), onEvent
-                            )
-                        }
+                        rememberRun(
+                            context, targetPkg, goal, r.content, true, usedDeviceTool,
+                            notes.toString(), failureNotes, traceRun.task.taskId, injectedMemoryIds
+                        )
                         AgentTrace.step(
                             context, traceRun, step, lastInput, r.content,
                             emptyList(), emptyList(), llmMs, r.reasoning, ctxChars, ctxMsgs
@@ -793,12 +806,10 @@ object ReActAgent {
                                 System.currentTimeMillis() - t0
                             )
                         )
-                        if (!memoryWritten && usedDeviceTool) {
-                            autoWriteMemory(
-                                context, provider, targetPkg, goal, summary,
-                                notes.toString(), onEvent
-                            )
-                        }
+                        rememberRun(
+                            context, targetPkg, goal, summary, true, usedDeviceTool,
+                            notes.toString(), failureNotes, traceRun.task.taskId, injectedMemoryIds
+                        )
                         AgentTrace.step(
                             context, traceRun, step, lastInput, r.content,
                             r.toolCalls.map { it.name to it.arguments },
@@ -908,9 +919,6 @@ object ReActAgent {
                     val result = AgentTools.execute(
                         context, provider, call.name, call.arguments, toolSession, awaitIfPaused
                     )
-                    if (call.name == "memory_write" && !result.startsWith("写入失败")) {
-                        memoryWritten = true
-                    }
                     val elapsed = System.currentTimeMillis() - t0
                     val lowerResult = result.lowercase()
                     val toolOk = !(result.startsWith("失败") || result.startsWith("错误") ||
@@ -929,6 +937,15 @@ object ReActAgent {
                     toolTraces.add(
                         AgentTrace.ToolTrace(call.name, call.arguments, result, elapsed, toolOk)
                     )
+                    // P1: 把动作类失败/不可用记下来, 任务结束后蒸馏成 pitfall 记忆
+                    if (failureNotes.size < 8 && call.name !in READ_ONLY_TOOLS &&
+                        (!toolOk || result.contains("当前不可用"))
+                    ) {
+                        failureNotes.add(
+                            "${call.name}(${call.arguments.take(80)}) -> " +
+                                result.replace('\n', ' ').take(150)
+                        )
+                    }
                     onEvent(Event("result", result.take(400), tool = call.name))
                     lastToolName = call.name
                     lastToolArgs = call.arguments
@@ -1035,6 +1052,11 @@ object ReActAgent {
                 }
             }
             onEvent(Event("error", "达到最大轮数 $MAX_STEPS, 任务未完成"))
+            rememberRun(
+                context, targetPkg, goal, "达到最大轮数, 任务未完成", false,
+                usedDeviceTool, notes.toString(), failureNotes,
+                traceRun.task.taskId, injectedMemoryIds
+            )
             AgentTrace.finish(context, traceRun, false, "达到最大轮数, 任务未完成", MAX_STEPS)
             return "达到最大轮数, 任务未完成"
         } catch (e: CancellationException) {
@@ -1043,11 +1065,24 @@ object ReActAgent {
             val userStopped = source.isNotBlank()
             val resultText = if (userStopped) "用户停止($source)" else "任务被中断(未记录来源)"
             onEvent(Event("error", if (userStopped) "任务已被用户停止 · $source" else "任务被中断"))
+            // 用户主动停止不当作失败经验; 但异常中断且有失败点时要留下 pitfall
+            if (!userStopped && failureNotes.isNotEmpty()) {
+                rememberRun(
+                    context, targetPkg, goal, resultText, false,
+                    usedDeviceTool, notes.toString(), failureNotes,
+                    traceRun.task.taskId, injectedMemoryIds
+                )
+            }
             AgentTrace.finish(context, traceRun, false, resultText, currentStep)
             throw e
         } catch (e: Exception) {
             Log.e(TAG, "任务执行异常: ${e.message}")
             onEvent(Event("error", "任务异常: ${e.message}"))
+            rememberRun(
+                context, targetPkg, goal, "任务异常: ${e.message}", false,
+                usedDeviceTool, notes.toString(), failureNotes,
+                traceRun.task.taskId, injectedMemoryIds
+            )
             AgentTrace.finish(context, traceRun, false, "任务异常: ${e.message}", currentStep)
             return "任务异常: ${e.message}"
         } finally {
@@ -1062,48 +1097,39 @@ object ReActAgent {
     }
 
     /**
-     * 任务完成时自动整理一条 App 记忆。
-     * 模型经常忘记调用 memory_write, 导致按包名隔离的记忆一直是空的;
-     * 这里用一次轻量 LLM 提取稳定入口/控件/坑, 明确禁止题目答案和一次性数据。
+     * 任务结束: 记录注入记忆的使用结果, 并把本次轨迹摘要交给后台整理器。
+     * 不再在热路径同步调用一次 LLM; 整理由 MemoryCurator 异步完成。
      */
-    private suspend fun autoWriteMemory(
+    private fun rememberRun(
         context: Context,
-        provider: LlmSettings.Provider,
         pkg: String,
         goal: String,
-        summary: String,
+        result: String,
+        success: Boolean,
+        usedDeviceTool: Boolean,
         notes: String,
-        onEvent: (Event) -> Unit
+        failures: List<String>,
+        taskId: String,
+        injectedIds: Collection<String>
     ) {
-        if (pkg.isBlank() || pkg == context.packageName) return
-        onEvent(Event("system", "整理 App 记忆…"))
-        val prompt = """
-            App 包名: $pkg
-            任务目标: ${goal.take(500)}
-            任务结果: ${summary.take(800)}
-            过程便签: ${notes.take(1200)}
-
-            请只提取这个 App 的稳定入口、关键控件、容易误点的位置/坑, 最多 300 字。
-            禁止记录: 题目答案、课程进度、具体任务结果、临时弹窗、用户隐私、一次性数据。
-            如果没有稳定信息, 只输出: 暂无稳定信息
-        """.trimIndent()
-        val messages = JSONArray().put(
-            JSONObject().put("role", "system")
-                .put("content", "你是 Android App 操作记忆整理器。只输出记忆正文, 不要解释。")
-        ).put(JSONObject().put("role", "user").put("content", prompt))
-        val r = try {
-            LlmClient.chat(provider, messages, 20_000)
-        } catch (e: Exception) {
-            Log.w(TAG, "auto memory failed: ${e.message}")
-            return
+        if (!usedDeviceTool || pkg.isBlank() || pkg == context.packageName) return
+        if (success && injectedIds.isNotEmpty()) {
+            AppMemory.touch(context, pkg, injectedIds, true)
         }
-        val text = r.content.trim()
-        if (!r.ok || text.length < 8 || text.contains("暂无稳定")) return
-        val writeResult = AppMemory.write(context, pkg, text.take(600), append = true)
-        Log.i(TAG, "auto memory [$pkg]: $writeResult")
-        if (!writeResult.startsWith("写入失败")) {
-            onEvent(Event("system", "已更新 App 记忆 ($pkg)"))
-        }
+        MemoryCurator.enqueue(
+            context,
+            MemoryCurator.Record(
+                taskId = taskId,
+                pkg = pkg,
+                goal = goal,
+                result = result,
+                success = success,
+                notes = notes,
+                failures = failures,
+                appVersion = MemoryStore.appVersion(context, pkg),
+                createdAt = System.currentTimeMillis()
+            )
+        )
     }
 
     /**

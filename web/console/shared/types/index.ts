@@ -79,7 +79,13 @@ export interface EventSummary {
   receivedAt: string
 }
 
-export type CommandType = 'TASK_ASSIGN' | 'TASK_PAUSE' | 'TASK_RESUME' | 'TASK_STOP'
+export type CommandType =
+  | 'TASK_ASSIGN'
+  | 'TASK_PAUSE'
+  | 'TASK_RESUME'
+  | 'TASK_STOP'
+  | 'MEMORY_UPDATE'
+  | 'MEMORY_DELETE'
 export type CommandStatus = 'pending' | 'sent' | 'acked' | 'failed' | 'expired'
 
 export interface CommandSummary {
@@ -149,11 +155,38 @@ export interface OverviewPayload {
   events: EventSummary[]
 }
 
+export type MemoryKind = 'entry' | 'control' | 'pitfall' | 'flow' | 'preference'
+
+export interface DeviceMemoryEntry {
+  id: string
+  kind: MemoryKind
+  page: string
+  text: string
+  selector: string
+  precondition: string
+  links: string[]
+  confidence: number
+  success: number
+  fail: number
+  createdAt: number
+  lastUsedAt: number
+  lastVerifiedAt: number
+  sourceRun: string
+}
+
+export interface DeviceMemoryPackage {
+  package: string
+  appVersion: string | null
+  updatedAt: string
+  entries: DeviceMemoryEntry[]
+}
+
 export interface DeviceDetailPayload {
   device: DeviceSummary
   tasks: TaskSummary[]
   events: EventSummary[]
   commands: CommandSummary[]
+  memories: DeviceMemoryPackage[]
 }
 
 export interface TaskDetailPayload {

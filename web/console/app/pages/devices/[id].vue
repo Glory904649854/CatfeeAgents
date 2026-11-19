@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { useStore } from 'vuex'
+import type { DeviceMemoryEntry, DeviceMemoryPackage } from '~~/shared/types'
 import type { RootState } from '~/store'
 
 useHead({ title: '设备详情 · CatfeeAgents 控制台' })
@@ -15,6 +16,10 @@ const device = computed(() => detail.value?.device ?? null)
 const tasks = computed(() => detail.value?.tasks ?? [])
 const events = computed(() => detail.value?.events ?? [])
 const commands = computed(() => detail.value?.commands ?? [])
+const memories = computed<DeviceMemoryPackage[]>(() => detail.value?.memories ?? [])
+const memoryEntryTotal = computed(() =>
+  memories.value.reduce((sum, group) => sum + group.entries.length, 0)
+)
 const loading = computed(() => store.state.devices.detailLoading)
 
 const statusMeta = computed(() =>
@@ -68,6 +73,90 @@ const infoFields = computed(() => [
     value: device.value?.revokedAt ? '已撤销' : '正常'
   }
 ])
+
+const memoryKindOptions = [
+  { label: '入口', value: 'entry' },
+  { label: '控件', value: 'control' },
+  { label: '坑', value: 'pitfall' },
+  { label: '流程', value: 'flow' },
+  { label: '偏好', value: 'preference' }
+]
+
+const memoryEditor = reactive({
+  show: false,
+  saving: false,
+  pkg: '',
+  entry: null as DeviceMemoryEntry | null,
+  kind: 'entry',
+  page: '',
+  text: '',
+  selector: '',
+  confidence: 0.7
+})
+
+function editMemory(pkg: string, entry: DeviceMemoryEntry) {
+  memoryEditor.pkg = pkg
+  memoryEditor.entry = entry
+  memoryEditor.kind = entry.kind
+  memoryEditor.page = entry.page
+  memoryEditor.text = entry.text
+  memoryEditor.selector = entry.selector
+  memoryEditor.confidence = entry.confidence
+  memoryEditor.show = true
+}
+
+async function saveMemory() {
+  if (!memoryEditor.entry) return
+  if (!memoryEditor.text.trim()) {
+    message.warning('记忆正文不能为空')
+    return
+  }
+  memoryEditor.saving = true
+  try {
+    const entry = {
+      ...memoryEditor.entry,
+      kind: memoryEditor.kind,
+      page: memoryEditor.page.trim(),
+      text: memoryEditor.text.trim(),
+      selector: memoryEditor.selector.trim(),
+      confidence: Number(memoryEditor.confidence)
+    }
+    const result = await $fetch<{ delivered: boolean; note?: string }>(
+      `/api/devices/${id.value}/memories/${encodeURIComponent(memoryEditor.pkg)}`,
+      { method: 'PATCH', body: { entry } }
+    )
+    message.success(result.delivered ? '已下发到设备' : result.note || '设备离线，已排队')
+    memoryEditor.show = false
+    await load()
+  } catch (err: unknown) {
+    const requestError = err as { data?: { message?: string } }
+    message.error(requestError?.data?.message || '保存失败')
+  } finally {
+    memoryEditor.saving = false
+  }
+}
+
+function removeMemory(pkg: string, entry: DeviceMemoryEntry) {
+  dialog.warning({
+    title: '删除记忆',
+    content: `确定删除「${entry.text.slice(0, 40)}${entry.text.length > 40 ? '…' : ''}」吗？`,
+    positiveText: '删除',
+    negativeText: '取消',
+    onPositiveClick: async () => {
+      try {
+        const result = await $fetch<{ delivered: boolean; note?: string }>(
+          `/api/devices/${id.value}/memories/${encodeURIComponent(pkg)}`,
+          { method: 'DELETE', query: { entryId: entry.id } }
+        )
+        message.success(result.delivered ? '已下发到设备' : result.note || '设备离线，已排队')
+        await load()
+      } catch (err: unknown) {
+        const requestError = err as { data?: { message?: string } }
+        message.error(requestError?.data?.message || '删除失败')
+      }
+    }
+  })
+}
 </script>
 
 <template>
@@ -197,6 +286,80 @@ const infoFields = computed(() => [
         </SectionCard>
       </div>
 
+      <SectionCard class="mt-4" title="App 记忆" flush>
+        <template #extra>
+          <span class="text-[10.5px] text-faint">
+            {{ memoryEntryTotal }} 条 · {{ memories.length }} 个 App
+          </span>
+        </template>
+        <div v-if="memories.length === 0">
+          <EmptyState
+            icon="i-lucide-brain"
+            title="暂无 App 记忆"
+            description="设备完成手机操作任务后会自动整理并上传。"
+          />
+        </div>
+        <div v-else class="divide-y divide-line/70">
+          <div v-for="group in memories" :key="group.package">
+            <div class="flex flex-wrap items-center gap-2 bg-soft/40 px-4 py-2.5">
+              <span class="i-lucide-smartphone text-[13px] text-muted" />
+              <span class="font-mono text-[11px] font-600 text-ink">{{ group.package }}</span>
+              <span class="chip">{{ group.entries.length }} 条</span>
+              <span v-if="group.appVersion" class="text-[10px] text-faint">
+                v{{ group.appVersion }}
+              </span>
+              <span class="ml-auto text-[10px] text-faint">
+                <TimeText :value="group.updatedAt" />
+              </span>
+            </div>
+            <div
+              v-for="entry in group.entries"
+              :key="entry.id"
+              class="group flex items-start gap-2.5 px-4 py-3 transition hover:bg-soft/50"
+            >
+              <span
+                class="mt-0.5 shrink-0 rounded-[6px] px-1.5 py-0.5 text-[9px] font-600"
+                :class="memoryKindMeta(entry.kind).className"
+              >
+                {{ memoryKindMeta(entry.kind).label }}
+              </span>
+              <div class="min-w-0 flex-1">
+                <p class="text-[11.5px] leading-5 text-ink">
+                  <span v-if="entry.page" class="text-faint">{{ entry.page }} · </span>
+                  {{ entry.text }}
+                </p>
+                <div class="mt-1 flex flex-wrap items-center gap-2 text-[9.5px] text-faint">
+                  <span v-if="entry.selector" class="max-w-[280px] truncate font-mono">
+                    {{ entry.selector }}
+                  </span>
+                  <span>置信 {{ Math.round(entry.confidence * 100) }}%</span>
+                  <span>成功 {{ entry.success }} / 失败 {{ entry.fail }}</span>
+                  <span v-if="entry.links.length">互链 {{ entry.links.length }}</span>
+                </div>
+              </div>
+              <div
+                class="flex shrink-0 items-center gap-1 opacity-0 transition group-hover:opacity-100"
+              >
+                <button
+                  class="icon-btn"
+                  title="编辑记忆"
+                  @click="editMemory(group.package, entry)"
+                >
+                  <span class="i-lucide-pencil text-[12px]" />
+                </button>
+                <button
+                  class="icon-btn text-danger"
+                  title="删除记忆"
+                  @click="removeMemory(group.package, entry)"
+                >
+                  <span class="i-lucide-trash-2 text-[12px]" />
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </SectionCard>
+
       <SectionCard class="mt-4" title="控制指令" flush>
         <div v-if="commands.length === 0">
           <EmptyState icon="i-lucide-terminal" title="暂无指令" description="任务下发或控制操作会记录在这里。" />
@@ -220,6 +383,69 @@ const infoFields = computed(() => [
           </div>
         </div>
       </SectionCard>
+
+      <n-modal
+        v-model:show="memoryEditor.show"
+        preset="card"
+        title="编辑记忆"
+        style="width: 440px"
+      >
+        <div class="space-y-3">
+          <div>
+            <p class="field-label mb-1">App</p>
+            <p class="font-mono text-[11px] text-muted">{{ memoryEditor.pkg }}</p>
+          </div>
+          <div class="grid grid-cols-2 gap-3">
+            <div>
+              <p class="field-label mb-1">类型</p>
+              <n-select
+                v-model:value="memoryEditor.kind"
+                :options="memoryKindOptions"
+                size="small"
+              />
+            </div>
+            <div>
+              <p class="field-label mb-1">置信度</p>
+              <n-input-number
+                v-model:value="memoryEditor.confidence"
+                size="small"
+                :min="0"
+                :max="1"
+                :step="0.05"
+              />
+            </div>
+          </div>
+          <div>
+            <p class="field-label mb-1">页面/路径</p>
+            <n-input v-model:value="memoryEditor.page" size="small" placeholder="首页/我的" />
+          </div>
+          <div>
+            <p class="field-label mb-1">正文</p>
+            <n-input v-model:value="memoryEditor.text" type="textarea" :rows="3" size="small" />
+          </div>
+          <div>
+            <p class="field-label mb-1">选择器</p>
+            <n-input
+              v-model:value="memoryEditor.selector"
+              size="small"
+              placeholder="text=设置 / id=tv_setting / xy=100,200"
+            />
+          </div>
+        </div>
+        <template #footer>
+          <div class="flex justify-end gap-2">
+            <n-button size="small" @click="memoryEditor.show = false">取消</n-button>
+            <n-button
+              size="small"
+              type="primary"
+              :loading="memoryEditor.saving"
+              @click="saveMemory"
+            >
+              保存
+            </n-button>
+          </div>
+        </template>
+      </n-modal>
     </template>
 
     <div v-else class="flat-card">

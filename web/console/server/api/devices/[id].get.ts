@@ -34,11 +34,30 @@ export default defineEventHandler((event) => {
     .prepare('SELECT * FROM commands WHERE device_id = ? ORDER BY created_at DESC LIMIT 20')
     .all(id) as Array<Record<string, unknown>>
 
+  const memories = db
+    .prepare('SELECT * FROM device_memories WHERE device_id = ? ORDER BY updated_at DESC')
+    .all(id) as Array<Record<string, unknown>>
+
   return {
     device: mapDevice(deviceRow),
     online: isDeviceOnline(id),
     tasks: tasks.map(mapTask),
     events: events.map(mapEvent),
-    commands: commands.map(mapCommand)
+    commands: commands.map(mapCommand),
+    memories: memories.map((row) => {
+      let entries: unknown[] = []
+      try {
+        const parsed = JSON.parse(String(row.entries_json ?? '[]'))
+        if (Array.isArray(parsed)) entries = parsed
+      } catch {
+        entries = []
+      }
+      return {
+        package: String(row.package),
+        appVersion: row.app_version ? String(row.app_version) : null,
+        updatedAt: String(row.updated_at),
+        entries
+      }
+    })
   }
 })

@@ -34,7 +34,7 @@
 | 🧠 | **本地多模态** | 无障碍树优先；读不到时降级到 ML Kit、PP-OCRv5、滚动长截图和视觉模型。图片附件先在本地 OCR，再把文字交给 LLM。 |
 | 🧰 | **原子工具** | 点击、长按、滑动、输入、按键、启动 App、读页面、截图、OCR、等待、校验、记忆、计划等都可独立调用，可组合出任意任务。 |
 | 🗂 | **会话管理** | 历史会话支持搜索、置顶、收藏、归档、重命名、导出 Markdown；消息可复制、引用、编辑重发、重新生成、分支出新会话。 |
-| 🧭 | **按 App 记忆** | 每个包名一份简短记忆，自动注入当前前台 App 的上下文；任务结束后只沉淀稳定入口、控件和坑，不记录题目答案或一次性数据。 |
+| 🧭 | **按 App 记忆** | 每个包名一套结构化记忆（入口 / 控件 / 坑 / 流程 / 偏好），带选择器、置信度、使用次数和互链；每轮按任务相关性注入核心记忆，其余留给 `memory_search`。 |
 | 📊 | **用量与成本** | 每个会话显示 tokens、上下文长度、消息/步骤数、累计耗时；可配置每 1M token 单价估算费用。 |
 | 📡 | **统一远程日志** | 可选绑定内置 Web 控制台，异步上报每一步输入、模型输出、工具参数与结果；本地聊天和 Web 任务共用同一套设备凭证，不再需要第三方 JWT。 |
 | 🖥 | **Web 控制台** | 仓库内提供 Nuxt 单端口控制台：设备注册、任务下发、实时事件、暂停/继续/停止与审计。Agent 主动通过 WebSocket 接入，Web 端不直接操作设备。 |
@@ -197,7 +197,7 @@ flowchart LR
 ```text
 observe  tap  tap_node  swipe  input_text  key  launch_app  open_url
 wait  wait_for_text  find_text  scroll_to_text  get_activity  ocr
-verify_text  verify_changed  note  todo_write  memory_read  memory_write  finish
+verify_text  verify_changed  note  todo_write  memory_read  memory_write  memory_search  finish
 ```
 
 其余能力按组加载（`load_tools`，也可由任务关键词自动激活）：
@@ -211,7 +211,7 @@ verify_text  verify_changed  note  todo_write  memory_read  memory_write  finish
 | `apps` | `launch_activity` `stop_app` `list_packages` `app_info` `get_prop` | App / Activity / 包信息 |
 | `system` | `shell` `settings_get` `settings_put` | 只读 shell、系统设置读写 |
 | `files` | `file_list` `file_read` `file_write` | 应用沙箱内文件 |
-| `memory` | `memory_list` `todo_read` | 记忆与计划读取 |
+| `memory` | `memory_list` `memory_delete` `todo_read` | 记忆归档与计划读取 |
 
 `load_tools("all")` 可一次性加载全部高级工具。`shell` 只允许只读查询，禁止 `input tap/swipe/keyevent`、`sendevent` 等 UI 注入，避免绕过坐标校验。
 
@@ -232,8 +232,21 @@ verify_text  verify_changed  note  todo_write  memory_read  memory_write  finish
 - **消息操作**：长按可复制、引用、编辑并重发、重新生成，或从该消息分支出新会话。
 - **附件**：一次最多 6 个；支持多图和多文件同时上传。图片本地 OCR；PDF 渲染前 6 页后 OCR；DOCX/XLSX/PPTX 解包提取文本；单文件上限 30MB。
 - **模型**：点击输入框下方的模型名，可只切换当前会话的模型，不影响全局默认和其他会话。
-- **记忆中心**：`设置 → 记忆` 查看、编辑、删除按 App 隔离的记忆。
+- **记忆中心**：`设置 → 记忆` 查看、编辑、删除按 App 隔离的结构化记忆；Web 控制台设备详情页也会展示设备上传的记忆，可直接编辑或删除（通过 `MEMORY_UPDATE / MEMORY_DELETE` 指令下发）。
 - **统计**：`设置 → 统计` 查看 token、上下文、耗时，配置每 1M token 单价估算费用。
+
+### 记忆系统
+
+参考 Mem0 / Letta / Zep / LangMem 的做法，记忆从“整段 markdown”升级成结构化条目：
+
+- **条目字段**：类型（入口/控件/坑/流程/偏好）、页面/路径、正文、选择器（`text=` / `desc=` / `id=` / `xy=`）、前置条件、置信度、成功/失败次数、最后验证时间、互链。
+- **相关性注入**：每轮按 `0.45 × 相关性 + 0.20 × 新近度 + 0.20 × 置信度 + 0.15 × 使用率` 打分，只注入 top-K（默认 800 字）；找不到时模型再调 `memory_search` 检索归档。
+- **合并而不是追加**：任务结束后由后台整理器（`MemoryCurator`）输出 `add / update / delete / noop`，相同控件或相似文本会合并；修复了旧版“写满 1200 字后新记忆被截断丢弃”的问题。
+- **失败也沉淀**：动作失败、控件不可用、重复无效会记成 `pitfall`，置信度上限 0.55，重复验证后再提升。
+- **版本与遗忘**：记录 App 版本；版本变化时提示模型校正旧条目；长期未验证且从未成功的条目不参与注入，并在整理时淘汰。
+- **互链**：一条记忆可以链接同 App 的其它记忆，注入时在预算允许下带上一跳关联项。
+- **后台整理**：任务结束只把摘要写入队列，LLM 合并在后台异步执行，不阻塞任务返回；App 启动或下次任务结束会继续处理未完成的队列。
+- **多设备聚合**：设备绑定 Web 控制台后，记忆快照通过 WebSocket `memory_sync` 上报，按 `(deviceId, package)` 存储，可在控制台查看/编辑/删除。
 
 ## Agent 状态
 
@@ -247,7 +260,7 @@ Agent · 第 12 步 · 等待模型
 
 阶段包括 `等待模型 / 操作中 / 等待确认 / 已暂停 / 已完成 / 已停止 / 异常`。通知提供 **打开、暂停/继续、停止**；控制动作带当前 session id，只影响当前 Agent owner。
 
-设置中可开启 **悬浮状态窗**（需授予悬浮窗权限）。悬浮窗显示步骤、阶段、耗时，并提供 **暂停/继续、停止** 按钮；它可能被目标 App 截图/OCR 捕获，不需要时可以关闭。暂停是进程内协作式暂停，不会取消原任务 Job；停止后需要重新发起任务。
+设置中可开启 **悬浮状态窗**（需授予悬浮窗权限）。悬浮窗显示步骤、阶段、耗时，并提供 **暂停/继续、停止** 按钮；Agent 注入手势命中悬浮窗时会临时让点击穿透到下层 App，手势结束自动恢复。停止需要两步确认（第一次点 `×` 变成「确认」，3 秒内再点一次），避免误触或 Agent 点击把任务停掉。暂停是进程内协作式暂停，不会取消原任务 Job；停止后需要重新发起任务。
 
 ## 通用表单与选项任务
 
@@ -291,7 +304,12 @@ app/src/main/java/com/catfee/rootauto/
 │   ├── ToolRuntime.kt           # 工具实现与页面校验
 │   ├── AgentController.kt       # 多会话运行、Agent 全局锁、状态
 │   ├── FormSolver.kt            # 通用选项式表单/答题
-│   └── AppMemory.kt             # 按包名隔离的记忆
+│   ├── AppMemory.kt             # 结构化记忆门面（兼容旧 UI/工具）
+│   └── memory/
+│       ├── MemoryModel.kt       # 条目模型、打分、遗忘曲线、行编解码
+│       ├── MemoryStore.kt       # 每 App JSON 存储、旧 md 迁移、合并/淘汰
+│       ├── MemoryInjector.kt    # 相关性检索、core/归档、互链
+│       └── MemoryCurator.kt     # 后台整理队列与 ADD/UPDATE/DELETE/NOOP
 ├── a11y/UiObserverService.kt    # 无障碍树、滚动、文本输入
 ├── session/
 │   ├── SessionStore.kt          # 会话/消息/附件/token 持久化

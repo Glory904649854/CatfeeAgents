@@ -123,7 +123,9 @@ export const COMMAND_TYPE_LABELS: Record<string, string> = {
   TASK_ASSIGN: '下发任务',
   TASK_PAUSE: '暂停任务',
   TASK_RESUME: '继续任务',
-  TASK_STOP: '停止任务'
+  TASK_STOP: '停止任务',
+  MEMORY_UPDATE: '更新记忆',
+  MEMORY_DELETE: '删除记忆'
 }
 
 export function deviceStatusMeta(status: DeviceStatus): StatusMeta {
@@ -140,4 +142,16 @@ export function eventLevelMeta(level: EventLevel): StatusMeta {
 
 export function commandStatusMeta(status: CommandStatus): StatusMeta {
   return COMMAND_STATUS_META[status] ?? COMMAND_STATUS_META.pending
+}
+
+const MEMORY_KIND_META: Record<string, StatusMeta> = {
+  entry: { label: '入口', className: 'bg-brand/10 text-brand', dotClassName: 'bg-brand' },
+  control: { label: '控件', className: 'bg-violet/10 text-violet', dotClassName: 'bg-violet' },
+  pitfall: { label: '坑', className: 'bg-warning/10 text-warning', dotClassName: 'bg-warning' },
+  flow: { label: '流程', className: 'bg-success/10 text-success', dotClassName: 'bg-success' },
+  preference: { label: '偏好', className: 'bg-slate/10 text-slate', dotClassName: 'bg-slate' }
+}
+
+export function memoryKindMeta(kind: string): StatusMeta {
+  return MEMORY_KIND_META[kind] ?? MEMORY_KIND_META.entry
 }

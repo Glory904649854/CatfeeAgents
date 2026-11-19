@@ -189,6 +189,7 @@ import androidx.lifecycle.lifecycleScope
 import com.catfee.rootauto.a11y.UiObserverService
 import com.catfee.rootauto.agent.AgentController
 import com.catfee.rootauto.agent.AppMemory
+import com.catfee.rootauto.agent.memory.MemoryCurator
 import com.catfee.rootauto.console.ConsoleClient
 import com.catfee.rootauto.console.ConsoleSettings
 import com.catfee.rootauto.console.EnrollQr
@@ -760,6 +761,8 @@ private fun AgentConsole(activity: ComponentActivity) {
         ) {
             notifLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
+        // 启动时补跑上次没整理完的记忆任务
+        MemoryCurator.requestDrain(context.applicationContext)
     }
 
     // adb autostart
@@ -3523,7 +3526,7 @@ private fun SettingsSheet(
                     Column(Modifier.weight(1f)) {
                         Text("App 记忆", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = Ink)
                         Text(
-                            "每个 App 独立；Agent 只注入前 800 字，最多保存 ${AppMemory.MAX_WRITE} 字。",
+                            "按任务相关性注入核心记忆；每条有类型、置信度、使用次数，可在下方直接编辑。",
                             fontSize = 10.5.sp, color = Muted, lineHeight = 15.sp
                         )
                     }
@@ -3645,7 +3648,7 @@ private fun SettingsSheet(
                                         modifier = Modifier.weight(1f)
                                     )
                                     Text(
-                                        "${entry.chars}/${AppMemory.MAX_WRITE} 字",
+                                        "${entry.entryCount} 条",
                                         fontSize = 9.sp,
                                         color = Muted
                                     )

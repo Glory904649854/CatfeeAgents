@@ -3,6 +3,7 @@ package com.catfee.rootauto.console
 import android.content.Context
 import android.util.Log
 import com.catfee.rootauto.agent.AgentController
+import com.catfee.rootauto.agent.AppMemory
 import com.catfee.rootauto.device.DeviceCapabilities
 import com.catfee.rootauto.llm.LlmSettings
 import org.json.JSONObject
@@ -24,10 +25,13 @@ object RemoteTaskRunner {
     suspend fun handle(context: Context, message: JSONObject) {
         if (message.optString("type") != "command") return
         val commandId = message.optString("commandId")
-        val taskId = message.optString("taskId")
+        val rawTaskId = message.optString("taskId")
         val commandType = message.optString("commandType")
         val payload = message.optJSONObject("payload") ?: JSONObject()
-        if (commandId.isBlank() || taskId.isBlank()) return
+        if (commandId.isBlank()) return
+        // 记忆编辑/删除不属于任务, Web 端用 __memory__ 作为占位 taskId
+        if (rawTaskId.isBlank() && !commandType.startsWith("MEMORY_")) return
+        val taskId = rawTaskId.ifBlank { "__memory__" }
 
         if (processedCommands.putIfAbsent(commandId, true) != null) {
             ConsoleClient.sendCommandAck(context, commandId, taskId, "applied", "duplicate ignored")
@@ -39,10 +43,52 @@ object RemoteTaskRunner {
             "TASK_PAUSE" -> control(context, commandId, taskId, "pause")
             "TASK_RESUME" -> control(context, commandId, taskId, "resume")
             "TASK_STOP" -> control(context, commandId, taskId, "stop")
+            "MEMORY_UPDATE" -> memoryUpdate(context, commandId, taskId, payload)
+            "MEMORY_DELETE" -> memoryDelete(context, commandId, taskId, payload)
             else -> ConsoleClient.sendCommandAck(
                 context, commandId, taskId, "rejected", "unsupported command: $commandType"
             )
         }
+    }
+
+    private suspend fun memoryUpdate(
+        context: Context,
+        commandId: String,
+        taskId: String,
+        payload: JSONObject
+    ) {
+        val pkg = payload.optString("package")
+        val entry = payload.optJSONObject("entry")
+        if (pkg.isBlank() || entry == null) {
+            ConsoleClient.sendCommandAck(context, commandId, taskId, "rejected", "package/entry 为空")
+            return
+        }
+        val ok = AppMemory.applyRemoteEntry(context, pkg, entry)
+        ConsoleClient.sendCommandAck(
+            context, commandId, taskId,
+            if (ok) "applied" else "rejected",
+            if (ok) "memory updated" else "entry invalid"
+        )
+    }
+
+    private suspend fun memoryDelete(
+        context: Context,
+        commandId: String,
+        taskId: String,
+        payload: JSONObject
+    ) {
+        val pkg = payload.optString("package")
+        val entryId = payload.optString("entryId")
+        if (pkg.isBlank() || entryId.isBlank()) {
+            ConsoleClient.sendCommandAck(context, commandId, taskId, "rejected", "package/entryId 为空")
+            return
+        }
+        val ok = AppMemory.removeEntry(context, pkg, entryId)
+        ConsoleClient.sendCommandAck(
+            context, commandId, taskId,
+            if (ok) "applied" else "rejected",
+            if (ok) "memory deleted" else "entry not found"
+        )
     }
 
     private suspend fun assign(

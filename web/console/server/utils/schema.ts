@@ -105,4 +105,14 @@ CREATE TABLE IF NOT EXISTS audit_events (
   created_at  TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_events(created_at DESC);
+
+CREATE TABLE IF NOT EXISTS device_memories (
+  device_id    TEXT NOT NULL,
+  package      TEXT NOT NULL,
+  app_version  TEXT,
+  entries_json TEXT NOT NULL DEFAULT '[]',
+  updated_at   TEXT NOT NULL,
+  PRIMARY KEY (device_id, package)
+);
+CREATE INDEX IF NOT EXISTS idx_memories_device ON device_memories(device_id);
 `

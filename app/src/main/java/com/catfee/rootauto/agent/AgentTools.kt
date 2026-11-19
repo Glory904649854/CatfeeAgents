@@ -78,7 +78,7 @@ object AgentTools {
         "launch_app", "open_url", "wait", "wait_for_text",
         "find_text", "scroll_to_text", "get_activity", "ocr",
         "verify_text", "verify_changed", "note", "todo_write",
-        "memory_read", "memory_write", "finish"
+        "memory_read", "memory_write", "memory_search", "finish"
     )
 
     private val GROUP_TOOLS: Map<String, Set<String>> = mapOf(
@@ -97,7 +97,7 @@ object AgentTools {
         ),
         "system" to setOf("shell", "settings_get", "settings_put"),
         "files" to setOf("file_list", "file_read", "file_write"),
-        "memory" to setOf("memory_list", "todo_read")
+        "memory" to setOf("memory_list", "memory_delete", "todo_read")
     )
 
     /** 只有 Root 才能可靠执行的工具 */
@@ -723,21 +723,48 @@ object AgentTools {
         .put(tool("todo_read", "读取当前任务清单。", obj()))
         .put(
             tool(
-                "memory_read", "读取某个 App 的操作记忆 (按包名隔离)。不传包名则读当前前台 App。每轮 system 也会自动注入当前 App 记忆。",
+                "memory_read",
+                "读取某个 App 的操作记忆。不传包名则读当前前台 App。system 每轮也会按任务相关性自动注入核心记忆。",
                 obj().put("package", prop("string", "包名, 如 com.example.app; 可空"))
             )
         )
         .put(
             tool(
-                "memory_write", "写入某个 App 的简洁操作记忆 (≤1200 字)。只记稳定入口/关键控件/易错点, 不要记题目答案。",
+                "memory_write",
+                "写入一条结构化操作记忆。kind: entry/control/pitfall/flow/preference; text 写稳定事实, selector 用 text=/desc=/id=/xy=。只记稳定入口/控件/坑/流程, 不记答案。",
                 obj()
                     .put("package", prop("string", "包名; 空=当前前台 App"))
-                    .put("content", prop("string", "简洁记忆内容"))
-                    .put("append", prop("boolean", "true=追加, 默认覆盖"))
-                    .also { it.put("required", JSONArray().put("content")) }
+                    .put("kind", prop("string", "entry/control/pitfall/flow/preference, 默认 entry"))
+                    .put("page", prop("string", "页面/路径, 如 首页/我的"))
+                    .put("text", prop("string", "稳定事实, ≤120 字"))
+                    .put("selector", prop("string", "控件定位: text=xxx / desc=xxx / id=xxx / xy=100,200"))
+                    .put("precondition", prop("string", "触发条件, 可空"))
+                    .put("confidence", prop("number", "置信度 0~1, 默认 0.7"))
+                    .put("content", prop("string", "兼容旧用法: 一段文本; 填了 text 时忽略"))
+                    .put("append", prop("boolean", "兼容旧用法: true=合并, false=覆盖, 默认合并"))
             )
         )
-        .put(tool("memory_list", "列出已保存记忆的 App 包名与大小。", obj()))
+        .put(
+            tool(
+                "memory_search",
+                "按关键词检索某个 App 的记忆归档。核心记忆已自动注入; 需要更多入口/坑时再用。",
+                obj()
+                    .put("package", prop("string", "包名; 空=当前前台 App"))
+                    .put("query", prop("string", "关键词/页面/控件名"))
+                    .also { it.put("required", JSONArray().put("query")) }
+            )
+        )
+        .put(
+            tool(
+                "memory_delete",
+                "删除一条记忆（按 id）。id 可从 memory_read / memory_search 结果里看到。",
+                obj()
+                    .put("package", prop("string", "包名; 空=当前前台 App"))
+                    .put("id", prop("string", "记忆 id, 如 mem_ab12cd34ef"))
+                    .also { it.put("required", JSONArray().put("id")) }
+            )
+        )
+        .put(tool("memory_list", "列出已保存记忆的 App 包名与条数。", obj()))
         .put(
             tool(
                 "answer_form", "通用选项式表单/测验: 先让题目显示在当前页, 再调用。内部 OCR 读题、三模型独立作答并投票、每题 3 次像素核对、整页复查后提交。任何 App 都能用。",
@@ -879,17 +906,44 @@ object AgentTools {
                 "todo_write", "todo_read" -> "由 Agent 循环直接处理"
                 "memory_read" -> {
                     val pkg = args.optString("package").ifBlank { AppMemory.currentPackage() }
-                    val mem = AppMemory.read(context, pkg)
+                    val mem = AppMemory.readForTool(context, pkg)
                     if (mem.isBlank()) "「$pkg」暂无记忆" else "「$pkg」记忆:\n$mem"
                 }
                 "memory_write" -> {
                     val pkg = args.optString("package").ifBlank { AppMemory.currentPackage() }
-                    AppMemory.write(
-                        context,
-                        pkg,
-                        args.optString("content"),
-                        args.optBoolean("append", false)
-                    )
+                    val kind = args.optString("kind")
+                    val page = args.optString("page")
+                    val selector = args.optString("selector")
+                    val text = args.optString("text")
+                    val content = args.optString("content")
+                    val structured = text.isNotBlank() || kind.isNotBlank() ||
+                        page.isNotBlank() || selector.isNotBlank()
+                    if (structured) {
+                        AppMemory.addEntry(
+                            context = context,
+                            pkg = pkg,
+                            kind = kind,
+                            page = page,
+                            text = text.ifBlank { content },
+                            selector = selector,
+                            confidence = args.optDouble("confidence", 0.7),
+                            precondition = args.optString("precondition")
+                        )
+                    } else {
+                        AppMemory.write(context, pkg, content, args.optBoolean("append", true))
+                    }
+                }
+                "memory_search" -> {
+                    val pkg = args.optString("package").ifBlank { AppMemory.currentPackage() }
+                    AppMemory.search(context, pkg, args.optString("query"))
+                }
+                "memory_delete" -> {
+                    val pkg = args.optString("package").ifBlank { AppMemory.currentPackage() }
+                    if (AppMemory.removeEntry(context, pkg, args.optString("id"))) {
+                        "已删除该记忆"
+                    } else {
+                        "未找到该记忆"
+                    }
                 }
                 "memory_list" -> AppMemory.list(context)
                 "find_text" -> ToolRuntime.findText(
