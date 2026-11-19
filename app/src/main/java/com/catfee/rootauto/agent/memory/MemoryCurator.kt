@@ -251,7 +251,10 @@ object MemoryCurator {
 
     private fun itemFromCurator(entry: JSONObject, record: Record): MemoryItem? {
         val text = entry.optString("text").trim()
-        if (text.isBlank()) return null
+            .replace(Regex("\\*\\*"), "")
+            .replace(Regex("(?m)^#{1,6}\\s*"), "")
+            .trim()
+        if (text.length < 6 || text.endsWith("**")) return null
         val links = mutableListOf<String>()
         entry.optJSONArray("links")?.let { arr ->
             for (i in 0 until arr.length()) {

@@ -259,10 +259,34 @@ object MemoryLineCodec {
     }
 
     fun parse(content: String): List<MemoryItem> {
+        val rawText = content.trim()
+        if (rawText.isBlank()) return emptyList()
+
+        // 结构化行(编辑器/[kind] 前缀)逐行解析; 普通 markdown 段落整体作为一条,
+        // 避免把「关键控件**」这类标题拆成碎片记忆。
+        val structured = rawText.lineSequence().any { line ->
+            val t = line.trim()
+            t.startsWith("[") && t.contains("]")
+        }
+        if (!structured) {
+            val clean = rawText
+                .replace(Regex("\\*\\*"), "")
+                .replace(Regex("(?m)^#{1,6}\\s*"), "")
+                .replace(Regex("(?m)^[-*•]\\s*"), "")
+                .replace(Regex("\\s+"), " ")
+                .trim()
+            if (clean.length < 8) return emptyList()
+            return listOf(
+                MemoryItem(kind = MemoryKind.ENTRY, text = clean.take(500), confidence = 0.6)
+            )
+        }
+
         val out = ArrayList<MemoryItem>()
         content.split('\n').forEach { raw ->
             val line = raw.trim().trimStart('-', '*', '•').trim()
             if (line.isBlank()) return@forEach
+            // 丢弃标题/分隔线/过短碎片
+            if (line.startsWith("#") || line.endsWith("**") || line.length < 6) return@forEach
             val tagEnd = if (line.startsWith("[")) line.indexOf(']') else -1
             val kind = if (tagEnd > 1) {
                 MemoryKind.fromLabel(line.substring(1, tagEnd))
@@ -286,7 +310,7 @@ object MemoryLineCodec {
                     selector = parts[1]
                 }
             }
-            if (text.isBlank()) return@forEach
+            if (text.isBlank() || text.length < 4) return@forEach
             out.add(
                 MemoryItem(
                     kind = kind,
