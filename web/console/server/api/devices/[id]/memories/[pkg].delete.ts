@@ -5,7 +5,7 @@
 export default defineEventHandler(async (event) => {
   const id = String(getRouterParam(event, 'id') ?? '')
   const pkg = decodeURIComponent(String(getRouterParam(event, 'pkg') ?? '')).trim()
-  requireUser(event)
+  requireRole(event, 'owner', 'admin', 'operator')
   if (!id || !pkg) throw badRequest('缺少设备或包名')
 
   const db = getDb()

@@ -100,19 +100,26 @@ object MemoryInjector {
             .map { it.first }
     }
 
-    fun format(item: MemoryItem, global: Boolean = false, oneHop: Boolean = false): String =
-        buildString {
-            append('[')
+    fun format(item: MemoryItem, global: Boolean = false, oneHop: Boolean = false): String {
+        // 记忆可能来自页面/控制台, 统一压成单行并标记为参考数据, 降低提示词注入面。
+        val cleanText = item.text
+            .replace('\n', ' ')
+            .replace('\r', ' ')
+            .filter { it.code >= 32 }
+            .trim()
+        return buildString {
+            append("[参考·")
             if (global) append("全局·")
             append(item.kind.label)
             append("] ")
             if (oneHop) append("↳ ")
             if (item.page.isNotBlank()) append(item.page).append(": ")
-            append(item.text.take(160))
+            append(cleanText.take(160))
             if (item.selector.isNotBlank()) append(" (").append(item.selector.take(90)).append(')')
             if (item.precondition.isNotBlank()) append(" {").append(item.precondition.take(50)).append('}')
             append(" ·").append((item.confidence * 100).toInt()).append('%')
         }
+    }
 
     private fun collect(context: Context, pkg: String, query: String): List<Candidate> {
         val stores = loadStores(context, pkg)

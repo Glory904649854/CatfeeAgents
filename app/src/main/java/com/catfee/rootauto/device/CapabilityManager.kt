@@ -151,6 +151,8 @@ object CapabilityManager {
         context: Context,
         capability: Capability,
         timeoutMs: Long = 60_000,
+        /** Web 任务策略禁止 Root 时, 不要通过 su 静默恢复无障碍 */
+        allowRoot: Boolean = true,
         onStatus: suspend (String) -> Unit = {}
     ): Boolean {
         if (capability == Capability.ROOT) {
@@ -161,7 +163,7 @@ object CapabilityManager {
         if (isEnabled(context, capability)) return true
 
         // 无障碍先尝试 Root 静默恢复, 失败再打开设置
-        if (capability == Capability.ACCESSIBILITY) {
+        if (capability == Capability.ACCESSIBILITY && allowRoot) {
             val caps = DeviceCapabilities.refresh(context, force = true)
             if (caps.root) {
                 onStatus("正在通过 Root 恢复无障碍服务…")

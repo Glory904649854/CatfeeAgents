@@ -8,6 +8,7 @@ import com.catfee.rootauto.device.Capability
 import com.catfee.rootauto.device.CapabilityManager
 import com.catfee.rootauto.device.DeviceCapabilities
 import com.catfee.rootauto.llm.LlmSettings
+import org.json.JSONArray
 import org.json.JSONObject
 import java.util.concurrent.ConcurrentHashMap
 
@@ -21,8 +22,12 @@ object RemoteTaskRunner {
 
     /** taskId -> 本地 AgentController sessionId */
     private val sessions = ConcurrentHashMap<String, String>()
-    /** commandId 去重: WebSocket 重连时服务端可能重发 */
+    /** commandId 去重: WebSocket 重连或 App 重启后服务端都可能重发 */
     private val processedCommands = ConcurrentHashMap<String, Boolean>()
+    private const val CMD_PREF = "catfee_remote_commands"
+    private const val CMD_KEY = "processed_ids"
+    private const val CMD_KEEP = 200
+    private val cmdLock = Any()
 
     suspend fun handle(context: Context, message: JSONObject) {
         if (message.optString("type") != "command") return
@@ -35,7 +40,17 @@ object RemoteTaskRunner {
         if (rawTaskId.isBlank() && !commandType.startsWith("MEMORY_")) return
         val taskId = rawTaskId.ifBlank { "__memory__" }
 
-        if (processedCommands.putIfAbsent(commandId, true) != null) {
+        // 记忆编辑也会进入模型上下文, 同样要求设备端显式开启远程控制。
+        if (commandType.startsWith("MEMORY_") &&
+            !ConsoleSettings.load(context).remoteAutoApprove
+        ) {
+            ConsoleClient.sendCommandAck(
+                context, commandId, taskId, "rejected", "remote control disabled on device"
+            )
+            return
+        }
+
+        if (!markCommandIfNew(context, commandId)) {
             ConsoleClient.sendCommandAck(context, commandId, taskId, "applied", "duplicate ignored")
             return
         }
@@ -115,16 +130,39 @@ object RemoteTaskRunner {
             return
         }
 
-        // 无障碍被系统重置时不要直接失败: 先尝试 Root 恢复, 再打开系统设置等待用户开启。
-        // 远程任务无人值守时最多等 90 秒, 期间持续把提示写进任务时间线。
-        val capsBefore = DeviceCapabilities.refresh(context, force = true)
+        // 设备端必须显式开启远程控制; 默认拒绝, 避免控制台账号被盗后静默接管手机。
+        if (!ConsoleSettings.load(context).remoteAutoApprove) {
+            ConsoleClient.sendCommandAck(
+                context, commandId, taskId, "rejected", "remote control disabled on device"
+            )
+            ConsoleClient.emitEvent(
+                context, taskId, "task.failed", "error",
+                JSONObject()
+                    .put("summary", "设备未允许远程控制")
+                    .put(
+                        "error",
+                        "请在手机 App 的 设置 → Web 控制台 中开启「允许远程任务直接操作手机」后重新下发"
+                    )
+            )
+            return
+        }
+
+        val policy = payload.optJSONObject("policy") ?: JSONObject()
+        val allowRoot = policy.optBoolean("allowRoot", false)
+        val allowScreenshot = policy.optBoolean("allowScreenshot", true)
+
+        // 无障碍被系统重置时不要直接失败: 在策略允许时先尝试 Root 恢复,
+        // 否则只打开系统设置等待用户开启。远程任务无人值守时最多等 90 秒。
+        val capsBefore = DeviceCapabilities.refresh(
+            context, force = true, probeDaemon = allowRoot
+        )
         if (!capsBefore.accessibility) {
             ConsoleClient.emitEvent(
                 context, taskId, "task.notice", "warn",
                 JSONObject().put("summary", "无障碍未开启，正在尝试自动开启并等待…")
             )
             val ready = CapabilityManager.ensure(
-                context, Capability.ACCESSIBILITY, 90_000
+                context, Capability.ACCESSIBILITY, 90_000, allowRoot = allowRoot
             ) { msg ->
                 ConsoleClient.emitEvent(
                     context, taskId, "task.notice", "info",
@@ -153,9 +191,6 @@ object RemoteTaskRunner {
             )
         }
 
-        val policy = payload.optJSONObject("policy") ?: JSONObject()
-        val allowRoot = policy.optBoolean("allowRoot", false)
-        val allowScreenshot = policy.optBoolean("allowScreenshot", true)
         // -1 = 不限制时长, 由 Web 端手动暂停/停止
         val timeoutMs = policy.optLong("timeoutMs", -1L)
         val sessionId = "remote_$taskId"
@@ -173,12 +208,13 @@ object RemoteTaskRunner {
             goal = goal,
             sessionId = sessionId,
             priorContext = "",
-            phoneAllowed = true,
             attachments = emptyList(),
             traceTaskId = taskId,
             allowRootTools = allowRoot,
             allowScreenshot = allowScreenshot,
-            timeoutMs = timeoutMs
+            timeoutMs = timeoutMs,
+            // 到这里说明设备已显式开启远程控制, 不再逐任务弹确认
+            phoneAllowed = true
         )
         if (!ok) {
             ConsoleClient.emitEvent(
@@ -186,6 +222,28 @@ object RemoteTaskRunner {
                 JSONObject().put("summary", "设备忙碌，任务未启动").put("error", "AgentController 启动失败")
             )
             Log.w(TAG, "remote task start failed task=$taskId")
+        }
+    }
+
+    /** 持久化 commandId 去重, 避免 App 重启后服务端重发造成任务重复执行。 */
+    private fun markCommandIfNew(context: Context, commandId: String): Boolean {
+        if (processedCommands.putIfAbsent(commandId, true) != null) return false
+        synchronized(cmdLock) {
+            val prefs = context.applicationContext
+                .getSharedPreferences(CMD_PREF, Context.MODE_PRIVATE)
+            val arr = try {
+                JSONArray(prefs.getString(CMD_KEY, "[]"))
+            } catch (_: Exception) {
+                JSONArray()
+            }
+            for (i in 0 until arr.length()) {
+                if (arr.optString(i) == commandId) return false
+            }
+            val next = JSONArray().put(commandId)
+            val start = maxOf(0, arr.length() - (CMD_KEEP - 1))
+            for (i in start until arr.length()) next.put(arr.optString(i))
+            prefs.edit().putString(CMD_KEY, next.toString()).apply()
+            return true
         }
     }
 

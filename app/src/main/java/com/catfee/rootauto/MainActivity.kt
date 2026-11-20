@@ -450,6 +450,7 @@ private fun AgentConsole(activity: ComponentActivity) {
     }
     var consoleDeviceId by remember { mutableStateOf(consoleCfg.deviceId) }
     var consoleStatus by remember { mutableStateOf(consoleCfg.lastStatus) }
+    var consoleRemoteApprove by remember { mutableStateOf(consoleCfg.remoteAutoApprove) }
     var showConsoleScanner by remember { mutableStateOf(false) }
     val consoleConnected by ConsoleClient.connected.collectAsState()
     val consoleLiveStatus by ConsoleClient.status.collectAsState()
@@ -486,7 +487,8 @@ private fun AgentConsole(activity: ComponentActivity) {
         enabled: Boolean = consoleEnabled,
         deviceId: String = consoleDeviceId,
         baseUrl: String = consoleBase,
-        deviceName: String = consoleName
+        deviceName: String = consoleName,
+        remoteAutoApprove: Boolean = consoleRemoteApprove
     ) {
         ConsoleSettings.save(
             activity,
@@ -496,7 +498,8 @@ private fun AgentConsole(activity: ComponentActivity) {
                 deviceId = deviceId,
                 deviceSecret = ConsoleSettings.load(activity).deviceSecret,
                 deviceName = deviceName.trim(),
-                lastStatus = consoleStatus
+                lastStatus = consoleStatus,
+                remoteAutoApprove = remoteAutoApprove
             )
         )
     }
@@ -1089,6 +1092,16 @@ private fun AgentConsole(activity: ComponentActivity) {
             onConsoleName = { consoleName = it },
             consoleDeviceId = consoleDeviceId,
             consoleStatus = consoleStatus,
+            consoleRemoteApprove = consoleRemoteApprove,
+            onConsoleRemoteApprove = { allowed ->
+                consoleRemoteApprove = allowed
+                saveConsole(remoteAutoApprove = allowed)
+                consoleStatus = if (allowed) {
+                    "远程任务将直接操作手机（请确认控制台账号安全）"
+                } else {
+                    "远程任务已被设备拒绝"
+                }
+            },
             consoleConnected = consoleConnected,
             onBindConsole = { bindConsole() },
             onScanConsole = { showConsoleScanner = true },
@@ -3169,6 +3182,8 @@ private fun SettingsSheet(
     onConsoleName: (String) -> Unit,
     consoleDeviceId: String,
     consoleStatus: String,
+    consoleRemoteApprove: Boolean,
+    onConsoleRemoteApprove: (Boolean) -> Unit,
     consoleConnected: Boolean,
     onBindConsole: () -> Unit,
     onScanConsole: () -> Unit,
@@ -3404,6 +3419,34 @@ private fun SettingsSheet(
                     Switch(
                         checked = consoleEnabled,
                         onCheckedChange = onConsoleEnabled,
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = Color.White,
+                            checkedTrackColor = Ink,
+                            uncheckedThumbColor = Color.White,
+                            uncheckedTrackColor = Color(0xFFD1D5DB),
+                            uncheckedBorderColor = Color.Transparent
+                        )
+                    )
+                }
+                Spacer(Modifier.height(10.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            "允许远程任务直接操作手机",
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = Ink
+                        )
+                        Text(
+                            "关闭时控制台任务会被拒绝；开启后远程任务可直接操作手机。默认关闭。",
+                            fontSize = 10.sp,
+                            color = Muted,
+                            lineHeight = 14.sp
+                        )
+                    }
+                    Switch(
+                        checked = consoleRemoteApprove,
+                        onCheckedChange = onConsoleRemoteApprove,
                         colors = SwitchDefaults.colors(
                             checkedThumbColor = Color.White,
                             checkedTrackColor = Ink,

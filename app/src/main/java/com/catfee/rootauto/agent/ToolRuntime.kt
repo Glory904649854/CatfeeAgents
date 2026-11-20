@@ -43,6 +43,47 @@ object ToolRuntime {
 
     private const val TAG = "ToolRuntime"
 
+    /** 本次 Agent 运行的工具策略; 由 AgentTools.execute 设置, 所有内部降级路径都必须检查。 */
+    data class Policy(val allowRoot: Boolean, val allowScreenshot: Boolean)
+
+    @Volatile
+    private var policy = Policy(allowRoot = true, allowScreenshot = true)
+
+    fun setPolicy(next: Policy): Policy {
+        val previous = policy
+        policy = next
+        return previous
+    }
+
+    fun policySnapshot(): Policy = policy
+
+    fun rootAllowed(): Boolean = policy.allowRoot
+
+    fun screenshotAllowed(): Boolean = policy.allowScreenshot
+
+    /** 包名 / Activity / settings key 的严格格式, 避免把模型输出去拼 shell。 */
+    private val PACKAGE_RE = Regex("^[A-Za-z0-9_]+(\\.[A-Za-z0-9_]+)*$")
+    private val COMPONENT_RE = Regex("^[A-Za-z0-9_]+(\\.[A-Za-z0-9_]+)*/[A-Za-z0-9_.$]+$")
+    private val SETTINGS_KEY_RE = Regex("^[A-Za-z0-9_.-]{1,120}$")
+
+    /** 单引号转义, 用于仍然必须经过 shell 的少量固定命令。 */
+    fun shellQuote(value: String): String =
+        "'" + value.replace("'", "'\\''") + "'"
+
+    private fun safeHttpUrl(raw: String): String? = try {
+        val uri = java.net.URI(raw)
+        val scheme = uri.scheme?.lowercase()
+        if (scheme != "http" && scheme != "https") {
+            null
+        } else if (raw.any { it == '\n' || it == '\r' || it == '\u0000' }) {
+            null
+        } else {
+            raw
+        }
+    } catch (_: Exception) {
+        null
+    }
+
     /**
      * 验证缓存由 AgentTools.Session 持有, 这里不再保留全局状态。
      * 这样并行/连续会话不会互相污染 observe、ocr、verify_changed 的结果。
@@ -198,7 +239,11 @@ object ToolRuntime {
         val guess = UiObserverService.instance?.currentComponentGuess().orEmpty()
         if (guess.isNotBlank()) return guess
         if (!RootShell.isAvailable()) return "读取失败: 当前为非 Root 模式且无障碍不可用"
-        val line = RootShell.execText("dumpsys window 2>/dev/null | grep -m1 mCurrentFocus")
+        val line = if (rootAllowed()) {
+            RootShell.execText("dumpsys window 2>/dev/null | grep -m1 mCurrentFocus")
+        } else {
+            ""
+        }
         val inner = line.substringAfter('{', "").substringBefore('}')
         val target = inner.split(' ').lastOrNull { it.contains('/') }.orEmpty()
         return if (target.isBlank()) "读取失败: $line" else target
@@ -744,27 +789,33 @@ object ToolRuntime {
     // ---------------- 应用/系统 ----------------
 
     suspend fun launchActivity(context: Context, component: String): String {
-        if (component.isBlank() || !component.contains('/')) return "component 格式应为 包名/Activity"
+        if (!COMPONENT_RE.matches(component)) {
+            return "component 格式应为 包名/Activity，且只能包含字母、数字、点、下划线和 \$"
+        }
         val err = AppLauncher.launchActivity(context, component)
         if (err == null) return "已启动 $component"
-        if (RootShell.isAvailable()) {
-            val r = RootShell.exec("am start -n $component 2>&1")
+        if (RootShell.isAvailable() && rootAllowed()) {
+            val r = RootShell.exec("am start -n ${shellQuote(component)} 2>&1")
             if (r.ok && !r.stdout.contains("Error")) return "已启动 $component"
             return "启动失败: ${(r.stdout + r.stderr).take(200)}"
+        }
+        if (RootShell.isAvailable() && !rootAllowed()) {
+            return "启动失败: 当前任务未授权 Root 增强能力 ($err)"
         }
         return "启动失败: $err"
     }
 
     suspend fun stopApp(pkg: String): String {
-        if (pkg.isBlank()) return "包名为空"
+        if (!PACKAGE_RE.matches(pkg)) return "包名格式不合法"
+        if (!rootAllowed()) return "当前任务未授权 Root 增强能力，stop_app 不可用"
         if (!RootShell.isAvailable()) return "当前为非 Root 模式，stop_app 不可用"
-        val r = RootShell.exec("am force-stop $pkg")
+        val r = RootShell.exec("am force-stop ${shellQuote(pkg)}")
         return if (r.ok) "已停止 $pkg" else "停止失败: ${r.stderr.take(160)}"
     }
 
     @Suppress("DEPRECATION")
     suspend fun listPackages(context: Context, keyword: String): String {
-        if (!RootShell.isAvailable()) {
+        if (!RootShell.isAvailable() || !rootAllowed()) {
             val apps = try {
                 context.packageManager.getInstalledApplications(0)
             } catch (e: Exception) {
@@ -777,15 +828,19 @@ object ToolRuntime {
                 .map { "package:$it" }
             return if (lines.isEmpty()) "没有匹配的包" else lines.joinToString("\n")
         }
-        val cmd = if (keyword.isBlank()) "pm list packages" else "pm list packages | grep -i '$keyword'"
+        val cmd = if (keyword.isBlank()) {
+            "pm list packages"
+        } else {
+            "pm list packages | grep -iF ${shellQuote(keyword)}"
+        }
         val r = RootShell.exec(cmd)
         val lines = r.stdout.lines().filter { it.isNotBlank() }.take(80)
         return if (lines.isEmpty()) "没有匹配的包" else lines.joinToString("\n")
     }
 
     suspend fun appInfo(context: Context, pkg: String): String {
-        if (pkg.isBlank()) return "包名为空"
-        if (!RootShell.isAvailable()) {
+        if (!PACKAGE_RE.matches(pkg)) return "包名格式不合法"
+        if (!RootShell.isAvailable() || !rootAllowed()) {
             return try {
                 val pm = context.packageManager
                 val info = pm.getPackageInfo(pkg, 0)
@@ -797,18 +852,24 @@ object ToolRuntime {
                 "读取包信息失败: ${e.message}"
             }
         }
-        val r = RootShell.exec("dumpsys package $pkg | head -60")
+        val r = RootShell.exec("dumpsys package ${shellQuote(pkg)} | head -60")
         return r.stdout.ifBlank { r.stderr }.take(3000)
     }
 
     suspend fun openUrl(context: Context, url: String): String {
-        if (url.isBlank()) return "URL 为空"
-        val err = AppLauncher.openUrl(context, url)
-        if (err == null) return "已打开 $url"
-        if (RootShell.isAvailable()) {
-            val r = RootShell.exec("am start -a android.intent.action.VIEW -d '$url' 2>&1")
-            if (r.ok && !r.stdout.contains("Error")) return "已打开 $url"
+        val safe = safeHttpUrl(url)
+            ?: return "只允许打开 http/https URL，且不能包含换行或控制字符"
+        val err = AppLauncher.openUrl(context, safe)
+        if (err == null) return "已打开 $safe"
+        if (RootShell.isAvailable() && rootAllowed()) {
+            val r = RootShell.exec(
+                "am start -a android.intent.action.VIEW -d ${shellQuote(safe)} 2>&1"
+            )
+            if (r.ok && !r.stdout.contains("Error")) return "已打开 $safe"
             return "打开失败: ${(r.stdout + r.stderr).take(200)}"
+        }
+        if (RootShell.isAvailable() && !rootAllowed()) {
+            return "打开失败: 当前任务未授权 Root 增强能力 ($err)"
         }
         return "打开失败: $err"
     }
@@ -822,6 +883,7 @@ object ToolRuntime {
 
     suspend fun shell(cmd: String): String {
         if (cmd.isBlank()) return "命令为空"
+        if (!rootAllowed()) return "当前任务未授权 Root 增强能力，shell 不可用"
         if (!RootShell.isAvailable()) {
             return "当前为非 Root 模式，shell 不可用。请改用 observe / read_page / " +
                 "tap_text / input_text 等无障碍工具。"
@@ -840,8 +902,8 @@ object ToolRuntime {
     }
 
     suspend fun getProp(key: String): String {
-        if (key.isBlank()) return "key 为空"
-        if (!RootShell.isAvailable()) {
+        if (!SETTINGS_KEY_RE.matches(key)) return "key 格式不合法"
+        if (!RootShell.isAvailable() || !rootAllowed()) {
             val v = when (key) {
                 "ro.build.version.release" -> Build.VERSION.RELEASE
                 "ro.build.version.sdk" -> Build.VERSION.SDK_INT.toString()
@@ -858,13 +920,15 @@ object ToolRuntime {
             }
             return "$key=$v"
         }
-        val v = RootShell.execText("getprop $key")
+        val v = RootShell.execText("getprop ${shellQuote(key)}")
         return "$key=$v"
     }
 
     suspend fun settingsGet(context: Context, namespace: String, key: String): String {
-        if (!RootShell.isAvailable()) {
-            val ns = namespace.ifBlank { "system" }
+        val ns = namespace.ifBlank { "system" }
+        if (ns !in setOf("system", "secure", "global")) return "namespace 只支持 system/secure/global"
+        if (!SETTINGS_KEY_RE.matches(key)) return "key 格式不合法"
+        if (!RootShell.isAvailable() || !rootAllowed()) {
             val cr = context.contentResolver
             val v = try {
                 when (ns) {
@@ -877,36 +941,44 @@ object ToolRuntime {
             }
             return "$ns/$key=${v ?: "(不可读)"}"
         }
-        val v = RootShell.execText("settings get ${namespace.ifBlank { "system" }} $key")
-        return "$namespace/$key=$v"
+        val v = RootShell.execText("settings get ${shellQuote(ns)} ${shellQuote(key)}")
+        return "$ns/$key=$v"
     }
 
     suspend fun settingsPut(namespace: String, key: String, value: String): String {
-        if (key.isBlank()) return "key 为空"
+        val ns = namespace.ifBlank { "system" }
+        if (ns !in setOf("system", "secure", "global")) return "namespace 只支持 system/secure/global"
+        if (!SETTINGS_KEY_RE.matches(key)) return "key 格式不合法"
+        if (!rootAllowed()) return "当前任务未授权 Root 增强能力，settings_put 不可用"
         if (!RootShell.isAvailable()) return "当前为非 Root 模式，settings_put 不可用"
-        val r = RootShell.exec("settings put ${namespace.ifBlank { "system" }} $key '$value'")
-        return if (r.ok) "已写入 $namespace/$key=$value" else "写入失败: ${r.stderr.take(160)}"
+        val r = RootShell.exec(
+            "settings put ${shellQuote(ns)} ${shellQuote(key)} ${shellQuote(value)}"
+        )
+        return if (r.ok) "已写入 $ns/$key=$value" else "写入失败: ${r.stderr.take(160)}"
     }
 
     suspend fun fileRead(path: String): String {
         if (path.isBlank()) return "path 为空"
+        if (!rootAllowed()) return "当前任务未授权 Root 增强能力，文件读取不可用"
         if (!RootShell.isAvailable()) return "当前为非 Root 模式，任意路径文件读取不可用"
-        val r = RootShell.exec("cat '$path'", 10_000)
+        val r = RootShell.exec("cat ${shellQuote(path)}", 10_000)
         return (r.stdout.ifBlank { r.stderr }).take(5000)
     }
 
     suspend fun fileWrite(path: String, content: String): String {
         if (path.isBlank()) return "path 为空"
+        if (!rootAllowed()) return "当前任务未授权 Root 增强能力，文件写入不可用"
         if (!RootShell.isAvailable()) return "当前为非 Root 模式，任意路径文件写入不可用"
         val b64 = android.util.Base64.encodeToString(content.toByteArray(), android.util.Base64.NO_WRAP)
-        val r = RootShell.exec("echo '$b64' | base64 -d > '$path'", 10_000)
+        val r = RootShell.exec("echo ${shellQuote(b64)} | base64 -d > ${shellQuote(path)}", 10_000)
         return if (r.ok) "已写入 ${content.length} 字符到 $path" else "写入失败: ${r.stderr.take(160)}"
     }
 
     suspend fun fileList(path: String): String {
+        if (!rootAllowed()) return "当前任务未授权 Root 增强能力，文件列表不可用"
         if (!RootShell.isAvailable()) return "当前为非 Root 模式，任意路径文件列表不可用"
         val p = path.ifBlank { "/data/local/tmp" }
-        val r = RootShell.exec("ls -la '$p'", 10_000)
+        val r = RootShell.exec("ls -la ${shellQuote(p)}", 10_000)
         return (r.stdout.ifBlank { r.stderr }).take(4000)
     }
 

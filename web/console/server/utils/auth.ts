@@ -1,5 +1,5 @@
 import type { H3Event } from 'h3'
-import type { User } from '~~/shared/types'
+import type { User, UserRole } from '~~/shared/types'
 import { createId, nowIso, randomToken, sha256 } from './ids'
 
 export const SESSION_COOKIE = 'catfee_session'
@@ -79,6 +79,19 @@ export function requireUser(event: H3Event): User {
     })
   }
   event.context.user = user
+  return user
+}
+
+/** 写操作/敏感读操作的 RBAC 检查。viewer 只能读取普通列表和详情。 */
+export function requireRole(event: H3Event, ...roles: UserRole[]): User {
+  const user = requireUser(event)
+  if (!roles.includes(user.role)) {
+    throw createError({
+      statusCode: 403,
+      statusMessage: '当前账号没有权限执行该操作',
+      data: { message: '当前账号没有权限执行该操作' }
+    })
+  }
   return user
 }
 

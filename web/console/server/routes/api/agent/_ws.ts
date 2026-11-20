@@ -7,6 +7,9 @@ import type { AgentPeer } from '../../../utils/agent-hub'
  * { type: "hello", deviceId, secret, agentVersion, androidVersion, model, capabilities }
  */
 export default defineWebSocketHandler({
+  open(peer) {
+    registerAgentPeer(peer as unknown as AgentPeer)
+  },
   message(peer, message) {
     handleAgentMessage(peer as unknown as AgentPeer, message.text())
   },

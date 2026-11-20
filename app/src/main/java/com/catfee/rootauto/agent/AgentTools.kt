@@ -945,6 +945,17 @@ object AgentTools {
             Log.w(TAG, "参数解析失败: $argsJson => ${e.message}")
             JSONObject()
         }
+        // 硬白名单: 即使调用方绕过模型工具列表, 也不能执行隐藏的 root/文件工具。
+        if (name !in LEAN_TOOLS && name != "enter_agent_mode") {
+            return "工具 $name 当前未启用"
+        }
+        // 把 Web 任务策略下沉到所有工具内部降级路径: Root/截图/视觉/输入注入。
+        val previousPolicy = ToolRuntime.setPolicy(
+            ToolRuntime.Policy(session.allowRootTools, session.allowScreenshot)
+        )
+        ScreenVision.setCaptureAllowed(session.allowScreenshot)
+        ScreenVision.setRootCaptureAllowed(session.allowRootTools)
+        InputDispatcher.setRootChannelAllowed(session.allowRootTools)
         return try {
             when (name) {
                 "observe" -> observe(context, provider, session)
@@ -1007,9 +1018,13 @@ object AgentTools {
                     } else {
                         val timeout = args.optLong("timeout_ms", 45_000)
                             .coerceIn(3_000, 180_000)
-                        val ok = CapabilityManager.ensure(context, cap, timeout)
+                        val ok = CapabilityManager.ensure(
+                            context, cap, timeout, allowRoot = session.allowRootTools
+                        )
                         // 能力变化后刷新本轮快照, 下一轮工具列表/门控才会放行
-                        session.caps = DeviceCapabilities.refresh(context, force = true)
+                        session.caps = DeviceCapabilities.refresh(
+                            context, force = true, probeDaemon = session.allowRootTools
+                        )
                         when {
                             ok -> "${cap.label}已开启，继续任务。"
                             cap == Capability.ROOT ->
@@ -1398,6 +1413,11 @@ object AgentTools {
         } catch (e: Exception) {
             Log.e(TAG, "执行工具 $name 异常: ${e.message}")
             "工具执行异常: ${e.message}"
+        } finally {
+            ToolRuntime.setPolicy(previousPolicy)
+            ScreenVision.setCaptureAllowed(previousPolicy.allowScreenshot)
+            ScreenVision.setRootCaptureAllowed(previousPolicy.allowRoot)
+            InputDispatcher.setRootChannelAllowed(previousPolicy.allowRoot)
         }
     }
 
@@ -1409,9 +1429,9 @@ object AgentTools {
      * 说明: 直接写 secure 设置项, 系统会自动重新绑定服务;
      *       需要 root, 无 root 时返回 false 交由用户手动处理。
      */
-    private suspend fun tryRestoreA11y(context: Context): Boolean {
-        if (!RootShell.isAvailable()) {
-            // 非 Root 无法写 secure settings, 只能把用户带到系统设置页
+    private suspend fun tryRestoreA11y(context: Context, allowRoot: Boolean): Boolean {
+        if (!allowRoot || !RootShell.isAvailable()) {
+            // 非 Root 或任务未授权 Root: 只能把用户带到系统设置页
             try {
                 context.startActivity(
                     Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
@@ -1516,7 +1536,7 @@ object AgentTools {
     ): String {
         // 顺手刷新前台 Activity, 让模型知道自己在哪个界面
         // Root 下用 dumpsys 校准; 非 Root 用无障碍事件缓存近似。
-        val focus = if (RootShell.isAvailable()) {
+        val focus = if (session.allowRootTools && RootShell.isAvailable()) {
             RootShell.execText("dumpsys window 2>/dev/null | grep -m1 mCurrentFocus")
         } else {
             ""
@@ -1525,7 +1545,7 @@ object AgentTools {
         if (svc == null) {
             // 无障碍被系统杀掉很常见(force-stop / 省电清理), 有 root 就直接拉起来,
             // 否则把用户带到系统设置页并明确失败。
-            val restored = tryRestoreA11y(context)
+            val restored = tryRestoreA11y(context, session.allowRootTools)
             if (!restored) {
                 return "无障碍服务未连接, 且自动恢复失败。请让用户在系统设置-无障碍中手动开启 CatfeeAgents。"
             }
@@ -1744,7 +1764,9 @@ object AgentTools {
     }
 
     private suspend fun launchApp(context: Context, pkg: String): String {
-        if (pkg.isBlank()) return "启动失败: 包名为空"
+        if (!pkg.matches(Regex("^[A-Za-z0-9_]+(\\.[A-Za-z0-9_]+)*$"))) {
+            return "启动失败: 包名格式不合法"
+        }
         val intentError = AppLauncher.launchPackage(context, pkg)
         delay(900)
         // vivo/部分 ROM 的应用分身会先弹「选择要使用的应用」; 自动选主应用, 不让模型卡住
@@ -1754,9 +1776,10 @@ object AgentTools {
         }
         if (intentError == null) return "已启动 $pkg"
 
-        if (RootShell.isAvailable()) {
+        if (ToolRuntime.rootAllowed() && RootShell.isAvailable()) {
             val r = RootShell.exec(
-                "monkey -p $pkg -c android.intent.category.LAUNCHER 1 2>&1 | tail -2"
+                "monkey -p ${ToolRuntime.shellQuote(pkg)} " +
+                    "-c android.intent.category.LAUNCHER 1 2>&1 | tail -2"
             )
             val ok = r.stdout.contains("Events injected: 1") || r.stdout.contains("injected")
             if (ok) return "已启动 $pkg"

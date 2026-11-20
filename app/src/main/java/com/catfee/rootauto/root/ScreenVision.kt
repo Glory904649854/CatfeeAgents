@@ -44,8 +44,25 @@ object ScreenVision {
 
     private const val TAG = "ScreenVision"
 
-    /** 截图原始文件落盘路径 (root 域写入) */
-    private const val SHOT_PATH = "/data/local/tmp/catfee_shot.raw"
+    /** 截图原始文件落盘路径: 按 App UID 隔离, daemon 写入后 chown 给本 App。 */
+    private fun shotPath(): String =
+        "/data/local/tmp/catfee_shot_${android.os.Process.myUid()}.raw"
+
+    /** Web 任务策略: 是否允许截图/视觉; 由 AgentTools.execute 在每次运行前后设置。 */
+    @Volatile
+    private var captureAllowed = true
+
+    /** Web 任务禁止 Root 时, 截图只能走无障碍系统截图, 不能走 daemon。 */
+    @Volatile
+    private var rootCaptureAllowed = true
+
+    fun setCaptureAllowed(allowed: Boolean) {
+        captureAllowed = allowed
+    }
+
+    fun setRootCaptureAllowed(allowed: Boolean) {
+        rootCaptureAllowed = allowed
+    }
 
     /** 送模型前的最长边, 越大越清晰但 token 越多; 1080 宽已足够读清单行文字 */
     private const val MAX_EDGE = 2400
@@ -111,6 +128,7 @@ object ScreenVision {
      * 注意: 调用方负责 recycle 返回的 Bitmap
      */
     suspend fun captureBitmap(): Pair<Bitmap?, String> = withContext(Dispatchers.IO) {
+        if (!captureAllowed) return@withContext null to "当前任务未授权截图/视觉能力"
         // 截图前临时隐藏本应用悬浮状态条, 避免它进入 OCR/视觉结果干扰模型
         val hidden = com.catfee.rootauto.service.AgentStatusService.hideOverlayForCapture()
         try {
@@ -125,7 +143,7 @@ object ScreenVision {
         val caps = DeviceCapabilities.current()
 
         // 1) Root daemon 是首选: 更快, 且不受无障碍截图频率限制。
-        if (caps.daemon) {
+        if (caps.daemon && rootCaptureAllowed) {
             val (bmp, err) = captureRootBitmap()
             if (bmp != null) return@withContext bmp to ""
             Log.w(TAG, "Root 截图失败, 尝试无障碍截图: $err")
@@ -146,15 +164,20 @@ object ScreenVision {
 
     /** Root daemon 截图: 读取 /data/local/tmp 下的 raw RGBA 文件 */
     private suspend fun captureRootBitmap(): Pair<Bitmap?, String> = withContext(Dispatchers.IO) {
+        val path = shotPath()
         try {
-            val (shotOk, w, h) = DaemonClient.shot(SHOT_PATH)
+            val (shotOk, w, h) = DaemonClient.shot(path)
             if (!shotOk || w <= 0 || h <= 0) return@withContext null to "截图失败"
-            val f = File(SHOT_PATH)
-            // daemon 以 root 身份写文件; 通常已是 0644, 只有 App 读不到时才 chmod,
-            // 避免每次 OCR 都触发一次 su 授权提示 (Magisk 的 toast 会遮挡截图)
-            if (f.exists() && !f.canRead()) RootShell.exec("chmod 0644 $SHOT_PATH")
-            if (!f.exists() || f.length() <= 0) return@withContext null to "截图文件不存在: $SHOT_PATH"
-            val bytes = f.readBytes()
+            val f = File(path)
+            if (!f.exists() || f.length() <= 0) {
+                return@withContext null to "截图文件不存在或不可读"
+            }
+            val bytes = try {
+                f.readBytes()
+            } finally {
+                // 截图属于敏感数据, 读完立即让 daemon 删除; 不留在全局目录
+                DaemonClient.removeShot(path)
+            }
             // 头部 12 或 16 字节 (Android 12 起含 colorspace), 按总长度反推
             val expect12 = 12L + w.toLong() * h * 4
             val expect16 = 16L + w.toLong() * h * 4
@@ -216,6 +239,9 @@ object ScreenVision {
         provider: LlmSettings.Provider,
         question: String = ""
     ): VisionResult = withContext(Dispatchers.IO) {
+        if (!captureAllowed) {
+            return@withContext VisionResult(false, error = "当前任务未授权截图/视觉能力")
+        }
         val started = System.currentTimeMillis()
         val (displayW, displayH) = ScreenGeometry.displaySize()
         val frame = captureJpegFrame()

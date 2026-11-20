@@ -317,7 +317,8 @@ object ConsoleClient {
                     deviceId = deviceId,
                     deviceSecret = deviceSecret,
                     deviceName = deviceName.trim(),
-                    lastStatus = "已绑定 $deviceId"
+                    lastStatus = "已绑定 $deviceId",
+                    remoteAutoApprove = ConsoleSettings.load(context).remoteAutoApprove
                 )
                 // 重新绑定要覆盖旧的 authFailed/started 状态，否则撤销后重绑不会重连
                 stop()

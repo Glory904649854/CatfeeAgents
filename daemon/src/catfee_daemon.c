@@ -3,7 +3,7 @@
  * =====================================================
  * 功能描述:
  *   以 root 身份常驻运行, 通过 uinput 虚拟触屏注入真实内核输入事件,
- *   并提供截图 / shell / 屏幕信息等原子能力。
+ *   并提供截图 / 屏幕信息等原子能力。不提供任意 shell 执行入口。
  *   对外暴露两种调用方式:
  *     1) Unix Socket 常驻服务 (低延迟, 推荐)
  *     2) 命令行单次调用     (兜底, 每次会重建 uinput 设备)
@@ -12,8 +12,8 @@
  *     <id>|<method>|<arg1>|<arg2>|...
  *   例: 1|tap|540|1200
  *       2|swipe|540|1800|540|600|300
- *       3|shot|/data/local/tmp/catfee_shot.raw
- *       4|shell|ls -l /data/local/tmp
+ *       3|shot|/data/local/tmp/catfee_shot_10234.raw|10234
+ *       4|rm|/data/local/tmp/catfee_shot_10234.raw
  *
  * 响应协议 (单行 JSON):
  *    {"id":1,"ok":true,"data":{...}}
@@ -428,15 +428,41 @@ static int op_keyevent(int keycode) {
  *         老版本为 12 字节, 用文件总长度反推校验
  * 使用场景: 找图找色、Agent 视觉输入、失败存证
  */
-static int op_shot(const char *path, int *out_w, int *out_h, long *out_size) {
+static int op_shot(const char *path, int uid, int *out_w, int *out_h, long *out_size) {
     const char *dst = (path && *path) ? path : DEFAULT_SHOT_PATH;
+    /* 只允许本 App 的临时截图路径, 防止通过 shot 参数执行任意命令/覆盖任意文件 */
+    if (strncmp(dst, "/data/local/tmp/catfee_shot_", 28) != 0) {
+        logf_msg("截图路径不在允许范围: %s", dst);
+        return -6;
+    }
+    if (strstr(dst, "..") != NULL) {
+        logf_msg("截图路径不允许包含 ..: %s", dst);
+        return -7;
+    }
+    for (const char *p = dst; *p; p++) {
+        if (*p == '\'' || *p == '"' || *p == ';' || *p == '`' || *p == '$' || *p == '\\') {
+            logf_msg("截图路径包含非法字符: %s", dst);
+            return -7;
+        }
+    }
+    for (const char *p = dst + 28; *p; p++) {
+        if (*p == '/' || *p == '\\') {
+            logf_msg("截图路径后缀不允许包含分隔符: %s", dst);
+            return -7;
+        }
+    }
     char cmd[1024];
-    snprintf(cmd, sizeof(cmd), "screencap %s 2>/dev/null", dst);
+    snprintf(cmd, sizeof(cmd), "screencap '%s' 2>/dev/null", dst);
     int rc = system(cmd);
     if (rc != 0) {
         logf_msg("screencap 执行失败, rc=%d", rc);
         return -1;
     }
+    /* 截图属于敏感数据: 只给本 App 读写, 不留在全局可读目录 */
+    if (uid > 0) {
+        chown(dst, (uid_t)uid, (uid_t)uid);
+    }
+    chmod(dst, 0600);
     int fd = open(dst, O_RDONLY);
     if (fd < 0) {
         logf_msg("打开截图文件失败: %s", strerror(errno));
@@ -622,9 +648,11 @@ static void dispatch(char *req, char *resp, size_t resp_cap) {
 
     if (strcmp(method, "shot") == 0) {
         char *a1 = strtok_r(NULL, "|", &saveptr);
+        char *a2 = strtok_r(NULL, "|", &saveptr);
+        int uid = a2 ? atoi(a2) : 0;
         int w = 0, h = 0;
         long sz = 0;
-        int rc = op_shot(a1, &w, &h, &sz);
+        int rc = op_shot(a1, uid, &w, &h, &sz);
         if (rc > 0) {
             char esc[1024];
             json_escape(a1 ? a1 : DEFAULT_SHOT_PATH, esc, sizeof(esc));
@@ -639,35 +667,27 @@ static void dispatch(char *req, char *resp, size_t resp_cap) {
         return;
     }
 
-    if (strcmp(method, "shell") == 0) {
-        /* strtok_r 用空分隔符不会跳过分隔符, 必须手工跳过前导 '|', 否则命令带前缀导致 popen 语法错误 */
-        char *cmd = saveptr;
-        if (cmd) {
-            while (*cmd == '|') cmd++;
-        }
-        if (!cmd || *cmd == '\0') {
-            snprintf(resp, resp_cap, "{\"id\":%ld,\"ok\":false,\"err\":\"shell 需要命令\"}", id);
+    if (strcmp(method, "rm") == 0) {
+        char *a1 = strtok_r(NULL, "|", &saveptr);
+        if (!a1 || strncmp(a1, "/data/local/tmp/catfee_shot_", 28) != 0 ||
+            strstr(a1, "..") != NULL) {
+            snprintf(resp, resp_cap,
+                     "{\"id\":%ld,\"ok\":false,\"err\":\"只允许删除 catfee_shot_* 临时文件\"}", id);
             return;
         }
-        size_t out_len = 0;
-        char *out = run_cmd(cmd, &out_len);
-        if (!out) {
-            snprintf(resp, resp_cap, "{\"id\":%ld,\"ok\":false,\"err\":\"命令执行失败\"}", id);
-            return;
+        for (const char *p = a1 + 28; *p; p++) {
+            if (*p == '/' || *p == '\\') {
+                snprintf(resp, resp_cap,
+                         "{\"id\":%ld,\"ok\":false,\"err\":\"截图路径后缀非法\"}", id);
+                return;
+            }
         }
-        /* 输出可能很大, 截断到 4KB 以内避免撑爆响应缓冲 */
-        if (out_len > 4000) out[4000] = '\0';
-        char *esc = (char *)malloc(out_len * 2 + 16);
-        if (!esc) {
-            free(out);
-            snprintf(resp, resp_cap, "{\"id\":%ld,\"ok\":false,\"err\":\"内存不足\"}", id);
-            return;
+        if (unlink(a1) == 0 || errno == ENOENT) {
+            snprintf(resp, resp_cap, "{\"id\":%ld,\"ok\":true}", id);
+        } else {
+            snprintf(resp, resp_cap,
+                     "{\"id\":%ld,\"ok\":false,\"err\":\"删除失败: %s\"}", id, strerror(errno));
         }
-        json_escape(out, esc, out_len * 2 + 16);
-        snprintf(resp, resp_cap,
-                 "{\"id\":%ld,\"ok\":true,\"data\":{\"out\":\"%s\"}}", id, esc);
-        free(esc);
-        free(out);
         return;
     }
 
@@ -727,8 +747,8 @@ static int serve(const char *sock_path) {
         close(sfd);
         return -2;
     }
-    /* 允许 App 进程连接 */
-    chmod(sock_path, 0666);
+    /* 只允许 root 自己连接; App 走 su + stdio, 不需要这个 socket */
+    chmod(sock_path, 0600);
     if (listen(sfd, 8) < 0) {
         logf_msg("listen 失败: %s", strerror(errno));
         close(sfd);

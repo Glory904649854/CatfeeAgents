@@ -9,7 +9,7 @@ const schema = z.object({
  * APK 使用该注册码调用 /api/agent/enroll 换取 deviceId + deviceSecret。
  */
 export default defineEventHandler(async (event) => {
-  const user = requireUser(event)
+  const user = requireRole(event, 'owner', 'admin')
   const body = schema.safeParse((await readBody(event)) ?? {})
   if (!body.success) throw badRequest('参数不合法')
 

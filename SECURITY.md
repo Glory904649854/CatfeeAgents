@@ -23,6 +23,9 @@ Web 控制台可以下发任务、读取执行日志和页面文字，应当视�
 
 - `android:usesCleartextTraffic="true"`：允许连接局域网控制台和 HTTP 模型服务。生产环境应全部使用 HTTPS/WSS；如果只连公网服务，可以在 `AndroidManifest.xml` 中改为 `false`。
 - `DebugReceiver` 导出但受 `android.permission.DUMP` 保护，只有 adb/shell 或系统签名应用能触发；`consolebind` 命令仅在 debug 包生效。
+- 远程任务默认被设备拒绝，必须在手机端显式开启「允许远程任务直接操作手机」。
+- Root daemon 不再开机创建全局可读 socket；截图临时文件按 App UID 隔离、`0600`，读取后立即删除。
+- 视觉降级会把当前屏幕截图发送给所配置的模型服务；本地 OCR 不会上传图片。
 - 演示数据脚本和 `agent-sim` 只用于本地开发，不包含真实设备数据。
 - API Key、控制台设备凭证保存在 `EncryptedSharedPreferences`；源码和仓库不包含真实密钥。
 

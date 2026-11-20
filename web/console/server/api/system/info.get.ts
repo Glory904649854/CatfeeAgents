@@ -1,4 +1,5 @@
 export default defineEventHandler((event) => {
+  requireRole(event, 'owner', 'admin')
   const config = useRuntimeConfig(event)
   const db = getDb()
 

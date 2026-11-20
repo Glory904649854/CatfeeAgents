@@ -17,7 +17,7 @@ const schema = z.object({
 })
 
 export default defineEventHandler(async (event) => {
-  const user = requireUser(event)
+  const user = requireRole(event, 'owner', 'admin', 'operator')
   const parsed = schema.safeParse(await readBody(event))
   if (!parsed.success) throw badRequest('任务参数不合法')
 

@@ -22,6 +22,17 @@ object InputDispatcher {
     private var lastGestureAt = 0L
     private const val GESTURE_GAP_MS = 90L
 
+    /** Web 任务策略: 禁止 Root 时不能用 daemon/uinput 注入, 只能走无障碍手势。 */
+    @Volatile
+    private var rootChannelAllowed = true
+
+    fun setRootChannelAllowed(allowed: Boolean) {
+        rootChannelAllowed = allowed
+    }
+
+    private fun daemonUsable(): Boolean =
+        rootChannelAllowed && DeviceCapabilities.current().daemon
+
     private fun rotated(): Boolean =
         ScreenGeometry.current()?.rotated == true
 
@@ -34,8 +45,7 @@ object InputDispatcher {
     private fun a11yForGesture(): UiObserverService? {
         // 以服务实例为准; DeviceCapabilities 的快照可能还没刷新
         val svc = UiObserverService.instance ?: return null
-        val caps = DeviceCapabilities.current()
-        if (caps.daemon && !rotated()) return null
+        if (daemonUsable() && !rotated()) return null
         return svc
     }
 
@@ -84,7 +94,7 @@ object InputDispatcher {
             waitGestureGap()
             if (svc.gestureTap(x, y)) return@passThroughOverlay true
         }
-        if (!DeviceCapabilities.current().daemon) return@passThroughOverlay false
+        if (!daemonUsable()) return@passThroughOverlay false
         DaemonClient.tap(x, y)
     }
 
@@ -102,7 +112,7 @@ object InputDispatcher {
                 return@passThroughOverlay true
             }
         }
-        if (!DeviceCapabilities.current().daemon) return@passThroughOverlay false
+        if (!daemonUsable()) return@passThroughOverlay false
         DaemonClient.swipe(x1, y1, x2, y2, durationMs)
     }
 
@@ -115,7 +125,7 @@ object InputDispatcher {
                     return@passThroughOverlay true
                 }
             }
-            if (!DeviceCapabilities.current().daemon) return@passThroughOverlay false
+            if (!daemonUsable()) return@passThroughOverlay false
             DaemonClient.longPress(x, y, holdMs)
         }
 
@@ -129,7 +139,7 @@ object InputDispatcher {
                 waitGestureGap()
                 return@passThroughOverlay svc.gestureTap(x, y)
             }
-            if (!DeviceCapabilities.current().daemon) return@passThroughOverlay false
+            if (!daemonUsable()) return@passThroughOverlay false
             DaemonClient.doubleTap(x, y)
         }
 }

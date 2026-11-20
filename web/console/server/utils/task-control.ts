@@ -13,7 +13,7 @@ export function controlTask(
   taskId: string,
   action: 'pause' | 'resume' | 'stop'
 ): { ok: true; commandId: string; delivered: boolean; note?: string } {
-  const user = requireUser(event)
+  const user = requireRole(event, 'owner', 'admin', 'operator')
   const db = getDb()
 
   const task = db.prepare('SELECT * FROM tasks WHERE id = ?').get(taskId) as

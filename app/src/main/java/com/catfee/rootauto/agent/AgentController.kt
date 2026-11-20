@@ -267,7 +267,7 @@ object AgentController {
         val startedAt = System.currentTimeMillis()
         // Root 设备覆盖安装/强停后无障碍可能被系统重置; 任务开始前先静默恢复。
         // 非 Root 下这里会快速返回 false, 由 Agent 的 request_capability/enter_agent_mode 引导开启。
-        if (DeviceCapabilities.current().accessibility.not()) {
+        if (allowRootTools && DeviceCapabilities.current().accessibility.not()) {
             DeviceCapabilities.ensureAccessibility(appContext)
         }
         var phoneGranted = phoneAllowed

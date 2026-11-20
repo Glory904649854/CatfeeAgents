@@ -86,14 +86,19 @@ object DeviceCapabilities {
 
     fun current(): Capabilities = _state.value
 
-    suspend fun refresh(context: Context, force: Boolean = false): Capabilities =
+    suspend fun refresh(
+        context: Context,
+        force: Boolean = false,
+        /** Web 任务未授权 Root 时不要通过 su 拉起 daemon 探测 */
+        probeDaemon: Boolean = true
+    ): Capabilities =
         withContext(Dispatchers.IO) {
             val now = System.currentTimeMillis()
             if (!force && now - lastRefreshAt < CACHE_MS) return@withContext _state.value
             lastRefreshAt = now
 
             val root = RootShell.appGrantedRoot() == true
-            val daemon = if (root) {
+            val daemon = if (root && probeDaemon) {
                 try {
                     withTimeoutOrNull(1_500) { DaemonClient.ping() } == true
                 } catch (e: Exception) {

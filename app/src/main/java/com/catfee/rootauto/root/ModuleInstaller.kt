@@ -80,25 +80,13 @@ object ModuleInstaller {
             tmp.setExecutable(true, false)
 
             // 3. root 拷贝到模块目录并授权
-            //    注意: 必须同时写入 service.sh, 否则 Magisk 只认模块但不自动启动 daemon,
-            //          App 进程被杀后就没有任何恢复路径
+            // daemon 由 App 通过 su + stdio 按需启动, 不再开机常驻全局 socket。
+            // service.sh 只负责清理旧版本可能遗留的全局可读 socket / 截图。
             val serviceSh = buildString {
                 append("#!/system/bin/sh\n")
-                append("MODDIR=\${0%/*}\n")
-                append("BIN=\"\$MODDIR/bin/catfee_daemon\"\n")
-                append("LOG=\"/data/local/tmp/catfee_daemon.log\"\n")
-                append("SOCK=\"/data/local/tmp/catfee_daemon.sock\"\n")
-                append("for i in \$(seq 1 30); do\n")
-                append("  [ \"\$(getprop sys.boot_completed)\" = \"1\" ] && break\n")
-                append("  sleep 2\n")
-                append("done\n")
-                append("rm -f \"\$SOCK\"\n")
-                append("[ -x \"\$BIN\" ] || exit 1\n")
-                append("\"\$BIN\" serve \"\$SOCK\" >> \"\$LOG\" 2>&1 &\n")
-                append("sleep 1\n")
-                append("chmod 0666 \"\$SOCK\" 2>/dev/null\n")
-                append("touch /data/local/tmp/catfee_shot.raw\n")
-                append("chmod 0666 /data/local/tmp/catfee_shot.raw 2>/dev/null\n")
+                append("rm -f /data/local/tmp/catfee_daemon.sock\n")
+                append("rm -f /data/local/tmp/catfee_shot.raw\n")
+                append("rm -f /data/local/tmp/catfee_shot_*.raw\n")
             }
             val script = buildString {
                 append("mkdir -p $MODULE_DIR/bin\n")
@@ -113,7 +101,7 @@ object ModuleInstaller {
                 append("author=CatfeeAgents\n")
                 append("description=提供 uinput 输入注入与截图能力\n")
                 append("EOF\n")
-                // service.sh 负责开机自启
+                // service.sh 只做旧版本敏感文件清理
                 append("cat > $MODULE_DIR/service.sh <<'CATFEE_EOF'\n")
                 append(serviceSh)
                 append("CATFEE_EOF\n")

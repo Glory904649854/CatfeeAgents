@@ -1,5 +1,5 @@
 export default defineEventHandler((event) => {
-  const user = requireUser(event)
+  const user = requireRole(event, 'owner', 'admin')
   const id = String(getRouterParam(event, 'id') ?? '')
   const db = getDb()
 

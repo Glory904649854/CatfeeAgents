@@ -242,12 +242,19 @@ object DaemonClient {
      * 返回: Triple(成功, 宽, 高)
      * 使用场景: 视觉兜底、失败存证; 拿到的是 RGBA 原始数据(含 12 或 16 字节头)
      */
-    suspend fun shot(path: String = "/data/local/tmp/catfee_shot.raw"): Triple<Boolean, Int, Int> {
-        val r = call("shot", path)
+    suspend fun shot(
+        path: String = "/data/local/tmp/catfee_shot_${android.os.Process.myUid()}.raw"
+    ): Triple<Boolean, Int, Int> {
+        // 把 App UID 一起传给 daemon, 由 root 写入后 chown 给本 App 并设为 0600。
+        val r = call("shot", path, android.os.Process.myUid())
         if (!r.optBoolean("ok", false)) return Triple(false, 0, 0)
         val d = r.optJSONObject("data") ?: return Triple(false, 0, 0)
         return Triple(true, d.optInt("w"), d.optInt("h"))
     }
+
+    /** 删除截图临时文件; daemon 只允许删除 catfee_shot_* 前缀。 */
+    suspend fun removeShot(path: String): Boolean =
+        call("rm", path).optBoolean("ok", false)
 
     /**
      * 当前显示方向尺寸 (width, height)。

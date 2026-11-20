@@ -18,6 +18,19 @@ const TASK_STATUS_BY_EVENT: Record<string, TaskStatus> = {
 }
 
 const TERMINAL_STATUSES: TaskStatus[] = ['stopped', 'succeeded', 'failed', 'expired']
+const DEVICE_TASK_STATUSES = new Set([
+  'accepted',
+  'running',
+  'paused',
+  'stopping',
+  'stopped',
+  'succeeded',
+  'failed'
+])
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value)
+}
 
 export interface AgentPeer {
   id: string
@@ -28,16 +41,79 @@ export interface AgentPeer {
 interface HubState {
   peers: Map<string, AgentPeer>
   peerDevices: Map<string, string>
+  helloTimers: Map<string, ReturnType<typeof setTimeout>>
+  authenticated: Set<string>
+  rate: Map<string, { count: number; resetAt: number }>
 }
 
 const HUB_KEY = '__catfee_agent_hub__'
+const MAX_PEERS = 256
+const HELLO_TIMEOUT_MS = 10_000
+const MAX_MESSAGE_CHARS = 256_000
+const RATE_WINDOW_MS = 10_000
+const RATE_MAX_MESSAGES = 200
 
 function state(): HubState {
   const globalStore = globalThis as typeof globalThis & { [HUB_KEY]?: HubState }
   if (!globalStore[HUB_KEY]) {
-    globalStore[HUB_KEY] = { peers: new Map(), peerDevices: new Map() }
+    globalStore[HUB_KEY] = {
+      peers: new Map(),
+      peerDevices: new Map(),
+      helloTimers: new Map(),
+      authenticated: new Set(),
+      rate: new Map()
+    }
   }
   return globalStore[HUB_KEY]!
+}
+
+/** WebSocket 建立后先挂握手超时; 10 秒内没有合法 hello 就断开。 */
+export function registerAgentPeer(peer: AgentPeer): boolean {
+  const hub = state()
+  // peers 是已认证连接, helloTimers 是尚未完成 hello 的连接
+  if (hub.peers.size + hub.helloTimers.size >= MAX_PEERS) {
+    try {
+      peer.close(4008, 'too many connections')
+    } catch {
+      /* ignore */
+    }
+    return false
+  }
+  const timer = setTimeout(() => {
+    if (hub.authenticated.has(peer.id)) return
+    try {
+      peer.send(
+        JSON.stringify({ type: 'error', code: 'HELLO_TIMEOUT', message: '未在限定时间内完成认证' })
+      )
+      peer.close(4001, 'hello timeout')
+    } catch {
+      /* ignore */
+    }
+    detachAgent(peer)
+  }, HELLO_TIMEOUT_MS)
+  // Node 的 timer 不应阻止进程退出
+  ;(timer as { unref?: () => void }).unref?.()
+  hub.helloTimers.set(peer.id, timer)
+  return true
+}
+
+function clearHelloTimer(peerId: string): void {
+  const hub = state()
+  const timer = hub.helloTimers.get(peerId)
+  if (timer) clearTimeout(timer)
+  hub.helloTimers.delete(peerId)
+}
+
+function allowMessage(peerId: string): boolean {
+  const hub = state()
+  const now = Date.now()
+  const entry = hub.rate.get(peerId)
+  if (!entry || entry.resetAt <= now) {
+    hub.rate.set(peerId, { count: 1, resetAt: now + RATE_WINDOW_MS })
+    return true
+  }
+  entry.count += 1
+  return entry.count <= RATE_MAX_MESSAGES
 }
 
 export interface DeviceRow extends Record<string, unknown> {
@@ -305,9 +381,18 @@ export function handleAgentHello(
     capabilities?: unknown
   }
 ): boolean {
-  const deviceId = String(payload.deviceId ?? '')
+  const deviceId = String(payload.deviceId ?? '').trim()
   const secret = String(payload.secret ?? '')
-  const device = deviceId ? findDevice(deviceId) : null
+  if (!deviceId || deviceId.length > 80 || !secret || secret.length > 256) {
+    try {
+      peer.send(JSON.stringify({ type: 'error', code: 'BAD_HELLO', message: 'hello 参数不合法' }))
+      peer.close(4001, 'bad hello')
+    } catch {
+      /* ignore */
+    }
+    return false
+  }
+  const device = findDevice(deviceId)
 
   if (!device || device.revoked_at || device.secret_hash !== sha256(secret)) {
     try {
@@ -354,8 +439,11 @@ export function handleAgentHello(
     }
   }
 
-  state().peers.set(deviceId, peer)
-  state().peerDevices.set(peer.id, deviceId)
+  const hub = state()
+  hub.peers.set(deviceId, peer)
+  hub.peerDevices.set(peer.id, deviceId)
+  hub.authenticated.add(peer.id)
+  clearHelloTimer(peer.id)
 
   peer.send(
     JSON.stringify({
@@ -387,13 +475,17 @@ export function handleAgentHello(
 }
 
 export function detachAgent(peer: AgentPeer): void {
-  const deviceId = state().peerDevices.get(peer.id)
+  const hub = state()
+  clearHelloTimer(peer.id)
+  hub.authenticated.delete(peer.id)
+  hub.rate.delete(peer.id)
+  const deviceId = hub.peerDevices.get(peer.id)
   if (!deviceId) return
 
-  state().peerDevices.delete(peer.id)
-  if (state().peers.get(deviceId) !== peer) return
+  hub.peerDevices.delete(peer.id)
+  if (hub.peers.get(deviceId) !== peer) return
 
-  state().peers.delete(deviceId)
+  hub.peers.delete(deviceId)
   insertAgentEvent(deviceId, {
     type: 'device.offline',
     level: 'warn',
@@ -407,7 +499,10 @@ export function detachAgent(peer: AgentPeer): void {
 function handleMemorySync(deviceId: string, message: Record<string, unknown>): void {
   const pkg = String(message.package ?? '').trim().slice(0, 120)
   if (!pkg) return
-  const entries = parseMemoryEntries(JSON.stringify(message.entries ?? []))
+  if (!Array.isArray(message.entries) || message.entries.length > 80) return
+  const serialized = JSON.stringify(message.entries)
+  if (serialized.length > 128_000) return
+  const entries = parseMemoryEntries(serialized)
   const appVersion = String(message.appVersion ?? '').slice(0, 80) || null
   if (entries.length === 0) {
     // 设备清空该 App 记忆时同步删除控制台快照
@@ -421,6 +516,25 @@ function handleMemorySync(deviceId: string, message: Record<string, unknown>): v
 }
 
 export function handleAgentMessage(peer: AgentPeer, raw: string): void {
+  if (raw.length > MAX_MESSAGE_CHARS) {
+    try {
+      peer.send(JSON.stringify({ type: 'error', code: 'TOO_LARGE', message: '消息过大' }))
+      peer.close(4009, 'message too large')
+    } catch {
+      /* ignore */
+    }
+    return
+  }
+  if (!allowMessage(peer.id)) {
+    try {
+      peer.send(JSON.stringify({ type: 'error', code: 'RATE_LIMITED', message: '消息过于频繁' }))
+      peer.close(4008, 'rate limited')
+    } catch {
+      /* ignore */
+    }
+    return
+  }
+
   let message: Record<string, unknown>
   try {
     message = JSON.parse(raw) as Record<string, unknown>
@@ -434,13 +548,24 @@ export function handleAgentMessage(peer: AgentPeer, raw: string): void {
   }
 
   const type = String(message.type ?? '')
-  const deviceId = state().peerDevices.get(peer.id)
+  const hub = state()
+  const deviceId = hub.peerDevices.get(peer.id)
+
+  if (type === 'hello') {
+    handleAgentHello(peer, message as Record<string, never>)
+    return
+  }
+  if (!hub.authenticated.has(peer.id) || !deviceId) {
+    try {
+      peer.send(JSON.stringify({ type: 'error', code: 'AUTH_REQUIRED', message: '请先发送 hello' }))
+      peer.close(4001, 'auth required')
+    } catch {
+      /* ignore */
+    }
+    return
+  }
 
   switch (type) {
-    case 'hello': {
-      handleAgentHello(peer, message as Record<string, never>)
-      return
-    }
     case 'heartbeat': {
       if (deviceId) {
         touchDevice(deviceId)
@@ -450,7 +575,8 @@ export function handleAgentMessage(peer: AgentPeer, raw: string): void {
     }
     case 'command_ack': {
       if (!deviceId) return
-      const commandId = String(message.commandId ?? '')
+      const commandId = String(message.commandId ?? '').trim()
+      if (!commandId || commandId.length > 80) return
       const status = String(message.status ?? '')
       const accepted = status === 'accepted' || status === 'applied' || status === 'acked'
       getDb()
@@ -472,33 +598,42 @@ export function handleAgentMessage(peer: AgentPeer, raw: string): void {
     }
     case 'task_state': {
       if (!deviceId) return
-      const taskId = String(message.taskId ?? '')
-      const status = String(message.status ?? '') as TaskStatus
-      if (taskId && status) {
-        applyTaskStatus(deviceId, taskId, status, (message.payload as Record<string, unknown>) ?? {})
-        insertAgentEvent(deviceId, {
-          type: `task.${status}`,
-          level: status === 'failed' ? 'error' : 'info',
-          taskId,
-          payload: (message.payload as Record<string, unknown>) ?? {}
-        })
-      }
+      const taskId = String(message.taskId ?? '').trim()
+      const status = String(message.status ?? '')
+      if (!taskId || taskId.length > 80 || !DEVICE_TASK_STATUSES.has(status)) return
+      const payload = isRecord(message.payload) ? message.payload : {}
+      applyTaskStatus(deviceId, taskId, status as TaskStatus, payload)
+      insertAgentEvent(deviceId, {
+        type: `task.${status}`,
+        level: status === 'failed' ? 'error' : 'info',
+        taskId,
+        payload
+      })
       return
     }
     case 'event': {
       if (!deviceId) return
-      const event = (message.event ?? {}) as Record<string, unknown>
-      const eventType = String(event.type ?? '')
-      if (!eventType) return
+      const event = message.event
+      if (!isRecord(event)) return
+      const eventType = String(event.type ?? '').trim()
+      if (!eventType || eventType.length > 80) return
+      const eventId = event.id == null ? undefined : String(event.id)
+      const taskId = event.taskId == null ? null : String(event.taskId)
+      const runId = event.runId == null ? null : String(event.runId)
+      const occurredAt = event.occurredAt == null ? undefined : String(event.occurredAt)
+      if ((eventId && eventId.length > 80) ||
+          (taskId && taskId.length > 80) ||
+          (runId && runId.length > 80) ||
+          (occurredAt && occurredAt.length > 40)) return
       insertAgentEvent(deviceId, {
-        id: event.id ? String(event.id) : undefined,
-        taskId: event.taskId ? String(event.taskId) : null,
-        runId: event.runId ? String(event.runId) : null,
+        id: eventId,
+        taskId,
+        runId,
         sequence: typeof event.sequence === 'number' ? event.sequence : null,
         type: eventType,
         level: event.level as EventLevel | undefined,
-        payload: (event.payload as Record<string, unknown>) ?? {},
-        occurredAt: event.occurredAt ? String(event.occurredAt) : undefined
+        payload: isRecord(event.payload) ? event.payload : {},
+        occurredAt
       })
       return
     }

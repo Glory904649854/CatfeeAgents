@@ -23,6 +23,7 @@ object ConsoleSettings {
     private const val KEY_DEVICE_SECRET = "device_secret"
     private const val KEY_DEVICE_NAME = "device_name"
     private const val KEY_STATUS = "last_status"
+    private const val KEY_REMOTE_AUTO_APPROVE = "remote_auto_approve"
 
     data class Config(
         val enabled: Boolean = false,
@@ -30,7 +31,9 @@ object ConsoleSettings {
         val deviceId: String = "",
         val deviceSecret: String = "",
         val deviceName: String = "",
-        val lastStatus: String = ""
+        val lastStatus: String = "",
+        /** 默认 false: 远程任务和远程记忆编辑默认被设备拒绝，需本机显式开启 */
+        val remoteAutoApprove: Boolean = false
     ) {
         val usable: Boolean
             get() = enabled && baseUrl.isNotBlank() && deviceId.isNotBlank() && deviceSecret.isNotBlank()
@@ -68,7 +71,8 @@ object ConsoleSettings {
             deviceId = p.getString(KEY_DEVICE_ID, "").orEmpty(),
             deviceSecret = p.getString(KEY_DEVICE_SECRET, "").orEmpty(),
             deviceName = p.getString(KEY_DEVICE_NAME, "").orEmpty(),
-            lastStatus = p.getString(KEY_STATUS, "").orEmpty()
+            lastStatus = p.getString(KEY_STATUS, "").orEmpty(),
+            remoteAutoApprove = p.getBoolean(KEY_REMOTE_AUTO_APPROVE, false)
         )
     }
 
@@ -80,6 +84,7 @@ object ConsoleSettings {
             .putString(KEY_DEVICE_SECRET, config.deviceSecret.trim())
             .putString(KEY_DEVICE_NAME, config.deviceName.trim())
             .putString(KEY_STATUS, config.lastStatus.take(300))
+            .putBoolean(KEY_REMOTE_AUTO_APPROVE, config.remoteAutoApprove)
             .apply()
     }
 
