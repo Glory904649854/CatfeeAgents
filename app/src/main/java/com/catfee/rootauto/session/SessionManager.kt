@@ -153,7 +153,8 @@ object SessionManager {
             result = "",
             phoneAllowed = false,
             titleAuto = false,
-            model = source.model
+            model = source.model,
+            source = source.source
         )
         fileLock.withLock { SessionStore.save(context, branch) }
         _current.value = branch
@@ -206,6 +207,56 @@ object SessionManager {
             _current.value = SessionStore.newSession("chat")
         }
         refreshHistory(context)
+    }
+
+    /**
+     * Web 远程任务在设备本地建一条可见的历史会话。
+     * 远程任务原来的 sessionId 是 remote_<taskId>, 之前没有对应文件,
+     * 导致 appendStep/setResult 全部落在不存在的会话上。
+     */
+    suspend fun ensureRemoteSession(
+        context: Context,
+        sessionId: String,
+        title: String,
+        goal: String
+    ): Session? {
+        if (sessionId.isBlank()) return null
+        val now = System.currentTimeMillis()
+        val existing = SessionStore.load(context, sessionId)
+        if (existing != null) {
+            if (existing.source != "web") {
+                val updated = existing.copy(
+                    title = existing.title.ifBlank { title.take(40) },
+                    source = "web"
+                )
+                fileLock.withLock { SessionStore.save(context, updated) }
+                refreshHistory(context)
+                return updated
+            }
+            return existing
+        }
+        val safeTitle = title.trim().replace('\n', ' ').take(40)
+            .ifBlank { goal.trim().replace('\n', ' ').take(40) }
+            .ifBlank { "Web 远程任务" }
+        val session = Session(
+            id = sessionId,
+            title = safeTitle,
+            mode = "agent",
+            createdAt = now,
+            updatedAt = now,
+            messages = listOf(
+                ChatMessage(
+                    role = "user",
+                    content = goal.ifBlank { safeTitle },
+                    time = now
+                )
+            ),
+            source = "web",
+            titleAuto = false
+        )
+        fileLock.withLock { SessionStore.save(context, session) }
+        refreshHistory(context)
+        return session
     }
 
     /** 首次进入 App: 新建一个空会话 (不落盘, 发第一条消息才出现在历史里) */

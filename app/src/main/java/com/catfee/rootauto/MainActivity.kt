@@ -1582,6 +1582,24 @@ private fun Header(running: Boolean, onMenu: () -> Unit) {
 }
 
 @Composable
+private fun SessionSourceBadge(source: String) {
+    val web = source == "web"
+    Box(
+        Modifier
+            .clip(RoundedCornerShape(4.dp))
+            .background(if (web) Accent.copy(alpha = 0.10f) else Color(0xFFF3F4F6))
+            .padding(horizontal = 4.dp, vertical = 1.dp)
+    ) {
+        Text(
+            if (web) "WEB" else "本机",
+            fontSize = 7.5.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = if (web) Accent else Muted
+        )
+    }
+}
+
+@Composable
 private fun SessionLine(session: Session) {
     Row(
         modifier = Modifier
@@ -1590,6 +1608,8 @@ private fun SessionLine(session: Session) {
             .padding(bottom = 4.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
+        SessionSourceBadge(session.source)
+        Spacer(Modifier.width(5.dp))
         Text(
             session.title,
             fontSize = 12.sp,
@@ -2984,6 +3004,8 @@ private fun SessionRow(
                         Icon(Icons.Rounded.Archive, "已归档", tint = Muted, modifier = Modifier.size(11.dp))
                         Spacer(Modifier.width(4.dp))
                     }
+                    SessionSourceBadge(summary.source)
+                    Spacer(Modifier.width(5.dp))
                     Text(
                         summary.title,
                         fontSize = 12.sp,

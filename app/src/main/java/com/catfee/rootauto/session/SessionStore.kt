@@ -162,7 +162,9 @@ data class Session(
     /** true 时允许自动标题覆盖; 手动改名后置 false */
     val titleAuto: Boolean = false,
     /** 本会话模型覆盖; 空=使用全局默认 */
-    val model: String = ""
+    val model: String = "",
+    /** 来源: local=手机本地创建, web=Web 控制台下发的远程任务 */
+    val source: String = "local"
 ) {
     val isEmpty: Boolean get() = messages.isEmpty() && steps.isEmpty() && result.isBlank()
 
@@ -193,6 +195,7 @@ data class Session(
             .put("summary", summary)
             .put("title_auto", titleAuto)
             .put("model", model)
+            .put("source", source)
     }
 
     fun toSummary(): SessionSummary = SessionSummary(
@@ -212,7 +215,8 @@ data class Session(
         archived = archived,
         favorite = favorite,
         summary = summary,
-        model = model
+        model = model,
+        source = source
     )
 
     companion object {
@@ -252,7 +256,8 @@ data class Session(
                     favorite = o.optBoolean("favorite", false),
                     summary = o.optString("summary", ""),
                     titleAuto = o.optBoolean("title_auto", false),
-                    model = o.optString("model", "")
+                    model = o.optString("model", ""),
+                    source = o.optString("source", "local")
                 )
             } catch (e: Exception) {
                 Log.w("Session", "parse session failed: ${e.message}")
@@ -280,7 +285,8 @@ data class SessionSummary(
     val archived: Boolean = false,
     val favorite: Boolean = false,
     val summary: String = "",
-    val model: String = ""
+    val model: String = "",
+    val source: String = "local"
 ) {
     fun toJson(): JSONObject = JSONObject()
         .put("id", id)
@@ -300,6 +306,7 @@ data class SessionSummary(
         .put("favorite", favorite)
         .put("summary", summary)
         .put("model", model)
+        .put("source", source)
 
     companion object {
         fun fromJson(o: JSONObject): SessionSummary = SessionSummary(
@@ -319,7 +326,8 @@ data class SessionSummary(
             archived = o.optBoolean("archived", false),
             favorite = o.optBoolean("favorite", false),
             summary = o.optString("summary", ""),
-            model = o.optString("model", "")
+            model = o.optString("model", ""),
+            source = o.optString("source", "local")
         )
     }
 }

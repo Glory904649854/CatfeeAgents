@@ -8,6 +8,7 @@ import com.catfee.rootauto.device.Capability
 import com.catfee.rootauto.device.CapabilityManager
 import com.catfee.rootauto.device.DeviceCapabilities
 import com.catfee.rootauto.llm.LlmSettings
+import com.catfee.rootauto.session.SessionManager
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.concurrent.ConcurrentHashMap
@@ -212,6 +213,13 @@ object RemoteTaskRunner {
         val timeoutMs = policy.optLong("timeoutMs", -1L)
         val sessionId = "remote_$taskId"
         sessions[taskId] = sessionId
+        // 在设备本地落一条 WEB 会话, 任务结束后可在 App 历史里回看步骤和结果。
+        SessionManager.ensureRemoteSession(
+            context,
+            sessionId,
+            payload.optString("title"),
+            goal
+        )
 
         ConsoleClient.sendCommandAck(context, commandId, taskId, "accepted", "accepted")
         ConsoleClient.emitEvent(
@@ -234,6 +242,7 @@ object RemoteTaskRunner {
             phoneAllowed = true
         )
         if (!ok) {
+            SessionManager.setResult(context, sessionId, "设备忙碌，任务未启动")
             ConsoleClient.emitEvent(
                 context, taskId, "task.failed", "error",
                 JSONObject().put("summary", "设备忙碌，任务未启动").put("error", "AgentController 启动失败")
