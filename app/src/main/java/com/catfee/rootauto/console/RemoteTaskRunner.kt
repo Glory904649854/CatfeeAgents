@@ -24,6 +24,8 @@ object RemoteTaskRunner {
     private val sessions = ConcurrentHashMap<String, String>()
     /** commandId 去重: WebSocket 重连或 App 重启后服务端都可能重发 */
     private val processedCommands = ConcurrentHashMap<String, Boolean>()
+    /** 正在处理中的命令, 防止同一条命令并发执行 */
+    private val inFlightCommands = ConcurrentHashMap<String, Boolean>()
     private const val CMD_PREF = "catfee_remote_commands"
     private const val CMD_KEY = "processed_ids"
     private const val CMD_KEEP = 200
@@ -50,21 +52,34 @@ object RemoteTaskRunner {
             return
         }
 
-        if (!markCommandIfNew(context, commandId)) {
+        // 已成功执行过的命令直接 ack; 被拒绝/失败的命令不写入去重表,
+        // 这样用户开启远程控制后点“重试”仍然能重新执行。
+        if (isCommandProcessed(context, commandId) ||
+            inFlightCommands.putIfAbsent(commandId, true) != null
+        ) {
             ConsoleClient.sendCommandAck(context, commandId, taskId, "applied", "duplicate ignored")
             return
         }
 
-        when (commandType) {
-            "TASK_ASSIGN" -> assign(context, commandId, taskId, payload)
-            "TASK_PAUSE" -> control(context, commandId, taskId, "pause")
-            "TASK_RESUME" -> control(context, commandId, taskId, "resume")
-            "TASK_STOP" -> control(context, commandId, taskId, "stop")
-            "MEMORY_UPDATE" -> memoryUpdate(context, commandId, taskId, payload)
-            "MEMORY_DELETE" -> memoryDelete(context, commandId, taskId, payload)
-            else -> ConsoleClient.sendCommandAck(
-                context, commandId, taskId, "rejected", "unsupported command: $commandType"
-            )
+        var accepted = false
+        try {
+            accepted = when (commandType) {
+                "TASK_ASSIGN" -> assign(context, commandId, taskId, payload)
+                "TASK_PAUSE" -> control(context, commandId, taskId, "pause")
+                "TASK_RESUME" -> control(context, commandId, taskId, "resume")
+                "TASK_STOP" -> control(context, commandId, taskId, "stop")
+                "MEMORY_UPDATE" -> memoryUpdate(context, commandId, taskId, payload)
+                "MEMORY_DELETE" -> memoryDelete(context, commandId, taskId, payload)
+                else -> {
+                    ConsoleClient.sendCommandAck(
+                        context, commandId, taskId, "rejected", "unsupported command: $commandType"
+                    )
+                    false
+                }
+            }
+        } finally {
+            if (accepted) markCommandProcessed(context, commandId)
+            inFlightCommands.remove(commandId)
         }
     }
 
@@ -73,12 +88,12 @@ object RemoteTaskRunner {
         commandId: String,
         taskId: String,
         payload: JSONObject
-    ) {
+    ): Boolean {
         val pkg = payload.optString("package")
         val entry = payload.optJSONObject("entry")
         if (pkg.isBlank() || entry == null) {
             ConsoleClient.sendCommandAck(context, commandId, taskId, "rejected", "package/entry 为空")
-            return
+            return false
         }
         val ok = AppMemory.applyRemoteEntry(context, pkg, entry)
         ConsoleClient.sendCommandAck(
@@ -86,6 +101,7 @@ object RemoteTaskRunner {
             if (ok) "applied" else "rejected",
             if (ok) "memory updated" else "entry invalid"
         )
+        return ok
     }
 
     private suspend fun memoryDelete(
@@ -93,12 +109,12 @@ object RemoteTaskRunner {
         commandId: String,
         taskId: String,
         payload: JSONObject
-    ) {
+    ): Boolean {
         val pkg = payload.optString("package")
         val entryId = payload.optString("entryId")
         if (pkg.isBlank() || entryId.isBlank()) {
             ConsoleClient.sendCommandAck(context, commandId, taskId, "rejected", "package/entryId 为空")
-            return
+            return false
         }
         val ok = AppMemory.removeEntry(context, pkg, entryId)
         ConsoleClient.sendCommandAck(
@@ -106,6 +122,7 @@ object RemoteTaskRunner {
             if (ok) "applied" else "rejected",
             if (ok) "memory deleted" else "entry not found"
         )
+        return ok
     }
 
     private suspend fun assign(
@@ -113,7 +130,7 @@ object RemoteTaskRunner {
         commandId: String,
         taskId: String,
         payload: JSONObject
-    ) {
+    ): Boolean {
         val provider = LlmSettings.active(context)
         if (provider == null || !provider.usable) {
             ConsoleClient.sendCommandAck(context, commandId, taskId, "rejected", "LLM 配置不完整")
@@ -121,13 +138,13 @@ object RemoteTaskRunner {
                 context, taskId, "task.failed", "error",
                 JSONObject().put("summary", "设备 LLM 配置不完整").put("error", "LLM 配置不完整")
             )
-            return
+            return false
         }
 
         val goal = payload.optString("goal").ifBlank { payload.optString("title") }
         if (goal.isBlank()) {
             ConsoleClient.sendCommandAck(context, commandId, taskId, "rejected", "任务目标为空")
-            return
+            return false
         }
 
         // 设备端必须显式开启远程控制; 默认拒绝, 避免控制台账号被盗后静默接管手机。
@@ -144,7 +161,7 @@ object RemoteTaskRunner {
                         "请在手机 App 的 设置 → Web 控制台 中开启「允许远程任务直接操作手机」后重新下发"
                     )
             )
-            return
+            return false
         }
 
         val policy = payload.optJSONObject("policy") ?: JSONObject()
@@ -183,7 +200,7 @@ object RemoteTaskRunner {
                                 "Root 设备可尝试通过控制台重新连接触发自动恢复"
                         )
                 )
-                return
+                return false
             }
             ConsoleClient.emitEvent(
                 context, taskId, "task.notice", "info",
@@ -223,11 +240,12 @@ object RemoteTaskRunner {
             )
             Log.w(TAG, "remote task start failed task=$taskId")
         }
+        return ok
     }
 
-    /** 持久化 commandId 去重, 避免 App 重启后服务端重发造成任务重复执行。 */
-    private fun markCommandIfNew(context: Context, commandId: String): Boolean {
-        if (processedCommands.putIfAbsent(commandId, true) != null) return false
+    /** 只对“真正执行成功”的 commandId 做持久化去重, 失败/被拒绝的命令允许重试。 */
+    private fun isCommandProcessed(context: Context, commandId: String): Boolean {
+        if (processedCommands.containsKey(commandId)) return true
         synchronized(cmdLock) {
             val prefs = context.applicationContext
                 .getSharedPreferences(CMD_PREF, Context.MODE_PRIVATE)
@@ -237,13 +255,29 @@ object RemoteTaskRunner {
                 JSONArray()
             }
             for (i in 0 until arr.length()) {
-                if (arr.optString(i) == commandId) return false
+                if (arr.optString(i) == commandId) return true
+            }
+            return false
+        }
+    }
+
+    private fun markCommandProcessed(context: Context, commandId: String) {
+        processedCommands[commandId] = true
+        synchronized(cmdLock) {
+            val prefs = context.applicationContext
+                .getSharedPreferences(CMD_PREF, Context.MODE_PRIVATE)
+            val arr = try {
+                JSONArray(prefs.getString(CMD_KEY, "[]"))
+            } catch (_: Exception) {
+                JSONArray()
             }
             val next = JSONArray().put(commandId)
             val start = maxOf(0, arr.length() - (CMD_KEEP - 1))
-            for (i in start until arr.length()) next.put(arr.optString(i))
+            for (i in start until arr.length()) {
+                val id = arr.optString(i)
+                if (id != commandId) next.put(id)
+            }
             prefs.edit().putString(CMD_KEY, next.toString()).apply()
-            return true
         }
     }
 
@@ -252,11 +286,11 @@ object RemoteTaskRunner {
         commandId: String,
         taskId: String,
         action: String
-    ) {
+    ): Boolean {
         val sessionId = sessions[taskId]
         if (sessionId == null) {
             ConsoleClient.sendCommandAck(context, commandId, taskId, "rejected", "task not running on device")
-            return
+            return false
         }
 
         val ok = when (action) {
@@ -274,7 +308,7 @@ object RemoteTaskRunner {
             context, commandId, taskId, if (ok) "applied" else "rejected",
             if (ok) "applied" else "state does not allow $action"
         )
-        if (!ok) return
+        if (!ok) return false
 
         val type = when (action) {
             "pause" -> "task.paused"
@@ -289,5 +323,6 @@ object RemoteTaskRunner {
         ConsoleClient.emitEvent(
             context, taskId, type, "info", JSONObject().put("summary", summary)
         )
+        return true
     }
 }

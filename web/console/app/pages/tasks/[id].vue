@@ -17,11 +17,15 @@ const events = computed(() => detail.value?.events ?? [])
 const commands = computed(() => detail.value?.commands ?? [])
 const loading = computed(() => store.state.tasks.detailLoading)
 const acting = ref<'pause' | 'resume' | 'stop' | ''>('')
+const retrying = ref(false)
 
 const terminalStatuses = ['succeeded', 'failed', 'stopped', 'expired', 'interrupted']
 const canPause = computed(() => Boolean(task.value && ['accepted', 'running'].includes(task.value.status)))
 const canResume = computed(() => Boolean(task.value && task.value.status === 'paused'))
 const canStop = computed(() => Boolean(task.value && !terminalStatuses.includes(task.value.status)))
+const canRetry = computed(
+  () => Boolean(task.value && terminalStatuses.includes(task.value.status))
+)
 
 const isTerminal = computed(
   () => Boolean(task.value && terminalStatuses.includes(task.value.status))
@@ -117,6 +121,21 @@ function requestStop() {
   })
 }
 
+async function retry() {
+  if (!task.value || retrying.value) return
+  retrying.value = true
+  try {
+    const result = await store.dispatch('tasks/retry', id.value)
+    message.success(result.delivered ? '已重新下发任务' : '设备离线，任务已排队')
+    await router.push(`/tasks/${result.task.id}`)
+  } catch (err: unknown) {
+    const requestError = err as { data?: { message?: string } }
+    message.error(requestError?.data?.message || '重试失败')
+  } finally {
+    retrying.value = false
+  }
+}
+
 const infoFields = computed(() => [
   { label: '任务 ID', value: task.value?.id ?? '—', mono: true },
   { label: '任务类型', value: task.value ? TASK_TYPE_LABELS[task.value.type] : '—' },
@@ -175,6 +194,18 @@ const infoFields = computed(() => [
             <span class="i-lucide-square text-[13px]" />
           </template>
           停止
+        </n-button>
+        <n-button
+          v-if="canRetry"
+          size="small"
+          type="primary"
+          :loading="retrying"
+          @click="retry"
+        >
+          <template #icon>
+            <span class="i-lucide-rotate-ccw text-[14px]" />
+          </template>
+          重试
         </n-button>
         <n-button size="small" :loading="loading" @click="load">
           <template #icon>

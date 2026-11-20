@@ -98,6 +98,13 @@ export const tasks: Module<TasksState, RootState> = {
         `/api/tasks/${payload.id}/${payload.action}`,
         { method: 'POST' }
       )
+    },
+
+    async retry(_ctx: Ctx, id: string) {
+      return await apiRequest<{ task: TaskSummary; delivered: boolean; commandId: string }>(
+        `/api/tasks/${id}/retry`,
+        { method: 'POST' }
+      )
     }
   }
 }
