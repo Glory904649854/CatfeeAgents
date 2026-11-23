@@ -7,29 +7,27 @@ defineProps<{ task: TaskSummary }>()
 <template>
   <NuxtLink
     :to="`/tasks/${task.id}`"
-    class="flex items-center gap-3 px-4 py-3.5 transition hover:bg-soft"
+    class="group grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-1 px-5 py-3.5 transition hover:bg-soft sm:grid-cols-[minmax(0,1.7fr)_minmax(0,1fr)_96px_112px_64px] sm:gap-4"
   >
-    <span
-      class="hidden h-8 w-8 shrink-0 items-center justify-center rounded-[10px] bg-subtle text-muted sm:flex"
-    >
-      <span class="i-lucide-list-checks text-[15px]" />
-    </span>
-    <div class="min-w-0 flex-1">
-      <div class="flex flex-wrap items-center gap-2">
-        <p class="truncate text-[13px] font-600 text-ink">{{ task.title }}</p>
-        <TaskStatusPill :status="task.status" />
-      </div>
-      <p class="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-faint">
+    <div class="min-w-0">
+      <p class="truncate text-[13px] font-600 text-ink">{{ task.title }}</p>
+      <p class="mt-0.5 flex items-center gap-1.5 text-[10.5px] text-faint sm:hidden">
         <span>{{ task.deviceName || task.deviceId }}</span>
-        <span>·</span>
-        <span>{{ TASK_TYPE_LABELS[task.type] || task.type }}</span>
         <span>·</span>
         <span><TimeText :value="task.createdAt" /></span>
       </p>
     </div>
-    <span class="hidden shrink-0 text-[11px] text-faint sm:block">
+    <span class="hidden truncate font-mono text-[11px] text-faint sm:block">
+      {{ task.deviceName || task.deviceId }}
+    </span>
+    <span class="justify-self-end sm:justify-self-start">
+      <TaskStatusPill :status="task.status" />
+    </span>
+    <span class="hidden text-[11px] text-faint sm:block">
+      <TimeText :value="task.createdAt" />
+    </span>
+    <span class="hidden text-right font-mono text-[11px] text-muted sm:block">
       {{ formatDuration(task.startedAt, task.finishedAt) }}
     </span>
-    <span class="i-lucide-chevron-right shrink-0 text-[15px] text-faint" />
   </NuxtLink>
 </template>

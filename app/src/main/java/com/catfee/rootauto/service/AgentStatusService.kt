@@ -410,7 +410,11 @@ class AgentStatusService : Service() {
             view.importantForAccessibility =
                 View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
             val savedPosition = DisplaySettings.overlayPosition(this)
-            val overlayWidth = (200 * resources.displayMetrics.density).toInt()
+            val density = resources.displayMetrics.density
+            val overlayWidth = minOf(
+                (320 * density).toInt(),
+                resources.displayMetrics.widthPixels - (32 * density).toInt()
+            )
             val lp = WindowManager.LayoutParams(
                 overlayWidth,
                 WindowManager.LayoutParams.WRAP_CONTENT,
@@ -448,10 +452,10 @@ class AgentStatusService : Service() {
                 updateOverlayBounds()
                 setupOverlayDrag(view, wm, lp)
             }
-            view.findViewById<TextView>(R.id.overlay_title)?.maxWidth =
-                (200 * resources.displayMetrics.density).toInt()
-            view.findViewById<TextView>(R.id.overlay_detail)?.maxWidth =
-                (200 * resources.displayMetrics.density).toInt()
+            val overlayTextWidth =
+                (overlayWidth - (80 * resources.displayMetrics.density).toInt()).coerceAtLeast(160)
+            view.findViewById<TextView>(R.id.overlay_title)?.maxWidth = overlayTextWidth
+            view.findViewById<TextView>(R.id.overlay_detail)?.maxWidth = overlayTextWidth
             view.findViewById<View>(R.id.overlay_pause)?.setOnClickListener {
                 val s = lastState ?: return@setOnClickListener
                 if (s.sessionId.isBlank()) return@setOnClickListener

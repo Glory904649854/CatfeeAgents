@@ -42,27 +42,33 @@ export default defineConfig({
       warning: '#D97706',
       danger: '#DC2626',
       violet: '#7C3AED',
-      slate: '#64748B'
+      slate: '#64748B',
+      sidebar: '#0B1220'
     },
     fontFamily: {
-      sans: '-apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans SC", Inter, sans-serif',
-      mono: 'ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace'
+      sans: '"Noto Sans SC", Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif',
+      mono: '"JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace'
     }
   },
 
   shortcuts: [
-    ['flat-card', 'bg-surface border border-line rounded-[16px]'],
-    ['flat-panel', 'bg-surface border border-line rounded-[14px] p-4'],
-    ['nav-item', 'flex items-center gap-3 px-3 py-2.5 rounded-[12px] text-[13.5px] text-muted transition-colors hover:bg-subtle hover:text-ink'],
-    ['nav-item-active', 'bg-subtle text-ink font-600'],
-    ['page-title', 'text-[22px] leading-7 font-700 tracking-tight text-ink'],
-    ['page-sub', 'text-[12.5px] text-muted mt-1'],
-    ['chip', 'inline-flex items-center gap-1.5 rounded-[7px] bg-subtle px-2 py-1 text-[11.5px] text-muted'],
-    ['icon-btn', 'inline-flex h-9 w-9 items-center justify-center rounded-[11px] border border-line bg-surface text-muted transition hover:(bg-subtle text-ink)'],
-    ['metric-value', 'text-[26px] font-700 tracking-tight text-ink tabular-nums'],
-    ['label-xs', 'text-[10.5px] font-600 uppercase tracking-[0.14em] text-faint'],
-    ['field-label', 'text-[11.5px] font-600 text-muted'],
-    ['link-quiet', 'text-muted transition hover:(text-ink underline)']
+    ['flat-card', 'bg-surface border border-line rounded-[14px]'],
+    ['flat-panel', 'bg-surface border border-line rounded-[14px] p-5'],
+    ['nav-item', 'relative flex items-center gap-3 h-[38px] px-3 rounded-[8px] text-[13px] text-white/60 transition-colors hover:bg-white/5 hover:text-white'],
+    ['nav-item-active', 'bg-white/[0.08] text-white font-500'],
+    ['page-title', 'text-[28px] leading-9 font-700 tracking-tight text-ink'],
+    ['page-sub', 'text-[12px] text-muted mt-1'],
+    ['chip', 'inline-flex items-center gap-1 rounded-[6px] bg-subtle px-2 py-1 font-mono text-[10.5px] text-muted'],
+    ['icon-btn', 'inline-flex h-9 w-9 items-center justify-center rounded-full border border-line bg-surface text-muted transition hover:(bg-subtle text-ink)'],
+    ['metric-value', 'text-[34px] leading-none font-700 tracking-tight text-ink tabular-nums'],
+    ['label-xs', 'text-[11px] font-500 text-muted'],
+    ['field-label', 'text-[12px] font-500 text-muted'],
+    ['link-quiet', 'text-muted transition hover:(text-ink underline)'],
+    ['btn-primary', 'inline-flex h-10 items-center justify-center gap-1.5 rounded-[10px] bg-ink px-4 text-[13px] font-500 text-white transition hover:bg-ink/90 disabled:(bg-subtle text-faint)'],
+    ['btn-secondary', 'inline-flex h-10 items-center justify-center gap-1.5 rounded-[10px] border border-line bg-white px-4 text-[13px] font-500 text-ink transition hover:(bg-subtle)'],
+    ['btn-brand', 'inline-flex h-10 items-center justify-center gap-1.5 rounded-[10px] bg-brand px-4 text-[13px] font-500 text-white transition hover:bg-brand/90'],
+    ['section-title', 'text-[15px] font-600 text-ink'],
+    ['mono-meta', 'font-mono text-[11px] text-faint']
   ],
 
   safelist: [

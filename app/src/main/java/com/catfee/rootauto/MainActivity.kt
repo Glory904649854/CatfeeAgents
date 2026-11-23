@@ -78,6 +78,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.Logout
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Archive
+import androidx.compose.material.icons.rounded.AttachFile
 import androidx.compose.material.icons.rounded.ArrowUpward
 import androidx.compose.material.icons.rounded.Bolt
 import androidx.compose.material.icons.rounded.ChatBubbleOutline
@@ -104,6 +105,7 @@ import androidx.compose.material.icons.rounded.Psychology
 import androidx.compose.material.icons.rounded.PushPin
 import androidx.compose.material.icons.rounded.QrCodeScanner
 import androidx.compose.material.icons.rounded.Search
+import androidx.compose.material.icons.rounded.Send
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.Share
 import androidx.compose.material.icons.rounded.Star
@@ -176,6 +178,7 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
@@ -1513,12 +1516,12 @@ private fun Header(running: Boolean, onMenu: () -> Unit) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 10.dp),
+            .padding(horizontal = 18.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Box(
             modifier = Modifier
-                .size(38.dp)
+                .size(42.dp)
                 .clip(RoundedCornerShape(12.dp))
                 .border(1.dp, Line, RoundedCornerShape(12.dp))
         ) {
@@ -1548,11 +1551,11 @@ private fun Header(running: Boolean, onMenu: () -> Unit) {
                         )
                     ) { append("Agents") }
                 },
-                fontSize = 20.sp,
+                fontSize = 22.sp,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
-            Spacer(Modifier.height(1.dp))
+            Spacer(Modifier.height(2.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
                 if (running) {
                     val transition = rememberInfiniteTransition(label = "run")
@@ -1563,20 +1566,22 @@ private fun Header(running: Boolean, onMenu: () -> Unit) {
                     )
                     Box(Modifier.size(6.dp).alpha(a).background(Accent, CircleShape))
                     Spacer(Modifier.width(5.dp))
-                    Text("Working on this device", fontSize = 10.sp, color = Muted)
+                    Text("Working on this device", fontSize = 11.sp, color = Muted)
                 } else {
-                    Text("Chat & phone agent", fontSize = 10.sp, color = Muted)
+                    Text("Chat & phone agent", fontSize = 11.sp, color = Muted)
                 }
             }
         }
+        Spacer(Modifier.width(8.dp))
         IconButton(
             onClick = onMenu,
             modifier = Modifier
-                .size(38.dp)
+                .size(42.dp)
                 .clip(CircleShape)
-                .background(Color(0xFFF1F3F5))
+                .background(Color.White)
+                .border(1.dp, Line, CircleShape)
         ) {
-            Icon(Icons.Rounded.Menu, contentDescription = "菜单", tint = Ink, modifier = Modifier.size(19.dp))
+            Icon(Icons.Rounded.Menu, contentDescription = "菜单", tint = Ink, modifier = Modifier.size(20.dp))
         }
     }
 }
@@ -1612,8 +1617,8 @@ private fun SessionLine(session: Session) {
         Spacer(Modifier.width(5.dp))
         Text(
             session.title,
-            fontSize = 12.sp,
-            fontWeight = FontWeight.Medium,
+            fontSize = 16.sp,
+            fontWeight = FontWeight.Bold,
             color = Ink,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
@@ -1623,7 +1628,8 @@ private fun SessionLine(session: Session) {
             Text(
                 "${formatCount(session.totalTokens)} tok · ${formatCount(session.contextChars)} ctx" +
                     if (session.totalDurationMs > 0) " · ${formatDuration(session.totalDurationMs)}" else "",
-                fontSize = 9.5.sp,
+                fontSize = 10.sp,
+                fontFamily = FontFamily.Monospace,
                 color = Color(0xFF9CA3AF)
             )
         }
@@ -2218,26 +2224,27 @@ private fun EmptyState() {
         border = BorderStroke(1.dp, Line)
     ) {
         Column(
-            modifier = Modifier.padding(horizontal = 22.dp, vertical = 30.dp),
+            modifier = Modifier.padding(horizontal = 24.dp, vertical = 32.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             Image(
                 painter = painterResource(R.drawable.app_logo),
                 contentDescription = null,
                 modifier = Modifier
-                    .size(70.dp)
-                    .clip(RoundedCornerShape(20.dp))
-                    .border(1.dp, Line, RoundedCornerShape(20.dp)),
+                    .size(64.dp)
+                    .clip(RoundedCornerShape(18.dp))
+                    .border(1.dp, Line, RoundedCornerShape(18.dp)),
                 contentScale = ContentScale.Crop
             )
-            Spacer(Modifier.height(14.dp))
-            Text("开始对话", fontSize = 16.sp, fontWeight = FontWeight.SemiBold, color = Ink)
-            Spacer(Modifier.height(4.dp))
+            Spacer(Modifier.height(16.dp))
+            Text("开始对话", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Ink)
+            Spacer(Modifier.height(6.dp))
             Text(
                 "可以聊天、分析图片/文件；需要时 Agent 会请求一次授权，然后自己操作手机。",
-                fontSize = 12.sp,
+                fontSize = 13.sp,
                 color = Muted,
-                lineHeight = 18.sp
+                lineHeight = 20.sp,
+                textAlign = TextAlign.Center
             )
         }
     }
@@ -2272,7 +2279,7 @@ private fun Composer(
         Column(Modifier.padding(horizontal = 14.dp, vertical = 5.dp)) {
             Surface(
                 modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(26.dp),
+                shape = RoundedCornerShape(28.dp),
                 color = Color.White,
                 border = BorderStroke(1.dp, lerp(Color(0xFFECEEF2), Accent.copy(alpha = 0.42f), borderAmount))
             ) {
@@ -2344,7 +2351,7 @@ private fun Composer(
                                 Box(Modifier.padding(vertical = 9.dp)) {
                                     if (task.isEmpty()) {
                                         Text(
-                                            "发消息或描述任务…",
+                                            "输入消息…",
                                             fontSize = 15.sp,
                                             color = Color(0xFF9AA0A6),
                                             maxLines = 1,
@@ -2379,18 +2386,18 @@ private fun Composer(
                 Spacer(Modifier.width(6.dp))
                 Text(
                     model.ifBlank { "未配置模型" },
-                    fontSize = 9.5.sp,
+                    fontSize = 11.5.sp,
                     color = Muted,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f)
                 )
-                Text("切换", fontSize = 9.sp, color = Color(0xFF9CA3AF))
+                Text("切换", fontSize = 10.5.sp, fontWeight = FontWeight.Medium, color = Accent)
                 Icon(
                     Icons.Rounded.ExpandMore,
                     contentDescription = "切换本会话模型",
-                    tint = Color(0xFF9CA3AF),
-                    modifier = Modifier.size(13.dp)
+                    tint = Accent,
+                    modifier = Modifier.size(14.dp)
                 )
             }
             if (hint.isNotBlank()) {
@@ -2414,9 +2421,10 @@ private fun AttachmentButton(onClick: () -> Unit) {
     val bg by animateFloatAsState(if (pressed) 1f else 0f, tween(110), label = "attachBg")
     Box(
         modifier = Modifier
-            .size(36.dp)
+            .size(40.dp)
             .clip(CircleShape)
-            .background(lerp(Color(0xFFF3F4F6), Color(0xFFE8EAED), bg))
+            .background(Color.White)
+            .border(1.dp, lerp(Line, Ink.copy(alpha = 0.25f), bg), CircleShape)
             .clickable(
                 interactionSource = source,
                 indication = null,
@@ -2425,7 +2433,7 @@ private fun AttachmentButton(onClick: () -> Unit) {
         contentAlignment = Alignment.Center
     ) {
         Icon(
-            Icons.Rounded.Add,
+            Icons.Rounded.AttachFile,
             contentDescription = "添加图片或文件",
             tint = Ink,
             modifier = Modifier.size(20.dp)
@@ -2440,10 +2448,10 @@ private fun RunButton(enabled: Boolean, onClick: () -> Unit) {
     val scale by animateFloatAsState(if (pressed) 0.92f else 1f, tween(90), label = "scale")
     Box(
         modifier = Modifier
-            .size(36.dp)
+            .size(40.dp)
             .scale(scale)
             .clip(CircleShape)
-            .background(if (enabled) Ink else Color(0xFFF1F3F4))
+            .background(if (enabled) Accent else Color(0xFFF1F3F4))
             .clickable(
                 enabled = enabled,
                 interactionSource = source,
@@ -2453,7 +2461,7 @@ private fun RunButton(enabled: Boolean, onClick: () -> Unit) {
         contentAlignment = Alignment.Center
     ) {
         Icon(
-            Icons.Rounded.ArrowUpward,
+            Icons.Rounded.Send,
             contentDescription = "发送",
             tint = if (enabled) Color.White else Color(0xFFB6BAC0),
             modifier = Modifier.size(18.dp)
@@ -2851,57 +2859,64 @@ private fun MenuSheet(
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    "CatfeeAgents",
-                    fontSize = 20.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = Ink,
+                    buildAnnotatedString {
+                        withStyle(SpanStyle(fontWeight = FontWeight.Bold, color = Ink)) { append("Catfee") }
+                        withStyle(SpanStyle(fontWeight = FontWeight.Bold, color = Accent)) { append("Agents") }
+                    },
+                    fontSize = 22.sp,
                     modifier = Modifier.weight(1f)
                 )
                 // 设置固定在顶部, 会话再长也不用滚到底部找
-                TextButton(
+                IconButton(
                     onClick = onSettings,
-                    shape = RoundedCornerShape(12.dp),
-                    contentPadding = PaddingValues(horizontal = 10.dp)
+                    modifier = Modifier
+                        .size(38.dp)
+                        .clip(CircleShape)
+                        .background(Color(0xFFF3F4F6))
                 ) {
-                    Icon(Icons.Rounded.Settings, null, tint = Ink, modifier = Modifier.size(16.dp))
-                    Spacer(Modifier.width(5.dp))
-                    Text("设置", fontSize = 11.sp, color = Ink)
+                    Icon(Icons.Rounded.Settings, "设置", tint = Ink, modifier = Modifier.size(17.dp))
                 }
-                IconButton(onClick = onDismiss) {
-                    Icon(Icons.Rounded.Close, "关闭", tint = Muted)
+                Spacer(Modifier.width(6.dp))
+                IconButton(
+                    onClick = onDismiss,
+                    modifier = Modifier
+                        .size(38.dp)
+                        .clip(CircleShape)
+                        .background(Color(0xFFF3F4F6))
+                ) {
+                    Icon(Icons.Rounded.Close, "关闭", tint = Ink, modifier = Modifier.size(18.dp))
                 }
             }
-            Text("一个对话界面，聊天或让 Agent 操作手机。", fontSize = 11.sp, color = Muted)
-            Spacer(Modifier.height(12.dp))
+            Spacer(Modifier.height(16.dp))
             Button(
                 onClick = onNew,
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(48.dp),
                 shape = RoundedCornerShape(14.dp),
                 colors = ButtonDefaults.buttonColors(containerColor = Ink)
             ) {
-                Icon(Icons.Rounded.Add, null, Modifier.size(16.dp))
-                Spacer(Modifier.width(6.dp))
-                Text("新建会话", fontSize = 12.sp)
+                Icon(Icons.Rounded.Add, null, Modifier.size(18.dp))
+                Spacer(Modifier.width(7.dp))
+                Text("新建会话", fontSize = 14.sp, fontWeight = FontWeight.Medium)
             }
-            HorizontalDivider(Modifier.padding(vertical = 14.dp), color = Line)
-            Text("历史会话", fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = Muted)
-            Spacer(Modifier.height(8.dp))
+            Spacer(Modifier.height(12.dp))
             OutlinedTextField(
                 value = query,
                 onValueChange = { query = it },
                 modifier = Modifier.fillMaxWidth(),
                 singleLine = true,
-                placeholder = { Text("搜索标题、摘要或结果…", fontSize = 11.sp, color = Color(0xFF9CA3AF)) },
+                placeholder = { Text("搜索标题、摘要或结果…", fontSize = 12.sp, color = Color(0xFF9CA3AF)) },
                 leadingIcon = {
-                    Icon(Icons.Rounded.Search, null, tint = Muted, modifier = Modifier.size(17.dp))
+                    Icon(Icons.Rounded.Search, null, tint = Muted, modifier = Modifier.size(18.dp))
                 },
-                shape = RoundedCornerShape(14.dp),
-                textStyle = TextStyle(fontSize = 12.sp, color = Ink),
+                shape = RoundedCornerShape(16.dp),
+                textStyle = TextStyle(fontSize = 13.sp, color = Ink),
                 colors = OutlinedTextFieldDefaults.colors(
                     focusedBorderColor = Ink,
-                    unfocusedBorderColor = Line,
+                    unfocusedBorderColor = Color.Transparent,
                     focusedContainerColor = Color.White,
-                    unfocusedContainerColor = Color.White,
+                    unfocusedContainerColor = Color(0xFFF7F8FA),
                     cursorColor = Ink
                 )
             )
@@ -2909,12 +2924,11 @@ private fun MenuSheet(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clip(RoundedCornerShape(14.dp))
-                    .background(Color(0xFFF3F4F6))
-                    .padding(3.dp)
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 listOf("最近", "置顶", "收藏", "归档").forEachIndexed { idx, label ->
-                    SettingsTab(label, filter == idx, Modifier.weight(1f)) { filter = idx }
+                    SettingsTab(label, filter == idx) { filter = idx }
                 }
             }
             Spacer(Modifier.height(8.dp))
@@ -2972,24 +2986,29 @@ private fun SessionRow(
         modifier = Modifier
             .fillMaxWidth()
             .clickable(onClick = onClick),
-        shape = RoundedCornerShape(15.dp),
+        shape = RoundedCornerShape(14.dp),
         color = if (selected) Accent.copy(alpha = 0.04f) else Color.White,
-        border = BorderStroke(1.dp, if (selected) Accent.copy(alpha = 0.3f) else Line)
+        border = BorderStroke(1.dp, if (selected) Accent.copy(alpha = 0.25f) else Line)
     ) {
         Row(
-            modifier = Modifier.padding(horizontal = 11.dp, vertical = 10.dp),
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 12.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Box(
                 Modifier
-                    .size(32.dp)
-                    .clip(RoundedCornerShape(10.dp))
-                    .background(Accent.copy(alpha = 0.08f)),
+                    .size(42.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(if (running) Accent.copy(alpha = 0.08f) else Color(0xFFF3F4F6)),
                 contentAlignment = Alignment.Center
             ) {
-                Icon(Icons.Rounded.ChatBubbleOutline, null, tint = Accent, modifier = Modifier.size(15.dp))
+                Icon(
+                    Icons.Rounded.ChatBubbleOutline,
+                    null,
+                    tint = if (running) Accent else Muted,
+                    modifier = Modifier.size(19.dp)
+                )
             }
-            Spacer(Modifier.width(9.dp))
+            Spacer(Modifier.width(11.dp))
             Column(Modifier.weight(1f)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     if (summary.pinned) {
@@ -3008,41 +3027,50 @@ private fun SessionRow(
                     Spacer(Modifier.width(5.dp))
                     Text(
                         summary.title,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Medium,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.SemiBold,
                         color = Ink,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f)
                     )
                     if (running) {
-                        Box(Modifier.size(6.dp).background(Success, CircleShape))
-                        Spacer(Modifier.width(4.dp))
-                        Text("running", fontSize = 8.sp, color = Success)
+                        Row(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(50))
+                                .background(Success.copy(alpha = 0.10f))
+                                .padding(horizontal = 6.dp, vertical = 2.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Box(Modifier.size(5.dp).background(Success, CircleShape))
+                            Spacer(Modifier.width(3.dp))
+                            Text("running", fontSize = 9.sp, fontWeight = FontWeight.SemiBold, color = Success)
+                        }
                     }
                 }
                 if (summary.summary.isNotBlank()) {
                     Text(
                         summary.summary,
-                        fontSize = 9.5.sp,
+                        fontSize = 10.5.sp,
                         color = Muted,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.padding(top = 1.dp)
+                        modifier = Modifier.padding(top = 2.dp)
                     )
                 }
                 Text(
                     "$time · ${formatCount(summary.totalTokens)} tok · " +
-                        "${formatCount(summary.contextChars)} ctx" +
                         if (summary.totalDurationMs > 0) {
-                            " · ${formatDuration(summary.totalDurationMs)}"
+                            "${formatDuration(summary.totalDurationMs)} · "
                         } else {
                             ""
-                        } + " · ${summary.messageCount} msgs",
-                    fontSize = 9.sp,
-                    color = Muted,
+                        } + "${summary.messageCount} 条",
+                    fontSize = 10.sp,
+                    fontFamily = FontFamily.Monospace,
+                    color = Color(0xFF9CA3AF),
                     maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(top = 2.dp)
                 )
             }
             Box {
@@ -3264,8 +3292,8 @@ private fun SettingsSheet(
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
                     "设置",
-                    fontSize = 20.sp,
-                    fontWeight = FontWeight.SemiBold,
+                    fontSize = 24.sp,
+                    fontWeight = FontWeight.Bold,
                     color = Ink,
                     modifier = Modifier.weight(1f)
                 )
@@ -3291,15 +3319,14 @@ private fun SettingsSheet(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clip(RoundedCornerShape(14.dp))
-                    .background(Color(0xFFF3F4F6))
-                    .padding(3.dp)
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                SettingsTab("模型", tab == 0, Modifier.weight(1f)) { tab = 0 }
-                SettingsTab("控制台", tab == 1, Modifier.weight(1f)) { tab = 1 }
-                SettingsTab("记忆", tab == 2, Modifier.weight(1f)) { tab = 2 }
-                SettingsTab("统计", tab == 3, Modifier.weight(1f)) { tab = 3 }
-                SettingsTab("关于", tab == 4, Modifier.weight(1f)) { tab = 4 }
+                SettingsTab("模型", tab == 0) { tab = 0 }
+                SettingsTab("控制台", tab == 1) { tab = 1 }
+                SettingsTab("记忆", tab == 2) { tab = 2 }
+                SettingsTab("统计", tab == 3) { tab = 3 }
+                SettingsTab("关于", tab == 4) { tab = 4 }
             }
             Spacer(Modifier.height(10.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -4363,17 +4390,18 @@ private fun SettingsTab(
 ) {
     Box(
         modifier = modifier
-            .height(34.dp)
-            .clip(RoundedCornerShape(11.dp))
-            .background(if (selected) Color.White else Color.Transparent)
-            .clickable(onClick = onClick),
+            .height(36.dp)
+            .clip(RoundedCornerShape(50))
+            .background(if (selected) Ink else Color(0xFFF3F4F6))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 14.dp),
         contentAlignment = Alignment.Center
     ) {
         Text(
             label,
             fontSize = 12.sp,
-            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
-            color = if (selected) Ink else Muted
+            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
+            color = if (selected) Color.White else Muted
         )
     }
 }
@@ -4478,35 +4506,40 @@ private fun StudioField(
     minLines: Int = 1,
     modifier: Modifier = Modifier
 ) {
-    OutlinedTextField(
-        value = value,
-        onValueChange = onValueChange,
-        label = { Text(label, fontSize = 11.sp) },
-        placeholder = {
-            if (placeholder.isNotBlank()) {
-                Text(placeholder, fontSize = 12.sp, color = Color(0xFF9CA3AF))
-            }
-        },
-        minLines = minLines,
-        maxLines = if (minLines > 1) 4 else 1,
-        singleLine = minLines == 1,
-        textStyle = TextStyle(
-            fontSize = 12.sp,
-            color = Ink,
-            fontFamily = if (mono) FontFamily.Monospace else FontFamily.Default
-        ),
-        shape = RoundedCornerShape(14.dp),
-        colors = OutlinedTextFieldDefaults.colors(
-            focusedBorderColor = Ink,
-            unfocusedBorderColor = Line,
-            focusedContainerColor = Color.White,
-            unfocusedContainerColor = Color.White,
-            cursorColor = Ink
-        ),
+    Column(
         modifier = modifier
             .fillMaxWidth()
-            .padding(bottom = 8.dp)
-    )
+            .padding(bottom = 10.dp)
+    ) {
+        Text(label, fontSize = 12.sp, fontWeight = FontWeight.Medium, color = Muted)
+        Spacer(Modifier.height(6.dp))
+        OutlinedTextField(
+            value = value,
+            onValueChange = onValueChange,
+            placeholder = {
+                if (placeholder.isNotBlank()) {
+                    Text(placeholder, fontSize = 13.sp, color = Color(0xFF9CA3AF))
+                }
+            },
+            minLines = minLines,
+            maxLines = if (minLines > 1) 4 else 1,
+            singleLine = minLines == 1,
+            textStyle = TextStyle(
+                fontSize = 13.sp,
+                color = Ink,
+                fontFamily = if (mono) FontFamily.Monospace else FontFamily.Default
+            ),
+            shape = RoundedCornerShape(14.dp),
+            colors = OutlinedTextFieldDefaults.colors(
+                focusedBorderColor = Color.Transparent,
+                unfocusedBorderColor = Color.Transparent,
+                focusedContainerColor = Color(0xFFF7F8FA),
+                unfocusedContainerColor = Color(0xFFF7F8FA),
+                cursorColor = Ink
+            ),
+            modifier = Modifier.fillMaxWidth()
+        )
+    }
 }
 
 /* ---------------- helpers ---------------- */

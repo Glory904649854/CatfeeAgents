@@ -2,12 +2,12 @@
 <selector xmlns:android="http://schemas.android.com/apk/res/android">
     <item android:state_pressed="true">
         <shape android:shape="oval">
-            <solid android:color="#3DFF6B6B" />
+            <solid android:color="#FEE2E2" />
         </shape>
     </item>
     <item>
         <shape android:shape="oval">
-            <solid android:color="#1FFF6B6B" />
+            <solid android:color="#F3F4F6" />
         </shape>
     </item>
 </selector>

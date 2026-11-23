@@ -36,12 +36,6 @@ const tabs = [
   { value: 'stopped', label: '已停止' }
 ]
 
-const typeOptions = [
-  { label: 'Agent 目标（自然语言目标）', value: 'agent.goal' },
-  { label: '设备诊断（采集与检查）', value: 'device.diagnostic' },
-  { label: '应用流程（受控步骤）', value: 'app.flow' }
-]
-
 const timeoutOptions = [
   { label: '不限制（直到任务完成）', value: -1 },
   { label: '5 分钟', value: 300000 },
@@ -160,12 +154,10 @@ async function submitCreate() {
           </template>
           刷新
         </n-button>
-        <n-button type="primary" size="small" @click="openCreate">
-          <template #icon>
-            <span class="i-lucide-plus text-[14px]" />
-          </template>
+        <button type="button" class="btn-brand" @click="openCreate">
+          <span class="i-lucide-plus text-[14px]" />
           新建任务
-        </n-button>
+        </button>
       </template>
     </PageHeader>
 
@@ -175,7 +167,7 @@ async function submitCreate() {
           v-for="tab in tabs"
           :key="tab.value"
           type="button"
-          class="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-[9px] border px-2.5 py-1.5 text-[11.5px] font-600 transition"
+          class="inline-flex h-9 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full border px-3.5 text-[12px] font-600 transition"
           :class="
             status === tab.value
               ? 'border-ink bg-ink text-white'
@@ -223,6 +215,7 @@ async function submitCreate() {
         </EmptyState>
       </div>
       <div v-else>
+        <TaskTableHeader />
         <TaskRow v-for="task in tasks" :key="task.id" :task="task" />
       </div>
     </SectionCard>
@@ -253,20 +246,6 @@ async function submitCreate() {
           <n-input v-model:value="form.title" maxlength="120" show-count placeholder="例如：检查应用登录页可用性" />
         </div>
 
-        <div class="grid gap-4 sm:grid-cols-2">
-          <div>
-            <label class="field-label mb-1.5 block">任务类型</label>
-            <n-select v-model:value="form.type" :options="typeOptions" />
-          </div>
-          <div>
-            <label class="field-label mb-1.5 block">超时时间</label>
-            <n-select v-model:value="form.timeoutMs" :options="timeoutOptions" />
-            <p class="mt-1.5 text-[10.5px] text-faint">
-              默认不限制，可随时暂停/停止。
-            </p>
-          </div>
-        </div>
-
         <div>
           <label class="field-label mb-1.5 block">目标描述</label>
           <n-input
@@ -278,38 +257,47 @@ async function submitCreate() {
           />
         </div>
 
-        <div class="rounded-[12px] border border-line bg-soft p-3.5">
-          <p class="text-[11.5px] font-600 text-ink">执行策略</p>
-          <div class="mt-3 flex items-center justify-between gap-3">
-            <div>
-              <p class="text-[11.5px] text-ink">允许截图回传</p>
-              <p class="mt-0.5 text-[10px] text-faint">失败诊断时需要最近一张页面截图</p>
-            </div>
-            <n-switch v-model:value="form.allowScreenshot" size="small" />
+        <div class="grid gap-4 sm:grid-cols-3">
+          <div>
+            <label class="field-label mb-1.5 block">超时</label>
+            <n-select v-model:value="form.timeoutMs" :options="timeoutOptions" />
           </div>
-          <div class="mt-3 flex items-center justify-between gap-3 border-t border-line/70 pt-3">
-            <div>
-              <p class="text-[11.5px] text-ink">允许 Root 能力</p>
-              <p class="mt-0.5 text-[10px] text-faint">
-                仅管理员可授予；文字输入仍依赖无障碍
-              </p>
+          <div>
+            <label class="field-label mb-1.5 block">允许截图</label>
+            <div class="flex h-[40px] items-center">
+              <n-switch v-model:value="form.allowScreenshot" />
             </div>
-            <n-switch
-              v-model:value="form.allowRoot"
-              size="small"
-              :disabled="!canGrantRoot"
-            />
           </div>
+          <div>
+            <label class="field-label mb-1.5 block">允许 Root</label>
+            <div class="flex h-[40px] items-center">
+              <n-switch
+                v-model:value="form.allowRoot"
+                :disabled="!canGrantRoot"
+              />
+            </div>
+          </div>
+        </div>
+
+        <div
+          v-if="form.allowRoot"
+          class="flex items-start gap-2 rounded-[10px] border border-brand/15 bg-brand/5 px-3 py-2.5 text-[11px] leading-5 text-brand"
+        >
+          <span class="i-lucide-triangle-alert mt-0.5 shrink-0 text-[13px]" />
+          允许 Root 属于高危操作：Agent 将获得完整系统权限，请仅在诊断任务中开启。
         </div>
       </div>
 
       <template #footer>
-        <div class="flex justify-end gap-2">
-          <n-button size="small" @click="createOpen = false">取消</n-button>
-          <n-button size="small" type="primary" :loading="submitting" @click="submitCreate">
-            下发任务
-          </n-button>
-        </div>
+        <button
+          type="button"
+          class="btn-brand h-11 w-full"
+          :disabled="submitting"
+          @click="submitCreate"
+        >
+          <span v-if="submitting" class="i-lucide-loader-circle animate-spin text-[15px]" />
+          {{ submitting ? '下发中…' : '下发任务' }}
+        </button>
       </template>
     </n-modal>
   </div>

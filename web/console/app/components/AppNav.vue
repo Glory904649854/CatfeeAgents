@@ -22,8 +22,7 @@ function onClick() {
 </script>
 
 <template>
-  <nav class="space-y-1">
-    <div class="px-3 pb-2 label-xs">工作台</div>
+  <nav class="space-y-0.5">
     <NuxtLink
       v-for="item in items"
       :key="item.to"
@@ -32,12 +31,12 @@ function onClick() {
       :class="{ 'nav-item-active': isActive(item.to) }"
       @click="onClick"
     >
-      <span :class="item.icon" class="text-[17px]" />
-      <span>{{ item.label }}</span>
       <span
         v-if="isActive(item.to)"
-        class="ml-auto h-1.5 w-1.5 rounded-full bg-brand"
+        class="absolute left-0 top-1/2 h-4 w-[3px] -translate-y-1/2 rounded-full bg-brand"
       />
+      <span :class="item.icon" class="text-[17px]" />
+      <span>{{ item.label }}</span>
     </NuxtLink>
   </nav>
 </template>

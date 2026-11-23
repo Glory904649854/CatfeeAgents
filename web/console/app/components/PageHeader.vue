@@ -20,8 +20,15 @@ defineProps<{
       <h1 class="page-title truncate">{{ title }}</h1>
       <p v-if="subtitle" class="page-sub">{{ subtitle }}</p>
     </div>
-    <div class="flex shrink-0 flex-wrap items-center gap-2">
+    <div class="page-actions flex shrink-0 flex-wrap items-center gap-2">
       <slot name="actions" />
     </div>
   </div>
 </template>
+
+<style scoped>
+.page-actions :deep(.n-button) {
+  --n-height: 40px !important;
+  --n-padding: 0 16px !important;
+}
+</style>

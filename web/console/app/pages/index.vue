@@ -69,7 +69,7 @@ const statCards = computed(() => [
         </n-button>
         <NuxtLink
           to="/tasks?create=1"
-          class="inline-flex h-7 items-center gap-1.5 rounded-[8px] bg-ink px-2.5 text-[12px] font-500 text-white transition hover:bg-ink/90"
+          class="btn-brand"
         >
           <span class="i-lucide-plus text-[14px]" />
           新建任务
@@ -132,6 +132,7 @@ const statCards = computed(() => [
           <n-button size="small" @click="router.push('/tasks?create=1')">新建任务</n-button>
         </div>
         <div v-else>
+          <TaskTableHeader />
           <TaskRow v-for="task in tasks" :key="task.id" :task="task" />
         </div>
       </SectionCard>

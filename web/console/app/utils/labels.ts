@@ -153,5 +153,5 @@ const MEMORY_KIND_META: Record<string, StatusMeta> = {
 }
 
 export function memoryKindMeta(kind: string): StatusMeta {
-  return MEMORY_KIND_META[kind] ?? MEMORY_KIND_META.entry
+  return MEMORY_KIND_META[kind] ?? MEMORY_KIND_META.entry!
 }

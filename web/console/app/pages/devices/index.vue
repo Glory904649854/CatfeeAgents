@@ -182,7 +182,7 @@ async function regenerate() {
           v-for="tab in tabs"
           :key="tab.value"
           type="button"
-          class="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-[9px] border px-2.5 py-1.5 text-[11.5px] font-600 transition"
+          class="inline-flex h-9 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full border px-3.5 text-[12px] font-600 transition"
           :class="
             status === tab.value
               ? 'border-ink bg-ink text-white'
