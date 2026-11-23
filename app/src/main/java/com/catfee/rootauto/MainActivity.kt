@@ -437,6 +437,12 @@ private fun AgentConsole(activity: ComponentActivity) {
 
     // 打开设置时只查询授权状态, 不主动申请 root
     LaunchedEffect(showSettings) {
+        // 设置页顶部是白色固定栏, 状态栏同步成白色; 关闭后回到画布色。
+        activity.window.statusBarColor = if (showSettings) {
+            AndroidColor.WHITE
+        } else {
+            AndroidColor.rgb(247, 248, 250)
+        }
         if (showSettings) {
             rootGranted = withContext(Dispatchers.IO) { RootShell.appGrantedRoot() }
             overlayGranted = Settings.canDrawOverlays(activity)
@@ -848,7 +854,7 @@ private fun AgentConsole(activity: ComponentActivity) {
     ModalNavigationDrawer(
         drawerState = drawerState,
         gesturesEnabled = drawerState.isOpen,
-        scrimColor = Color.Black.copy(alpha = 0.32f),
+        scrimColor = Color.Black.copy(alpha = 0.20f),
         drawerContent = {
             MenuDrawer(
                 sessions = sessions,
@@ -4200,21 +4206,22 @@ private fun SettingsInfoRow(label: String, value: String, mono: Boolean = false)
 private fun SettingsMetricTile(value: String, label: String, modifier: Modifier = Modifier) {
     Column(
         modifier = modifier
-            .height(57.dp)
+            .heightIn(min = 57.dp)
             .clip(RoundedCornerShape(12.dp))
             .background(Color(0xFFF7F8FA))
-            .padding(12.dp),
-        verticalArrangement = Arrangement.spacedBy(4.dp)
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+        verticalArrangement = Arrangement.spacedBy(2.dp)
     ) {
         Text(
             value,
             fontSize = 24.sp,
+            lineHeight = 26.sp,
             fontWeight = FontWeight.Bold,
             color = Ink,
             fontFamily = FontFamily.Monospace,
             maxLines = 1
         )
-        Text(label, fontSize = 10.sp, color = Muted, maxLines = 1)
+        Text(label, fontSize = 10.sp, lineHeight = 12.sp, color = Muted, maxLines = 1)
     }
 }
 
@@ -4282,7 +4289,7 @@ private fun ActionButton(
             enabled = enabled,
             modifier = modifier.height(42.dp),
             shape = shape,
-            contentPadding = PaddingValues(horizontal = 12.dp),
+            contentPadding = PaddingValues(horizontal = 8.dp),
             colors = ButtonDefaults.buttonColors(
                 containerColor = Ink,
                 disabledContainerColor = Color(0xFFF1F3F5),
@@ -4298,7 +4305,7 @@ private fun ActionButton(
             modifier = modifier.height(42.dp),
             shape = shape,
             border = BorderStroke(1.dp, if (danger) Danger else Line),
-            contentPadding = PaddingValues(horizontal = 12.dp),
+            contentPadding = PaddingValues(horizontal = 8.dp),
             colors = ButtonDefaults.outlinedButtonColors(
                 contentColor = if (danger) Danger else Ink,
                 disabledContentColor = Color(0xFF9CA3AF)
