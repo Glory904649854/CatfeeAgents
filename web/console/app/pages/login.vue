@@ -51,10 +51,10 @@ async function submit() {
 
       <div class="relative max-w-[460px]">
         <span class="flex h-20 w-20 items-center justify-center overflow-hidden rounded-[22px] bg-white">
-          <img src="/brand/logo.png" alt="CatfeeConsole" class="h-full w-full object-contain">
+          <img src="/brand/logo.png" alt="CatfeeAgents" class="h-full w-full object-contain">
         </span>
         <h1 class="mt-8 text-[40px] font-700 leading-none tracking-tight text-white">
-          Catfee<span class="text-brand">Console</span>
+          Catfee<span class="text-brand">Agents</span>
         </h1>
         <p class="mt-5 text-[15px] text-white/70">管理已授权 Android Agent 设备</p>
         <p class="mt-1.5 text-[11px] text-white/35">仅限授权设备与内部环境</p>

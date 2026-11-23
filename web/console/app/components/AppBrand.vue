@@ -25,11 +25,11 @@ withDefaults(
       <span
         class="block font-700 tracking-tight"
         :class="[compact ? 'text-[14px]' : 'text-[16px]', dark ? 'text-white' : 'text-ink']"
-      >Catfee<span class="text-brand">Console</span></span>
+      >Catfee<span class="text-brand">Agents</span></span>
       <span
         v-if="!compact && !dark"
         class="mt-1 block text-[8.5px] font-600 tracking-[0.2em] text-faint"
-      >AGENT CONSOLE</span>
+      >ANDROID AGENT</span>
     </span>
   </NuxtLink>
 </template>
