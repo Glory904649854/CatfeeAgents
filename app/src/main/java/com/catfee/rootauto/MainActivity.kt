@@ -437,12 +437,6 @@ private fun AgentConsole(activity: ComponentActivity) {
 
     // 打开设置时只查询授权状态, 不主动申请 root
     LaunchedEffect(showSettings) {
-        // 设置页顶部是白色固定栏, 状态栏同步成白色; 关闭后回到画布色。
-        activity.window.statusBarColor = if (showSettings) {
-            AndroidColor.WHITE
-        } else {
-            AndroidColor.rgb(247, 248, 250)
-        }
         if (showSettings) {
             rootGranted = withContext(Dispatchers.IO) { RootShell.appGrantedRoot() }
             overlayGranted = Settings.canDrawOverlays(activity)
@@ -3290,6 +3284,7 @@ private fun AboutCapabilityRow(label: String, description: String, enabled: Bool
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun SettingsScreen(
     sessions: List<SessionSummary>,
@@ -3354,21 +3349,49 @@ private fun SettingsScreen(
         if (tab == 2) reloadMemory()
     }
 
-    Dialog(
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+
+    fun dismissSheet() {
+        scope.launch {
+            sheetState.hide()
+            onDismiss()
+        }
+    }
+
+    ModalBottomSheet(
         onDismissRequest = onDismiss,
-        properties = DialogProperties(
-            usePlatformDefaultWidth = false,
-            decorFitsSystemWindows = false
-        )
-    ) {
-        Surface(Modifier.fillMaxSize(), color = Bg) {
-            Column(Modifier.fillMaxSize().imePadding()) {
-                Column(
+        sheetState = sheetState,
+        containerColor = Color.White,
+        sheetMaxWidth = 640.dp,
+        shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
+        dragHandle = {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 10.dp, bottom = 6.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Box(
                     Modifier
-                        .fillMaxWidth()
-                        .background(Color.White)
-                        .statusBarsPadding()
-                ) {
+                        .size(width = 36.dp, height = 4.dp)
+                        .clip(RoundedCornerShape(50))
+                        .background(Color(0xFFD1D5DB))
+                )
+            }
+        }
+    ) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .fillMaxHeight(0.96f)
+                .background(Bg)
+                .imePadding()
+        ) {
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .background(Color.White)
+            ) {
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -3381,7 +3404,7 @@ private fun SettingsScreen(
                                 .size(34.dp)
                                 .clip(CircleShape)
                                 .background(Color(0xFFF1F3F5))
-                                .clickable(onClick = onDismiss),
+                                .clickable(onClick = { dismissSheet() }),
                             contentAlignment = Alignment.Center
                         ) {
                             Icon(
@@ -4094,7 +4117,6 @@ private fun SettingsScreen(
             }
         }
     }
-}
 
 @Composable
 private fun SettingsCard(
