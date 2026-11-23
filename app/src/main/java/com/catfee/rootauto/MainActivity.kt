@@ -20,6 +20,7 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.StartOffset
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.infiniteRepeatable
@@ -46,9 +47,11 @@ import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -59,6 +62,7 @@ import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.isImeVisible
 import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -75,6 +79,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.Logout
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Archive
@@ -85,6 +90,7 @@ import androidx.compose.material.icons.rounded.ChatBubbleOutline
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.Checklist
+import androidx.compose.material.icons.rounded.ChevronRight
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.CallSplit
 import androidx.compose.material.icons.rounded.ContentCopy
@@ -98,6 +104,7 @@ import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.Info
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.Menu
+import androidx.compose.material.icons.rounded.MoreHoriz
 import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.PlayArrow
@@ -114,6 +121,7 @@ import androidx.compose.material.icons.rounded.Terminal
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -123,6 +131,8 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.ModalDrawerSheet
+import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
@@ -135,6 +145,7 @@ import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.lightColorScheme
+import androidx.compose.material3.rememberDrawerState
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -181,6 +192,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
@@ -386,7 +398,7 @@ private fun AgentConsole(activity: ComponentActivity) {
     var editingMessage by remember { mutableStateOf<ChatMessage?>(null) }
     var editText by remember { mutableStateOf("") }
     var quotedText by remember { mutableStateOf("") }
-    var showMenu by remember { mutableStateOf(false) }
+    val drawerState = rememberDrawerState(DrawerValue.Closed)
     var showSettings by remember { mutableStateOf(false) }
     var showModelSheet by remember { mutableStateOf(false) }
     var showExitConfirm by remember { mutableStateOf(false) }
@@ -552,7 +564,7 @@ private fun AgentConsole(activity: ComponentActivity) {
         SessionManager.flush(activity)
         SessionManager.newSession("chat")
         resetComposer()
-        showMenu = false
+        scope.launch { drawerState.close() }
     }
 
     // 切换/删除会话时清空输入框草稿和待发送附件, 避免旧会话内容残留
@@ -833,6 +845,54 @@ private fun AgentConsole(activity: ComponentActivity) {
         }
     }
 
+    ModalNavigationDrawer(
+        drawerState = drawerState,
+        gesturesEnabled = drawerState.isOpen,
+        scrimColor = Color.Black.copy(alpha = 0.32f),
+        drawerContent = {
+            MenuDrawer(
+                sessions = sessions,
+                currentId = current?.id.orEmpty(),
+                runningSessionIds = agentStates.filter { it.value.running }.keys,
+                onNew = { newSession() },
+                onOpen = { id ->
+                    scope.launch {
+                        drawerState.close()
+                        SessionManager.open(activity, id)
+                    }
+                },
+                onDelete = { pendingDelete = it },
+                onRename = {
+                    pendingRename = it
+                    renameText = it.title
+                },
+                onPin = { s ->
+                    scope.launch { SessionManager.setFlags(activity, s.id, pinned = !s.pinned) }
+                },
+                onFavorite = { s ->
+                    scope.launch { SessionManager.setFlags(activity, s.id, favorite = !s.favorite) }
+                },
+                onArchive = { s ->
+                    scope.launch {
+                        val archive = !s.archived
+                        SessionManager.setFlags(activity, s.id, archived = archive)
+                        if (archive && current?.id == s.id) {
+                            SessionManager.newSession("chat")
+                            resetComposer()
+                        }
+                    }
+                },
+                onExport = { exportSession(it) },
+                onSettings = {
+                    scope.launch {
+                        drawerState.close()
+                        showSettings = true
+                    }
+                },
+                onDismiss = { scope.launch { drawerState.close() } }
+            )
+        }
+    ) {
     Scaffold(containerColor = Bg) { pad ->
         Column(
             Modifier
@@ -845,8 +905,10 @@ private fun AgentConsole(activity: ComponentActivity) {
                 running = running,
                 onMenu = {
                     SessionManager.flush(activity)
-                    scope.launch { SessionManager.refreshHistory(activity) }
-                    showMenu = true
+                    scope.launch {
+                        SessionManager.refreshHistory(activity)
+                        drawerState.open()
+                    }
                 }
             )
             current?.let { SessionLine(it) }
@@ -860,11 +922,20 @@ private fun AgentConsole(activity: ComponentActivity) {
                     .widthIn(max = 760.dp)
                     .fillMaxWidth()
                     .weight(1f),
-                contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 10.dp),
+                contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 4.dp, bottom = 10.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 if (current == null || (current!!.messages.isEmpty() && !streaming)) {
-                    item { EmptyState() }
+                    item {
+                        Box(
+                            Modifier
+                                .fillParentMaxHeight()
+                                .fillMaxWidth(),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            EmptyState()
+                        }
+                    }
                 }
                 current?.messages?.forEach { msg ->
                     item(key = "m-${msg.id}") {
@@ -965,51 +1036,10 @@ private fun AgentConsole(activity: ComponentActivity) {
             )
         }
     }
-
-    if (showMenu) {
-        MenuSheet(
-            sessions = sessions,
-            currentId = current?.id.orEmpty(),
-            runningSessionIds = agentStates.filter { it.value.running }.keys,
-            onNew = { newSession() },
-            onOpen = { id ->
-                scope.launch {
-                    SessionManager.open(activity, id)
-                    showMenu = false
-                }
-            },
-            onDelete = { pendingDelete = it },
-            onRename = {
-                pendingRename = it
-                renameText = it.title
-            },
-            onPin = { s ->
-                scope.launch { SessionManager.setFlags(activity, s.id, pinned = !s.pinned) }
-            },
-            onFavorite = { s ->
-                scope.launch { SessionManager.setFlags(activity, s.id, favorite = !s.favorite) }
-            },
-            onArchive = { s ->
-                scope.launch {
-                    val archive = !s.archived
-                    SessionManager.setFlags(activity, s.id, archived = archive)
-                    if (archive && current?.id == s.id) {
-                        SessionManager.newSession("chat")
-                        resetComposer()
-                    }
-                }
-            },
-            onExport = { exportSession(it) },
-            onSettings = {
-                showMenu = false
-                showSettings = true
-            },
-            onDismiss = { showMenu = false }
-        )
     }
 
     if (showSettings) {
-        SettingsSheet(
+        SettingsScreen(
             sessions = sessions,
             baseUrl = baseUrl,
             onBaseUrl = {
@@ -1189,7 +1219,7 @@ private fun AgentConsole(activity: ComponentActivity) {
                             SessionManager.delete(activity, s.id)
                             if (deletingCurrent) {
                                 resetComposer()
-                                showMenu = false
+                                drawerState.close()
                             }
                         }
                     }
@@ -1316,7 +1346,7 @@ private fun AgentConsole(activity: ComponentActivity) {
     }
 
     val exitRunning = current?.let { AgentController.isSessionRunning(it.id) } == true
-    val exitOverlayOpen = showMenu || showSettings || showModelSheet ||
+    val exitOverlayOpen = drawerState.isOpen || showSettings || showModelSheet ||
         showExitConfirm || previewImages.isNotEmpty() ||
         pendingDelete != null || pendingRename != null ||
         actionMessage != null || editingMessage != null
@@ -1512,76 +1542,99 @@ private fun buildPriorContext(session: Session): String {
 /* ---------------- Header / session line ---------------- */
 
 @Composable
+private fun BrandMark(size: Dp = 32.dp, corner: Dp = 9.dp, markSize: Dp = 20.dp) {
+    Box(
+        modifier = Modifier
+            .size(size)
+            .clip(RoundedCornerShape(corner))
+            .background(Ink),
+        contentAlignment = Alignment.Center
+    ) {
+        Image(
+            painter = painterResource(R.drawable.ic_cat_mark),
+            contentDescription = null,
+            modifier = Modifier.size(markSize)
+        )
+    }
+}
+
+@Composable
 private fun Header(running: Boolean, onMenu: () -> Unit) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 18.dp, vertical = 12.dp),
+            .padding(horizontal = 14.dp, vertical = 14.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Box(
-            modifier = Modifier
-                .size(42.dp)
-                .clip(RoundedCornerShape(12.dp))
-                .border(1.dp, Line, RoundedCornerShape(12.dp))
-        ) {
-            Image(
-                painter = painterResource(R.drawable.app_logo),
-                contentDescription = "CatfeeAgents",
-                modifier = Modifier.fillMaxSize(),
-                contentScale = ContentScale.Crop
-            )
-        }
+        BrandMark()
         Spacer(Modifier.width(10.dp))
-        Column(Modifier.weight(1f)) {
-            Text(
-                buildAnnotatedString {
-                    withStyle(
-                        SpanStyle(
-                            fontWeight = FontWeight.Bold,
-                            letterSpacing = (-0.5).sp,
-                            color = Ink
-                        )
-                    ) { append("Catfee") }
-                    withStyle(
-                        SpanStyle(
-                            fontWeight = FontWeight.Bold,
-                            letterSpacing = (-0.5).sp,
-                            color = Accent
-                        )
-                    ) { append("Agents") }
-                },
-                fontSize = 22.sp,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-            Spacer(Modifier.height(2.dp))
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                if (running) {
-                    val transition = rememberInfiniteTransition(label = "run")
-                    val a by transition.animateFloat(
-                        0.3f, 1f,
-                        infiniteRepeatable(tween(850), RepeatMode.Reverse),
-                        label = "dot"
+        Text(
+            buildAnnotatedString {
+                withStyle(
+                    SpanStyle(
+                        fontWeight = FontWeight.Bold,
+                        letterSpacing = (-0.4).sp,
+                        color = Ink
                     )
-                    Box(Modifier.size(6.dp).alpha(a).background(Accent, CircleShape))
-                    Spacer(Modifier.width(5.dp))
-                    Text("Working on this device", fontSize = 11.sp, color = Muted)
-                } else {
-                    Text("Chat & phone agent", fontSize = 11.sp, color = Muted)
-                }
+                ) { append("Catfee") }
+                withStyle(
+                    SpanStyle(
+                        fontWeight = FontWeight.Bold,
+                        letterSpacing = (-0.4).sp,
+                        color = Accent
+                    )
+                ) { append("Agents") }
+            },
+            fontSize = 18.sp,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+        Spacer(Modifier.width(8.dp))
+        if (running) {
+            Row(
+                modifier = Modifier.weight(1f),
+                horizontalArrangement = Arrangement.End,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                val transition = rememberInfiniteTransition(label = "run")
+                val a by transition.animateFloat(
+                    0.3f, 1f,
+                    infiniteRepeatable(tween(850), RepeatMode.Reverse),
+                    label = "dot"
+                )
+                Box(Modifier.size(6.dp).alpha(a).background(Accent, CircleShape))
+                Spacer(Modifier.width(6.dp))
+                Text(
+                    "Working",
+                    fontSize = 10.sp,
+                    fontFamily = FontFamily.Monospace,
+                    color = Accent,
+                    maxLines = 1
+                )
             }
+        } else {
+            Text(
+                "Chat & phone agent",
+                fontSize = 10.sp,
+                fontFamily = FontFamily.Monospace,
+                color = Color(0xFF9CA3AF),
+                maxLines = 1,
+                textAlign = TextAlign.End,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f)
+            )
         }
         Spacer(Modifier.width(8.dp))
-        IconButton(
-            onClick = onMenu,
+        Box(
             modifier = Modifier
-                .size(42.dp)
+                .size(36.dp)
                 .clip(CircleShape)
                 .background(Color.White)
                 .border(1.dp, Line, CircleShape)
+                .clickable(onClick = onMenu),
+            contentAlignment = Alignment.Center
         ) {
-            Icon(Icons.Rounded.Menu, contentDescription = "菜单", tint = Ink, modifier = Modifier.size(20.dp))
+            Icon(Icons.Rounded.Menu, contentDescription = "菜单", tint = Ink, modifier = Modifier.size(18.dp))
         }
     }
 }
@@ -1591,13 +1644,13 @@ private fun SessionSourceBadge(source: String) {
     val web = source == "web"
     Box(
         Modifier
-            .clip(RoundedCornerShape(4.dp))
-            .background(if (web) Accent.copy(alpha = 0.10f) else Color(0xFFF3F4F6))
-            .padding(horizontal = 4.dp, vertical = 1.dp)
+            .clip(RoundedCornerShape(50))
+            .background(if (web) Accent.copy(alpha = 0.10f) else Color(0xFFF1F3F5))
+            .padding(horizontal = 5.dp, vertical = 1.dp)
     ) {
         Text(
             if (web) "WEB" else "本机",
-            fontSize = 7.5.sp,
+            fontSize = 8.sp,
             fontWeight = FontWeight.SemiBold,
             color = if (web) Accent else Muted
         )
@@ -1609,16 +1662,16 @@ private fun SessionLine(session: Session) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 18.dp)
-            .padding(bottom = 4.dp),
+            .padding(horizontal = 14.dp)
+            .padding(top = 10.dp, bottom = 6.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         SessionSourceBadge(session.source)
-        Spacer(Modifier.width(5.dp))
+        Spacer(Modifier.width(6.dp))
         Text(
             session.title,
-            fontSize = 16.sp,
-            fontWeight = FontWeight.Bold,
+            fontSize = 14.sp,
+            fontWeight = FontWeight.Medium,
             color = Ink,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
@@ -1627,7 +1680,7 @@ private fun SessionLine(session: Session) {
         Text(
             "${formatCount(session.totalTokens)} tok · ${formatCount(session.contextChars)} ctx · " +
                 if (session.totalDurationMs > 0) formatDuration(session.totalDurationMs) else "00:00",
-            fontSize = 10.sp,
+            fontSize = 11.sp,
             fontFamily = FontFamily.Monospace,
             color = Color(0xFF9CA3AF)
         )
@@ -2217,25 +2270,17 @@ private fun StepCard(step: AgentController.Step) {
 private fun EmptyState() {
     Surface(
         modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(22.dp),
+        shape = RoundedCornerShape(18.dp),
         color = Color.White,
         border = BorderStroke(1.dp, Line)
     ) {
         Column(
-            modifier = Modifier.padding(horizontal = 24.dp, vertical = 32.dp),
+            modifier = Modifier.padding(horizontal = 20.dp, vertical = 20.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            Image(
-                painter = painterResource(R.drawable.app_logo),
-                contentDescription = null,
-                modifier = Modifier
-                    .size(64.dp)
-                    .clip(RoundedCornerShape(18.dp))
-                    .border(1.dp, Line, RoundedCornerShape(18.dp)),
-                contentScale = ContentScale.Crop
-            )
-            Spacer(Modifier.height(16.dp))
-            Text("开始对话", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Ink)
+            BrandMark(size = 44.dp, corner = 13.dp, markSize = 28.dp)
+            Spacer(Modifier.height(12.dp))
+            Text("开始对话", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = Ink)
             Spacer(Modifier.height(6.dp))
             Text(
                 "可以聊天、分析图片/文件；需要时 Agent 会请求一次授权，然后自己操作手机。",
@@ -2274,7 +2319,7 @@ private fun Composer(
     val focused by focusSource.collectIsFocusedAsState()
     val borderAmount by animateFloatAsState(if (focused) 1f else 0f, tween(180), label = "focus")
     Surface(modifier = Modifier.fillMaxWidth(), color = Bg) {
-        Column(Modifier.padding(horizontal = 14.dp, vertical = 5.dp)) {
+        Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
@@ -2282,12 +2327,14 @@ private fun Composer(
             ) {
                 AttachmentButton(onPickAttachments)
                 Surface(
-                    modifier = Modifier.weight(1f),
-                    shape = RoundedCornerShape(28.dp),
+                    modifier = Modifier
+                        .weight(1f)
+                        .heightIn(min = 52.dp),
+                    shape = RoundedCornerShape(26.dp),
                     color = Color.White,
                     border = BorderStroke(1.dp, lerp(Color(0xFFECEEF2), Accent.copy(alpha = 0.42f), borderAmount))
                 ) {
-                    Column(Modifier.padding(horizontal = 10.dp, vertical = 8.dp)) {
+                    Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
                     if (quotedText.isNotBlank()) {
                         Surface(
                             modifier = Modifier
@@ -2343,17 +2390,17 @@ private fun Composer(
                             .fillMaxWidth()
                             .heightIn(min = 36.dp, max = 120.dp)
                             .onFocusChanged { if (it.isFocused) onFocused() },
-                        textStyle = TextStyle(fontSize = 15.sp, lineHeight = 22.sp, color = Ink),
+                        textStyle = TextStyle(fontSize = 14.sp, lineHeight = 20.sp, color = Ink),
                         cursorBrush = SolidColor(Accent),
                         maxLines = 4,
                         interactionSource = focusSource,
                         decorationBox = { inner ->
-                            Box(Modifier.padding(vertical = 7.dp)) {
+                            Box(Modifier.padding(vertical = 8.dp)) {
                                 if (task.isEmpty()) {
                                     Text(
                                         "输入消息…",
-                                        fontSize = 15.sp,
-                                        color = Color(0xFF9AA0A6),
+                                        fontSize = 14.sp,
+                                        color = Color(0xFF9CA3AF),
                                         maxLines = 1,
                                         overflow = TextOverflow.Ellipsis
                                     )
@@ -2376,23 +2423,25 @@ private fun Composer(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(start = 4.dp, end = 4.dp, top = 4.dp)
+                    .padding(top = 2.dp)
                     .clip(RoundedCornerShape(50))
                     .clickable(onClick = onModelClick)
-                    .padding(horizontal = 6.dp, vertical = 3.dp),
+                    .padding(horizontal = 6.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.Center,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Box(Modifier.size(5.dp).background(Success, CircleShape))
+                Box(Modifier.size(8.dp).background(Success, CircleShape))
                 Spacer(Modifier.width(6.dp))
                 Text(
                     model.ifBlank { "未配置模型" },
-                    fontSize = 11.5.sp,
+                    fontSize = 12.sp,
+                    fontFamily = FontFamily.Monospace,
                     color = Muted,
                     maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f)
+                    overflow = TextOverflow.Ellipsis
                 )
-                Text("切换", fontSize = 10.5.sp, fontWeight = FontWeight.Medium, color = Accent)
+                Spacer(Modifier.width(6.dp))
+                Text("切换", fontSize = 12.sp, fontWeight = FontWeight.Medium, color = Accent)
                 Icon(
                     Icons.Rounded.ExpandMore,
                     contentDescription = "切换本会话模型",
@@ -2406,8 +2455,11 @@ private fun Composer(
                     fontSize = 10.5.sp,
                     color = Muted,
                     maxLines = 2,
+                    textAlign = TextAlign.Center,
                     overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.padding(start = 10.dp, top = 3.dp)
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 3.dp)
                 )
             }
         }
@@ -2421,7 +2473,7 @@ private fun AttachmentButton(onClick: () -> Unit) {
     val bg by animateFloatAsState(if (pressed) 1f else 0f, tween(110), label = "attachBg")
     Box(
         modifier = Modifier
-            .size(40.dp)
+            .size(44.dp)
             .clip(CircleShape)
             .background(Color.White)
             .border(1.dp, lerp(Line, Ink.copy(alpha = 0.25f), bg), CircleShape)
@@ -2448,7 +2500,7 @@ private fun RunButton(enabled: Boolean, onClick: () -> Unit) {
     val scale by animateFloatAsState(if (pressed) 0.92f else 1f, tween(90), label = "scale")
     Box(
         modifier = Modifier
-            .size(40.dp)
+            .size(44.dp)
             .scale(scale)
             .clip(CircleShape)
             .background(if (enabled) Accent else Accent.copy(alpha = 0.22f))
@@ -2464,7 +2516,7 @@ private fun RunButton(enabled: Boolean, onClick: () -> Unit) {
             Icons.Rounded.Send,
             contentDescription = "发送",
             tint = if (enabled) Color.White else Color.White.copy(alpha = 0.65f),
-            modifier = Modifier.size(18.dp)
+            modifier = Modifier.size(20.dp)
         )
     }
 }
@@ -2476,7 +2528,7 @@ private fun PauseResumeButton(paused: Boolean, onClick: () -> Unit) {
     val scale by animateFloatAsState(if (pressed) 0.92f else 1f, tween(90), label = "pauseScale")
     Box(
         modifier = Modifier
-            .size(36.dp)
+            .size(40.dp)
             .scale(scale)
             .clip(CircleShape)
             .background(if (paused) Violet else Color(0xFF374151))
@@ -2500,7 +2552,7 @@ private fun PauseResumeButton(paused: Boolean, onClick: () -> Unit) {
 private fun StopButton(onClick: () -> Unit) {
     Box(
         modifier = Modifier
-            .size(36.dp)
+            .size(40.dp)
             .clip(CircleShape)
             .background(Ink)
             .clickable(onClick = onClick),
@@ -2796,7 +2848,7 @@ private fun decodeSampledBitmap(path: String, maxSide: Int): android.graphics.Bi
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun MenuSheet(
+private fun MenuDrawer(
     sessions: List<SessionSummary>,
     currentId: String,
     runningSessionIds: Set<String>,
@@ -2834,28 +2886,23 @@ private fun MenuSheet(
         )
     }
 
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
-        sheetState = rememberModalBottomSheetState(
-            skipPartiallyExpanded = true,
-            // 会话列表很长时, 向下拖到顶再向上拖容易把整个菜单甩掉;
-            // 禁止手势隐藏, 关闭仍走右上角 X / 返回键。
-            confirmValueChange = { it != SheetValue.Hidden }
-        ),
-        containerColor = Color.White,
-        sheetMaxWidth = 640.dp,
-        shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
-        dragHandle = { Spacer(Modifier.height(10.dp)) }
+    ModalDrawerSheet(
+        modifier = Modifier
+            .width(338.dp)
+            .fillMaxHeight(),
+        drawerShape = RoundedCornerShape(topEnd = 24.dp, bottomEnd = 24.dp),
+        drawerContainerColor = Color.White,
+        drawerContentColor = Ink,
+        windowInsets = WindowInsets(0)
     ) {
         Column(
             modifier = Modifier
-                .fillMaxWidth()
+                .fillMaxHeight()
                 .statusBarsPadding()
                 .navigationBarsPadding()
                 .imePadding()
-                .verticalScroll(rememberScrollState())
-                .padding(horizontal = 20.dp)
-                .padding(bottom = 28.dp)
+                .padding(horizontal = 16.dp)
+                .padding(top = 16.dp, bottom = 12.dp)
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
@@ -2863,26 +2910,28 @@ private fun MenuSheet(
                         withStyle(SpanStyle(fontWeight = FontWeight.Bold, color = Ink)) { append("Catfee") }
                         withStyle(SpanStyle(fontWeight = FontWeight.Bold, color = Accent)) { append("Agents") }
                     },
-                    fontSize = 22.sp,
+                    fontSize = 17.sp,
                     modifier = Modifier.weight(1f)
                 )
                 // 设置固定在顶部, 会话再长也不用滚到底部找
-                IconButton(
-                    onClick = onSettings,
+                Box(
                     modifier = Modifier
-                        .size(38.dp)
+                        .size(36.dp)
                         .clip(CircleShape)
-                        .background(Color(0xFFF3F4F6))
+                        .background(Color(0xFFF1F3F5))
+                        .clickable(onClick = onSettings),
+                    contentAlignment = Alignment.Center
                 ) {
                     Icon(Icons.Rounded.Settings, "设置", tint = Ink, modifier = Modifier.size(17.dp))
                 }
                 Spacer(Modifier.width(6.dp))
-                IconButton(
-                    onClick = onDismiss,
+                Box(
                     modifier = Modifier
-                        .size(38.dp)
+                        .size(36.dp)
                         .clip(CircleShape)
-                        .background(Color(0xFFF3F4F6))
+                        .background(Color(0xFFF1F3F5))
+                        .clickable(onClick = onDismiss),
+                    contentAlignment = Alignment.Center
                 ) {
                     Icon(Icons.Rounded.Close, "关闭", tint = Ink, modifier = Modifier.size(18.dp))
                 }
@@ -2892,35 +2941,53 @@ private fun MenuSheet(
                 onClick = onNew,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(48.dp),
+                    .height(46.dp),
                 shape = RoundedCornerShape(14.dp),
                 colors = ButtonDefaults.buttonColors(containerColor = Ink)
             ) {
-                Icon(Icons.Rounded.Add, null, Modifier.size(18.dp))
-                Spacer(Modifier.width(7.dp))
+                Icon(Icons.Rounded.Add, null, Modifier.size(16.dp))
+                Spacer(Modifier.width(6.dp))
                 Text("新建会话", fontSize = 14.sp, fontWeight = FontWeight.Medium)
             }
             Spacer(Modifier.height(12.dp))
-            OutlinedTextField(
-                value = query,
-                onValueChange = { query = it },
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = true,
-                placeholder = { Text("搜索标题、摘要或结果…", fontSize = 12.sp, color = Color(0xFF9CA3AF)) },
-                leadingIcon = {
-                    Icon(Icons.Rounded.Search, null, tint = Muted, modifier = Modifier.size(18.dp))
-                },
-                shape = RoundedCornerShape(16.dp),
-                textStyle = TextStyle(fontSize = 13.sp, color = Ink),
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedBorderColor = Ink,
-                    unfocusedBorderColor = Color.Transparent,
-                    focusedContainerColor = Color.White,
-                    unfocusedContainerColor = Color(0xFFF7F8FA),
-                    cursorColor = Ink
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(42.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(Color(0xFFF7F8FA))
+                    .border(1.dp, Line, RoundedCornerShape(12.dp))
+                    .padding(horizontal = 12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(
+                    Icons.Rounded.Search,
+                    null,
+                    tint = Color(0xFF9CA3AF),
+                    modifier = Modifier.size(16.dp)
                 )
-            )
-            Spacer(Modifier.height(8.dp))
+                Spacer(Modifier.width(8.dp))
+                Box(Modifier.weight(1f)) {
+                    if (query.isEmpty()) {
+                        Text(
+                            "搜索标题、摘要或结果…",
+                            fontSize = 13.sp,
+                            color = Color(0xFF9CA3AF),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    BasicTextField(
+                        value = query,
+                        onValueChange = { query = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        textStyle = TextStyle(fontSize = 13.sp, color = Ink),
+                        cursorBrush = SolidColor(Ink)
+                    )
+                }
+            }
+            Spacer(Modifier.height(10.dp))
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -2928,10 +2995,10 @@ private fun MenuSheet(
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 listOf("最近", "置顶", "收藏", "归档").forEachIndexed { idx, label ->
-                    SettingsTab(label, filter == idx) { filter = idx }
+                    MenuFilterPill(label, filter == idx) { filter = idx }
                 }
             }
-            Spacer(Modifier.height(8.dp))
+            Spacer(Modifier.height(12.dp))
             if (visible.isEmpty()) {
                 Text(
                     when {
@@ -2945,22 +3012,49 @@ private fun MenuSheet(
                     color = Muted
                 )
             }
-            visible.forEach { s ->
-                SessionRow(
-                    summary = s,
-                    selected = s.id == currentId,
-                    running = s.id in runningSessionIds,
-                    onClick = { onOpen(s.id) },
-                    onPin = { onPin(s) },
-                    onFavorite = { onFavorite(s) },
-                    onArchive = { onArchive(s) },
-                    onRename = { onRename(s) },
-                    onExport = { onExport(s) },
-                    onDelete = { onDelete(s) }
-                )
-                Spacer(Modifier.height(7.dp))
+            LazyColumn(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+                contentPadding = PaddingValues(bottom = 8.dp)
+            ) {
+                items(visible, key = { it.id }) { s ->
+                    SessionRow(
+                        summary = s,
+                        selected = s.id == currentId,
+                        running = s.id in runningSessionIds,
+                        onClick = { onOpen(s.id) },
+                        onPin = { onPin(s) },
+                        onFavorite = { onFavorite(s) },
+                        onArchive = { onArchive(s) },
+                        onRename = { onRename(s) },
+                        onExport = { onExport(s) },
+                        onDelete = { onDelete(s) }
+                    )
+                }
             }
         }
+    }
+}
+
+@Composable
+private fun MenuFilterPill(label: String, selected: Boolean, onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .height(30.dp)
+            .clip(RoundedCornerShape(50))
+            .background(if (selected) Ink else Color(0xFFF1F3F5))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 12.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            label,
+            fontSize = 12.sp,
+            fontWeight = if (selected) FontWeight.Medium else FontWeight.Normal,
+            color = if (selected) Color.White else Muted
+        )
     }
 }
 
@@ -2996,19 +3090,19 @@ private fun SessionRow(
         ) {
             Box(
                 Modifier
-                    .size(42.dp)
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(if (running) Accent.copy(alpha = 0.08f) else Color(0xFFF3F4F6)),
+                    .size(36.dp)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(if (running) Accent.copy(alpha = 0.10f) else Color(0xFFF1F3F5)),
                 contentAlignment = Alignment.Center
             ) {
                 Icon(
                     Icons.Rounded.ChatBubbleOutline,
                     null,
                     tint = if (running) Accent else Muted,
-                    modifier = Modifier.size(19.dp)
+                    modifier = Modifier.size(18.dp)
                 )
             }
-            Spacer(Modifier.width(11.dp))
+            Spacer(Modifier.width(10.dp))
             Column(Modifier.weight(1f)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     if (summary.pinned) {
@@ -3027,8 +3121,8 @@ private fun SessionRow(
                     Spacer(Modifier.width(5.dp))
                     Text(
                         summary.title,
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.SemiBold,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Medium,
                         color = Ink,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
@@ -3044,19 +3138,9 @@ private fun SessionRow(
                         ) {
                             Box(Modifier.size(5.dp).background(Success, CircleShape))
                             Spacer(Modifier.width(3.dp))
-                            Text("running", fontSize = 9.sp, fontWeight = FontWeight.SemiBold, color = Success)
+                            Text("running", fontSize = 9.sp, fontWeight = FontWeight.Medium, color = Success)
                         }
                     }
-                }
-                if (summary.summary.isNotBlank()) {
-                    Text(
-                        summary.summary,
-                        fontSize = 10.5.sp,
-                        color = Muted,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.padding(top = 2.dp)
-                    )
                 }
                 Text(
                     "$time · ${formatCount(summary.totalTokens)} tok · " +
@@ -3074,15 +3158,19 @@ private fun SessionRow(
                 )
             }
             Box {
-                IconButton(
-                    onClick = { menuOpen = true },
-                    modifier = Modifier.size(30.dp)
+                Box(
+                    modifier = Modifier
+                        .size(24.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(Color(0xFFF1F3F5))
+                        .clickable { menuOpen = true },
+                    contentAlignment = Alignment.Center
                 ) {
                     Icon(
-                        Icons.Rounded.MoreVert,
+                        Icons.Rounded.MoreHoriz,
                         contentDescription = "会话操作",
                         tint = Color(0xFF9CA3AF),
-                        modifier = Modifier.size(17.dp)
+                        modifier = Modifier.size(15.dp)
                     )
                 }
                 DropdownMenu(
@@ -3201,9 +3289,8 @@ private fun AboutCapabilityRow(label: String, description: String, enabled: Bool
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun SettingsSheet(
+private fun SettingsScreen(
     sessions: List<SessionSummary>,
     baseUrl: String,
     onBaseUrl: (String) -> Unit,
@@ -3242,7 +3329,7 @@ private fun SettingsSheet(
     onUnbindConsole: () -> Unit,
     onDismiss: () -> Unit
 ) {
-    val scrollState = rememberScrollState()
+    val contentScroll = rememberScrollState()
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val caps by DeviceCapabilities.state.collectAsState()
@@ -3262,693 +3349,966 @@ private fun SettingsSheet(
     }
 
     LaunchedEffect(tab) {
-        scrollState.scrollTo(0)
+        contentScroll.scrollTo(0)
         if (tab == 2) reloadMemory()
     }
 
-    ModalBottomSheet(
+    Dialog(
         onDismissRequest = onDismiss,
-        sheetState = rememberModalBottomSheetState(
-            skipPartiallyExpanded = true,
-            // 设置页内容长, 下滑翻页时容易误触把整页甩掉;
-            // 关闭统一走右上角 X / 返回键。
-            confirmValueChange = { it != SheetValue.Hidden }
-        ),
-        containerColor = Color.White,
-        sheetMaxWidth = 640.dp,
-        shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
-        dragHandle = { Spacer(Modifier.height(10.dp)) }
+        properties = DialogProperties(
+            usePlatformDefaultWidth = false,
+            decorFitsSystemWindows = false
+        )
     ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .statusBarsPadding()
-                .navigationBarsPadding()
-                .verticalScroll(scrollState)
-                .padding(horizontal = 20.dp)
-                .padding(bottom = 32.dp)
-                .imePadding()
-        ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    "设置",
-                    fontSize = 24.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = Ink,
-                    modifier = Modifier.weight(1f)
-                )
-                ModeBadge(caps.mode)
-                Spacer(Modifier.width(6.dp))
-                IconButton(onClick = onDismiss) {
-                    Icon(Icons.Rounded.Close, "关闭", tint = Muted)
-                }
-            }
-            Text(
-                when (tab) {
-                    0 -> "配置模型接口和可用模型。"
-                    1 -> "绑定内置 Web 控制台，远程查看日志和控制任务。"
-                    2 -> "管理每个 App 的简短操作记忆。"
-                    3 -> "查看会话 token、上下文和耗时。"
-                    else -> "了解 CatfeeAgents、能力状态和隐私说明。"
-                },
-                fontSize = 12.sp,
-                color = Muted
-            )
-            Spacer(Modifier.height(14.dp))
-
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                SettingsTab("模型", tab == 0) { tab = 0 }
-                SettingsTab("控制台", tab == 1) { tab = 1 }
-                SettingsTab("记忆", tab == 2) { tab = 2 }
-                SettingsTab("统计", tab == 3) { tab = 3 }
-                SettingsTab("关于", tab == 4) { tab = 4 }
-            }
-            Spacer(Modifier.height(10.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                CapabilityChip("无障碍", caps.accessibility)
-                CapabilityChip("手势", caps.gestures)
-                CapabilityChip("截图", caps.hasScreenshot)
-                CapabilityChip("Root", caps.root)
-                CapabilityChip("悬浮窗", overlayGranted)
-            }
-            if (!caps.accessibility) {
-                TextButton(
-                    onClick = onRequestAccessibility,
-                    contentPadding = PaddingValues(0.dp)
-                ) {
-                    Text("开启无障碍", fontSize = 10.5.sp, color = Accent)
-                }
-            }
-            if (!caps.root) {
-                Text(
-                    "Root 是可选项；没有 Root 也可以用无障碍完成任务，只有强制停止/读写系统设置等增强工具不可用。",
-                    fontSize = 9.5.sp,
-                    color = Muted,
-                    lineHeight = 14.sp,
-                    modifier = Modifier.padding(top = 2.dp)
-                )
-            }
-            Spacer(Modifier.height(10.dp))
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text("显示悬浮状态窗", fontSize = 13.sp, fontWeight = FontWeight.Medium, color = Ink)
-                    Text(
-                        "在其他 App 上显示步骤、阶段、耗时和控制按钮；默认开启，截图/OCR 可能看到它。",
-                        fontSize = 9.5.sp, color = Muted, lineHeight = 14.sp
-                    )
-                }
-                Switch(
-                    checked = overlayEnabled && overlayGranted,
-                    onCheckedChange = { onOverlayEnabled(it) },
-                    colors = SwitchDefaults.colors(
-                        checkedThumbColor = Color.White,
-                        checkedTrackColor = Ink,
-                        uncheckedThumbColor = Color.White,
-                        uncheckedTrackColor = Color(0xFFD1D5DB),
-                        uncheckedBorderColor = Color.Transparent
-                    )
-                )
-            }
-            if (!overlayGranted) {
-                TextButton(
-                    onClick = onRequestOverlay,
-                    contentPadding = PaddingValues(0.dp)
-                ) {
-                    Text("授予悬浮窗权限", fontSize = 10.5.sp, color = Accent)
-                }
-            }
-            Spacer(Modifier.height(14.dp))
-
-            if (tab == 0) {
-                Text(
-                    "接口",
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = Muted,
-                    modifier = Modifier.padding(bottom = 8.dp)
-                )
-                StudioField("Base URL", baseUrl, onBaseUrl, "https://api.example.com/v1")
-                StudioField("API Key", apiKey, onApiKey, "sk-...", mono = true)
-                StudioField("模型 ID", model, onModel, "deepseek-v4.1-flash", mono = true)
-                OutlinedButton(
-                    onClick = onTestModel,
-                    enabled = !modelsLoading,
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(14.dp),
-                    border = BorderStroke(1.dp, Line),
-                    colors = ButtonDefaults.outlinedButtonColors(
-                        contentColor = Ink,
-                        disabledContentColor = Color(0xFF9CA3AF)
-                    )
-                ) {
-                    Text(if (modelsLoading) "拉取中…" else "拉取模型列表", fontSize = 12.sp)
-                }
-                if (testResult.isNotBlank()) {
-                    val failed = testResult.startsWith("连接失败") || testResult.contains("失败:")
-                    Text(
-                        testResult,
-                        fontSize = 11.sp,
-                        color = if (failed) Danger else Muted,
-                        lineHeight = 16.sp,
-                        modifier = Modifier.padding(top = 8.dp)
-                    )
-                }
-                Button(
-                    onClick = onSaveModel,
-                    modifier = Modifier
+        Surface(Modifier.fillMaxSize(), color = Bg) {
+            Column(Modifier.fillMaxSize().imePadding()) {
+                Column(
+                    Modifier
                         .fillMaxWidth()
-                        .padding(top = 12.dp),
-                    shape = RoundedCornerShape(14.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = Ink)
-                ) { Text("保存模型配置", fontSize = 12.sp) }
-
-                if (models.isNotEmpty()) {
-                    Spacer(Modifier.height(14.dp))
-                    Text(
-                        "可用模型",
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = Muted,
-                        modifier = Modifier.padding(bottom = 8.dp)
-                    )
-                    ModelPicker(models, model) { id ->
-                        onModel(id)
-                        onSaveModel()
-                    }
-                    Text(
-                        "点击模型即可切换并保存。",
-                        fontSize = 10.sp,
-                        color = Color(0xFF9CA3AF),
-                        modifier = Modifier.padding(top = 6.dp)
-                    )
-                } else {
-                    Text(
-                        "拉取后会在这里列出模型，可直接点击选择。",
-                        fontSize = 10.sp,
-                        color = Color(0xFF9CA3AF),
-                        modifier = Modifier.padding(top = 8.dp)
-                    )
-                }
-                Spacer(Modifier.height(18.dp))
-                DecisionModeSection()
-            } else if (tab == 1) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Column(Modifier.weight(1f)) {
-                        Text("Web 控制台", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = Ink)
+                        .background(Color.White)
+                        .statusBarsPadding()
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(62.dp)
+                            .padding(horizontal = 14.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(34.dp)
+                                .clip(CircleShape)
+                                .background(Color(0xFFF1F3F5))
+                                .clickable(onClick = onDismiss),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                Icons.AutoMirrored.Rounded.ArrowBack,
+                                contentDescription = "返回",
+                                tint = Ink,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                        Spacer(Modifier.width(10.dp))
                         Text(
-                            "日志、任务和远程指令统一走内置控制台，不再使用第三方 JWT。",
-                            fontSize = 11.sp, color = Muted, lineHeight = 15.sp
-                        )
-                    }
-                    Switch(
-                        checked = consoleEnabled,
-                        onCheckedChange = onConsoleEnabled,
-                        colors = SwitchDefaults.colors(
-                            checkedThumbColor = Color.White,
-                            checkedTrackColor = Ink,
-                            uncheckedThumbColor = Color.White,
-                            uncheckedTrackColor = Color(0xFFD1D5DB),
-                            uncheckedBorderColor = Color.Transparent
-                        )
-                    )
-                }
-                Spacer(Modifier.height(10.dp))
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Column(Modifier.weight(1f)) {
-                        Text(
-                            "允许远程任务直接操作手机",
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.Medium,
+                            "设置",
+                            fontSize = 17.sp,
+                            fontWeight = FontWeight.Bold,
                             color = Ink
                         )
-                        Text(
-                            "关闭时控制台任务会被拒绝；开启后远程任务可直接操作手机。默认关闭。",
-                            fontSize = 10.sp,
-                            color = Muted,
-                            lineHeight = 14.sp
-                        )
+                        Spacer(Modifier.weight(1f))
+                        ModeBadge(caps.mode)
                     }
-                    Switch(
-                        checked = consoleRemoteApprove,
-                        onCheckedChange = onConsoleRemoteApprove,
-                        colors = SwitchDefaults.colors(
-                            checkedThumbColor = Color.White,
-                            checkedTrackColor = Ink,
-                            uncheckedThumbColor = Color.White,
-                            uncheckedTrackColor = Color(0xFFD1D5DB),
-                            uncheckedBorderColor = Color.Transparent
-                        )
-                    )
-                }
-                Spacer(Modifier.height(14.dp))
-                Text(
-                    "连接配置",
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = Muted,
-                    modifier = Modifier.padding(bottom = 8.dp)
-                )
-                StudioField(
-                    "控制台地址", consoleBase, onConsoleBase,
-                    "http://192.168.1.100:9777"
-                )
-                StudioField(
-                    "设备名称", consoleName, onConsoleName,
-                    "${Build.MANUFACTURER} ${Build.MODEL}"
-                )
 
-                Surface(
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(16.dp),
-                    color = Color(0xFFFAFBFC),
-                    border = BorderStroke(1.dp, Line)
-                ) {
-                    Column(Modifier.padding(12.dp)) {
-                        Text(
-                            "一次性注册码", fontSize = 11.sp,
-                            fontWeight = FontWeight.SemiBold, color = Ink
-                        )
-                        Text(
-                            "在 Web 控制台「设备」页生成，可手动输入或扫码绑定，绑定成功后立即失效。",
-                            fontSize = 10.sp, color = Muted, lineHeight = 15.sp,
-                            modifier = Modifier.padding(top = 2.dp)
-                        )
-                        Spacer(Modifier.height(8.dp))
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.Top
+                    ) {
+                        CapabilityItem("无障碍", caps.accessibility, Modifier.weight(1f))
+                        CapabilityItem("手势", caps.gestures, Modifier.weight(1f))
+                        CapabilityItem("截图", caps.hasScreenshot, Modifier.weight(1f))
+                        CapabilityItem("Root", caps.root, Modifier.weight(1f))
+                        CapabilityItem("悬浮窗", overlayGranted, Modifier.weight(1f))
+                    }
+
+                    if (!caps.accessibility || !overlayGranted) {
                         Row(
-                            verticalAlignment = Alignment.Bottom,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 14.dp)
+                                .padding(bottom = 8.dp),
+                            horizontalArrangement = Arrangement.spacedBy(18.dp)
                         ) {
-                            StudioField(
-                                "注册码", consoleCode, onConsoleCode, "粘贴注册码",
-                                mono = true, modifier = Modifier.weight(1f)
-                            )
-                            Button(
-                                onClick = onBindConsole,
-                                enabled = consoleCode.isNotBlank(),
-                                modifier = Modifier.padding(bottom = 8.dp),
-                                shape = RoundedCornerShape(14.dp),
-                                colors = ButtonDefaults.buttonColors(
-                                    containerColor = Ink,
-                                    disabledContainerColor = Color(0xFFE5E7EB),
-                                    disabledContentColor = Color(0xFF9CA3AF)
+                            if (!caps.accessibility) {
+                                Text(
+                                    "开启无障碍",
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    color = Accent,
+                                    modifier = Modifier
+                                        .clickable(onClick = onRequestAccessibility)
+                                        .padding(vertical = 4.dp)
                                 )
-                            ) { Text("绑定", fontSize = 12.sp) }
+                            }
+                            if (!overlayGranted) {
+                                Text(
+                                    "授予悬浮窗权限",
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    color = Accent,
+                                    modifier = Modifier
+                                        .clickable(onClick = onRequestOverlay)
+                                        .padding(vertical = 4.dp)
+                                )
+                            }
                         }
+                    }
+
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 14.dp, vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                "悬浮状态窗",
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = Ink
+                            )
+                            Text(
+                                "在其他 App 上方显示 Agent 运行状态",
+                                fontSize = 11.sp,
+                                color = Muted,
+                                lineHeight = 16.sp
+                            )
+                        }
+                        BrandSwitch(
+                            checked = overlayEnabled && overlayGranted,
+                            onCheckedChange = { onOverlayEnabled(it) }
+                        )
                     }
                 }
 
                 Spacer(Modifier.height(8.dp))
-                Button(
-                    onClick = onScanConsole,
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(14.dp),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = Color(0xFFF3F4F6),
-                        contentColor = Ink
-                    )
+
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState())
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    Icon(
-                        Icons.Rounded.QrCodeScanner,
-                        contentDescription = null,
-                        modifier = Modifier.size(16.dp)
-                    )
-                    Spacer(Modifier.width(6.dp))
-                    Text("扫码绑定", fontSize = 12.sp, fontWeight = FontWeight.Medium)
+                    SettingsTab("模型", tab == 0) { tab = 0 }
+                    SettingsTab("控制台", tab == 1) { tab = 1 }
+                    SettingsTab("记忆", tab == 2) { tab = 2 }
+                    SettingsTab("统计", tab == 3) { tab = 3 }
+                    SettingsTab("关于", tab == 4) { tab = 4 }
                 }
 
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    TextButton(onClick = onTestConsole, contentPadding = PaddingValues(0.dp)) {
-                        Text("测试连接", fontSize = 11.sp, fontWeight = FontWeight.Medium, color = Ink)
-                    }
-                    Spacer(Modifier.weight(1f))
-                    TextButton(onClick = onSaveConsole, contentPadding = PaddingValues(0.dp)) {
-                        Text("保存配置", fontSize = 11.sp, color = Muted)
-                    }
-                }
-
-                if (consoleDeviceId.isNotBlank() || consoleStatus.isNotBlank()) {
-                    Surface(
-                        modifier = Modifier.fillMaxWidth(),
-                        shape = RoundedCornerShape(14.dp),
-                        color = Color(0xFFFAFBFC),
-                        border = BorderStroke(1.dp, Line)
-                    ) {
-                        Column(Modifier.padding(10.dp)) {
-                            if (consoleDeviceId.isNotBlank()) {
-                                Text(
-                                    if (consoleConnected) "已连接 Web 控制台" else "已绑定设备",
-                                    fontSize = 11.sp,
-                                    color = if (consoleConnected) Success else Muted
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f)
+                        .verticalScroll(contentScroll)
+                        .navigationBarsPadding()
+                        .padding(horizontal = 14.dp)
+                        .padding(top = 4.dp, bottom = 24.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    if (tab == 0) {
+                        SettingsCard("接口") {
+                            StudioField("Base URL", baseUrl, onBaseUrl, "https://api.example.com/v1")
+                            StudioField("API Key", apiKey, onApiKey, "sk-...", mono = true)
+                            StudioField(
+                                "模型 ID", model, onModel, "deepseek-v4.1-flash",
+                                mono = true, bottomPadding = 12.dp
+                            )
+                            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                                ActionButton(
+                                    text = if (modelsLoading) "拉取中…" else "拉取模型列表",
+                                    modifier = Modifier.weight(1f),
+                                    primary = false,
+                                    enabled = !modelsLoading,
+                                    onClick = onTestModel
                                 )
-                                Text(
-                                    "设备 ID · $consoleDeviceId",
-                                    fontSize = 10.sp, color = Muted,
-                                    fontFamily = FontFamily.Monospace,
-                                    modifier = Modifier.padding(top = 2.dp)
+                                ActionButton(
+                                    text = "保存模型配置",
+                                    modifier = Modifier.weight(1f),
+                                    primary = true,
+                                    onClick = onSaveModel
                                 )
                             }
-                            if (consoleStatus.isNotBlank()) {
-                                Text(
-                                    consoleStatus,
-                                    fontSize = 11.sp, color = Muted, lineHeight = 16.sp,
-                                    modifier = Modifier.padding(
-                                        top = if (consoleDeviceId.isNotBlank()) 4.dp else 0.dp
-                                    )
-                                )
+                            if (testResult.isNotBlank()) {
+                                val failed = testResult.startsWith("连接失败") || testResult.contains("失败:")
+                                Spacer(Modifier.height(10.dp))
+                                ConnectionNote(testResult, failed)
                             }
                         }
-                    }
-                }
-                if (consoleDeviceId.isNotBlank()) {
-                    TextButton(
-                        onClick = onUnbindConsole,
-                        contentPadding = PaddingValues(0.dp),
-                        modifier = Modifier.padding(top = 4.dp)
-                    ) {
-                        Text("解除绑定", fontSize = 11.sp, color = Danger)
-                    }
-                }
-                Text(
-                    "设备只保存自己的 deviceId / deviceSecret；Web 撤销设备后长连接立即失效。",
-                    fontSize = 10.sp, color = Color(0xFF9CA3AF), lineHeight = 15.sp,
-                    modifier = Modifier.padding(top = 8.dp)
-                )
-            } else if (tab == 2) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Column(Modifier.weight(1f)) {
-                        Text("App 记忆", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = Ink)
-                        Text(
-                            "按任务相关性注入核心记忆；每条有类型、置信度、使用次数，可在下方直接编辑。",
-                            fontSize = 10.5.sp, color = Muted, lineHeight = 15.sp
-                        )
-                    }
-                    TextButton(onClick = { reloadMemory() }, contentPadding = PaddingValues(0.dp)) {
-                        Text("刷新", fontSize = 11.sp, color = Accent)
-                    }
-                }
-                Spacer(Modifier.height(10.dp))
 
-                val editing = editingMemory
-                if (editing != null) {
-                    Surface(
-                        modifier = Modifier.fillMaxWidth(),
-                        shape = RoundedCornerShape(16.dp),
-                        color = Color(0xFFFAFBFC),
-                        border = BorderStroke(1.dp, Line)
-                    ) {
-                        Column(Modifier.padding(12.dp)) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Text(
-                                    editing.pkg,
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.SemiBold,
-                                    color = Ink,
-                                    modifier = Modifier.weight(1f)
-                                )
-                                TextButton(
-                                    onClick = { editingMemory = null },
-                                    contentPadding = PaddingValues(0.dp)
-                                ) { Text("返回列表", fontSize = 10.5.sp, color = Muted) }
+                        if (models.isNotEmpty()) {
+                            ModelPicker(models, model) { id ->
+                                onModel(id)
+                                onSaveModel()
                             }
-                            Spacer(Modifier.height(6.dp))
-                            OutlinedTextField(
-                                value = memoryDraft,
-                                onValueChange = { if (it.length <= AppMemory.MAX_WRITE) memoryDraft = it },
-                                modifier = Modifier.fillMaxWidth(),
-                                minLines = 6,
-                                maxLines = 12,
-                                textStyle = TextStyle(fontSize = 12.sp, lineHeight = 18.sp, color = Ink),
-                                shape = RoundedCornerShape(14.dp),
-                                colors = OutlinedTextFieldDefaults.colors(
-                                    focusedBorderColor = Ink,
-                                    unfocusedBorderColor = Line,
-                                    focusedContainerColor = Color.White,
-                                    unfocusedContainerColor = Color.White,
-                                    cursorColor = Ink
-                                )
-                            )
                             Text(
-                                "${memoryDraft.length}/${AppMemory.MAX_WRITE} 字",
-                                fontSize = 9.5.sp,
-                                color = if (memoryDraft.length >= AppMemory.MAX_WRITE) Warning else Muted,
-                                modifier = Modifier.padding(top = 4.dp)
+                                "点击模型即可切换并保存。",
+                                fontSize = 10.sp,
+                                color = Color(0xFF9CA3AF),
+                                modifier = Modifier.padding(horizontal = 2.dp)
                             )
-                            Row(
-                                modifier = Modifier.padding(top = 10.dp),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                Button(
-                                    onClick = {
-                                        scope.launch {
-                                            withContext(Dispatchers.IO) {
-                                                AppMemory.overwrite(context, editing.pkg, memoryDraft)
-                                            }
-                                            reloadMemory()
-                                            editingMemory = null
-                                        }
-                                    },
-                                    shape = RoundedCornerShape(14.dp),
-                                    colors = ButtonDefaults.buttonColors(containerColor = Ink)
-                                ) { Text("保存", fontSize = 12.sp) }
-                                OutlinedButton(
-                                    onClick = {
-                                        scope.launch {
-                                            withContext(Dispatchers.IO) {
-                                                AppMemory.delete(context, editing.pkg)
-                                            }
-                                            reloadMemory()
-                                            editingMemory = null
-                                        }
-                                    },
-                                    shape = RoundedCornerShape(14.dp),
-                                    border = BorderStroke(1.dp, Line)
-                                ) { Text("删除", fontSize = 12.sp, color = Danger) }
+                        } else {
+                            SettingsCard("可用模型") {
+                                Text(
+                                    "拉取后会在这里列出模型，可直接点击选择。",
+                                    fontSize = 10.5.sp,
+                                    color = Color(0xFF9CA3AF)
+                                )
                             }
                         }
-                    }
-                } else {
-                    if (memoryEntries.isEmpty()) {
-                        Text(
-                            "暂无 App 记忆。Agent 完成后会自动写入，也可以在长任务中让它 memory_write。",
-                            fontSize = 10.5.sp, color = Muted, lineHeight = 16.sp
-                        )
-                    }
-                    memoryEntries.forEach { entry ->
-                        Surface(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable {
-                                    editingMemory = entry
-                                    memoryDraft = ""
-                                    scope.launch {
-                                        memoryDraft = withContext(Dispatchers.IO) {
-                                            AppMemory.readRaw(context, entry.pkg)
-                                        }
-                                    }
-                                },
-                            shape = RoundedCornerShape(14.dp),
-                            color = Color(0xFFFAFBFC),
-                            border = BorderStroke(1.dp, Line)
-                        ) {
-                            Column(Modifier.padding(horizontal = 11.dp, vertical = 9.dp)) {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
+
+                        DecisionModeSection()
+                    } else if (tab == 1) {
+                        SettingsCard {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Column(Modifier.weight(1f)) {
                                     Text(
-                                        entry.pkg,
-                                        fontSize = 11.5.sp,
+                                        "Web 控制台",
+                                        fontSize = 14.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = Ink
+                                    )
+                                    Text(
+                                        "日志、任务和远程指令统一走内置控制台，不再使用第三方 JWT。",
+                                        fontSize = 11.sp,
+                                        color = Muted,
+                                        lineHeight = 16.sp
+                                    )
+                                }
+                                BrandSwitch(consoleEnabled, onConsoleEnabled)
+                            }
+                            Spacer(Modifier.height(12.dp))
+                            StudioField("控制台地址", consoleBase, onConsoleBase, "http://192.168.1.100:9777")
+                            StudioField(
+                                "设备名称", consoleName, onConsoleName,
+                                "${Build.MANUFACTURER} ${Build.MODEL}",
+                                bottomPadding = 0.dp
+                            )
+                        }
+
+                        SettingsCard("远程任务") {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Column(Modifier.weight(1f)) {
+                                    Text(
+                                        "允许远程任务直接操作手机",
+                                        fontSize = 14.sp,
+                                        fontWeight = FontWeight.Medium,
+                                        color = Ink
+                                    )
+                                    Text(
+                                        "关闭时控制台任务会被拒绝；开启后远程任务可直接操作手机。默认关闭。",
+                                        fontSize = 11.sp,
+                                        color = Muted,
+                                        lineHeight = 16.sp
+                                    )
+                                }
+                                BrandSwitch(consoleRemoteApprove, onConsoleRemoteApprove)
+                            }
+                        }
+
+                        SettingsCard("一次性注册码") {
+                            Text(
+                                "在 Web 控制台「设备」页生成，可手动输入或扫码绑定，绑定成功后立即失效。",
+                                fontSize = 11.sp,
+                                color = Muted,
+                                lineHeight = 16.sp
+                            )
+                            Spacer(Modifier.height(10.dp))
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                StudioField(
+                                    "", consoleCode, onConsoleCode, "粘贴注册码",
+                                    mono = true,
+                                    modifier = Modifier.weight(1f),
+                                    bottomPadding = 0.dp
+                                )
+                                ActionButton(
+                                    text = "绑定",
+                                    modifier = Modifier.width(72.dp),
+                                    primary = true,
+                                    enabled = consoleCode.isNotBlank(),
+                                    onClick = onBindConsole
+                                )
+                                Box(
+                                    modifier = Modifier
+                                        .size(42.dp)
+                                        .clip(RoundedCornerShape(12.dp))
+                                        .background(Color.White)
+                                        .border(1.dp, Line, RoundedCornerShape(12.dp))
+                                        .clickable(onClick = onScanConsole),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(
+                                        Icons.Rounded.QrCodeScanner,
+                                        contentDescription = "扫码绑定",
+                                        tint = Ink,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                }
+                            }
+                        }
+
+                        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                            ActionButton(
+                                text = "测试连接",
+                                modifier = Modifier.weight(1f),
+                                primary = false,
+                                onClick = onTestConsole
+                            )
+                            ActionButton(
+                                text = "保存配置",
+                                modifier = Modifier.weight(1f),
+                                primary = true,
+                                onClick = onSaveConsole
+                            )
+                        }
+
+                        if (consoleDeviceId.isNotBlank() || consoleStatus.isNotBlank()) {
+                            SettingsCard("连接状态") {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        "连接状态",
+                                        fontSize = 12.sp,
+                                        color = Muted,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    if (consoleConnected) {
+                                        SettingsPill("已连接 · 已绑定", Success)
+                                    } else {
+                                        SettingsPill("未连接", Muted)
+                                    }
+                                }
+                                if (consoleDeviceId.isNotBlank()) {
+                                    SettingsInfoRow("设备 ID", consoleDeviceId, mono = true)
+                                }
+                                if (consoleStatus.isNotBlank()) {
+                                    SettingsInfoRow("最近状态", consoleStatus)
+                                }
+                            }
+                            if (consoleDeviceId.isNotBlank()) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.Center
+                                ) {
+                                    TextButton(onClick = onUnbindConsole) {
+                                        Text("解除绑定", fontSize = 13.sp, color = Danger)
+                                    }
+                                }
+                            }
+                            Text(
+                                "设备只保存自己的 deviceId / deviceSecret；Web 撤销设备后长连接立即失效。",
+                                fontSize = 10.sp,
+                                color = Color(0xFF9CA3AF),
+                                lineHeight = 15.sp
+                            )
+                        } else {
+                            Text(
+                                "设备只保存自己的 deviceId / deviceSecret；Web 撤销设备后长连接立即失效。",
+                                fontSize = 10.sp,
+                                color = Color(0xFF9CA3AF),
+                                lineHeight = 15.sp
+                            )
+                        }
+                    } else if (tab == 2) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Column(Modifier.weight(1f)) {
+                                Text(
+                                    "App 记忆",
+                                    fontSize = 16.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Ink
+                                )
+                                Text(
+                                    "每个 App 独立；Agent 只注入前 800 字，最多保存 2000 字。",
+                                    fontSize = 11.sp,
+                                    color = Muted,
+                                    lineHeight = 16.sp
+                                )
+                            }
+                            Box(
+                                modifier = Modifier
+                                    .size(32.dp)
+                                    .clip(CircleShape)
+                                    .background(Color(0xFFF1F3F5))
+                                    .clickable { reloadMemory() },
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    Icons.Rounded.Refresh,
+                                    contentDescription = "刷新",
+                                    tint = Muted,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            }
+                        }
+
+                        val editing = editingMemory
+                        if (editing != null) {
+                            SettingsCard {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(28.dp)
+                                            .clip(CircleShape)
+                                            .background(Color(0xFFF1F3F5))
+                                            .clickable { editingMemory = null },
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Icon(
+                                            Icons.AutoMirrored.Rounded.ArrowBack,
+                                            contentDescription = "返回列表",
+                                            tint = Ink,
+                                            modifier = Modifier.size(14.dp)
+                                        )
+                                    }
+                                    Spacer(Modifier.width(8.dp))
+                                    Text(
+                                        editing.pkg,
+                                        fontSize = 13.sp,
                                         fontWeight = FontWeight.Medium,
                                         color = Ink,
+                                        fontFamily = FontFamily.Monospace,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
                                         modifier = Modifier.weight(1f)
                                     )
                                     Text(
-                                        "${entry.entryCount} 条",
-                                        fontSize = 9.sp,
-                                        color = Muted
+                                        "${memoryDraft.length} / ${AppMemory.MAX_WRITE}",
+                                        fontSize = 11.sp,
+                                        color = if (memoryDraft.length >= AppMemory.MAX_WRITE) Warning else Color(0xFFD97706),
+                                        fontFamily = FontFamily.Monospace
                                     )
                                 }
-                                if (entry.preview.isNotBlank()) {
+                                Spacer(Modifier.height(10.dp))
+                                val memoryInteraction = remember { MutableInteractionSource() }
+                                val memoryFocused by memoryInteraction.collectIsFocusedAsState()
+                                BasicTextField(
+                                    value = memoryDraft,
+                                    onValueChange = {
+                                        if (it.length <= AppMemory.MAX_WRITE) memoryDraft = it
+                                    },
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .heightIn(min = 150.dp)
+                                        .clip(RoundedCornerShape(12.dp))
+                                        .background(Color(0xFFF7F8FA))
+                                        .border(
+                                            1.dp,
+                                            if (memoryFocused) Ink.copy(alpha = 0.35f) else Line,
+                                            RoundedCornerShape(12.dp)
+                                        )
+                                        .padding(12.dp),
+                                    textStyle = TextStyle(fontSize = 12.sp, lineHeight = 18.sp, color = Ink),
+                                    cursorBrush = SolidColor(Ink),
+                                    interactionSource = memoryInteraction,
+                                    maxLines = 12
+                                )
+                                Spacer(Modifier.height(10.dp))
+                                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                                    ActionButton(
+                                        text = "保存",
+                                        modifier = Modifier.weight(1f),
+                                        primary = true,
+                                        onClick = {
+                                            scope.launch {
+                                                withContext(Dispatchers.IO) {
+                                                    AppMemory.overwrite(context, editing.pkg, memoryDraft)
+                                                }
+                                                reloadMemory()
+                                                editingMemory = null
+                                            }
+                                        }
+                                    )
+                                    ActionButton(
+                                        text = "删除",
+                                        modifier = Modifier.weight(1f),
+                                        primary = false,
+                                        danger = true,
+                                        onClick = {
+                                            scope.launch {
+                                                withContext(Dispatchers.IO) {
+                                                    AppMemory.delete(context, editing.pkg)
+                                                }
+                                                reloadMemory()
+                                                editingMemory = null
+                                            }
+                                        }
+                                    )
+                                }
+                            }
+                        } else if (memoryEntries.isEmpty()) {
+                            SettingsCard {
+                                Text(
+                                    "暂无 App 记忆。Agent 完成后会自动写入，也可以在长任务中让它 memory_write。",
+                                    fontSize = 10.5.sp,
+                                    color = Muted,
+                                    lineHeight = 16.sp
+                                )
+                            }
+                        } else {
+                            SettingsCard {
+                                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                    memoryEntries.forEach { entry ->
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .clip(RoundedCornerShape(12.dp))
+                                                .clickable {
+                                                    editingMemory = entry
+                                                    memoryDraft = ""
+                                                    scope.launch {
+                                                        memoryDraft = withContext(Dispatchers.IO) {
+                                                            AppMemory.readRaw(context, entry.pkg)
+                                                        }
+                                                    }
+                                                }
+                                                .padding(12.dp),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                        ) {
+                                            Column(Modifier.weight(1f)) {
+                                                Text(
+                                                    entry.pkg,
+                                                    fontSize = 13.sp,
+                                                    color = Ink,
+                                                    fontFamily = FontFamily.Monospace,
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis
+                                                )
+                                                Text(
+                                                    "${entry.entryCount} 条",
+                                                    fontSize = 10.sp,
+                                                    color = Color(0xFF9CA3AF),
+                                                    fontFamily = FontFamily.Monospace
+                                                )
+                                                if (entry.preview.isNotBlank()) {
+                                                    Text(
+                                                        entry.preview,
+                                                        fontSize = 11.sp,
+                                                        color = Muted,
+                                                        maxLines = 2,
+                                                        overflow = TextOverflow.Ellipsis,
+                                                        modifier = Modifier.padding(top = 2.dp)
+                                                    )
+                                                }
+                                            }
+                                            Icon(
+                                                Icons.Rounded.ChevronRight,
+                                                contentDescription = null,
+                                                tint = Color(0xFF9CA3AF),
+                                                modifier = Modifier.size(14.dp)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } else if (tab == 3) {
+                        val totalTokens = sessions.sumOf { it.totalTokens }
+                        val totalPrompt = sessions.sumOf { it.promptTokens }
+                        val totalCompletion = sessions.sumOf { it.completionTokens }
+                        val totalDuration = sessions.sumOf { it.totalDurationMs }
+                        val avgCtx = if (sessions.isEmpty()) 0 else sessions.sumOf { it.contextChars } / sessions.size
+                        val priceInValue = priceIn.toDoubleOrNull() ?: 0.0
+                        val priceOutValue = priceOut.toDoubleOrNull() ?: 0.0
+                        val estimated = totalPrompt / 1_000_000.0 * priceInValue +
+                            totalCompletion / 1_000_000.0 * priceOutValue
+
+                        SettingsCard("总览") {
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                SettingsMetricTile(sessions.size.toString(), "会话数", Modifier.weight(1f))
+                                SettingsMetricTile(formatCount(totalTokens), "总 tokens", Modifier.weight(1f))
+                            }
+                            Spacer(Modifier.height(8.dp))
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                SettingsMetricTile(formatDuration(totalDuration), "累计耗时", Modifier.weight(1f))
+                                SettingsMetricTile(formatCount(avgCtx), "平均上下文", Modifier.weight(1f))
+                            }
+                            Spacer(Modifier.height(8.dp))
+                            Text(
+                                "prompt ${formatCount(totalPrompt)} · completion ${formatCount(totalCompletion)}",
+                                fontSize = 11.sp,
+                                color = Color(0xFF9CA3AF),
+                                fontFamily = FontFamily.Monospace
+                            )
+                        }
+
+                        SettingsCard("估算单价（每 1M tokens）") {
+                            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                                StudioField(
+                                    "输入", priceIn,
+                                    { priceIn = it.filter { c -> c.isDigit() || c == '.' } },
+                                    "0", mono = true, compact = true,
+                                    modifier = Modifier.weight(1f), bottomPadding = 0.dp
+                                )
+                                StudioField(
+                                    "输出", priceOut,
+                                    { priceOut = it.filter { c -> c.isDigit() || c == '.' } },
+                                    "0", mono = true, compact = true,
+                                    modifier = Modifier.weight(1f), bottomPadding = 0.dp
+                                )
+                            }
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    "估算金额",
+                                    fontSize = 12.sp,
+                                    color = Muted,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                Text(
+                                    String.format(Locale.US, "$%.4f", estimated),
+                                    fontSize = 16.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (estimated > 0) Accent else Muted,
+                                    fontFamily = FontFamily.Monospace
+                                )
+                            }
+                            ActionButton(
+                                text = "保存单价",
+                                modifier = Modifier.fillMaxWidth(),
+                                primary = false,
+                                onClick = {
+                                    UsageSettings.save(context, priceInValue, priceOutValue)
+                                }
+                            )
+                        }
+
+                        SettingsCard("按会话 · Top 20") {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Text("标题", fontSize = 10.sp, fontWeight = FontWeight.Medium, color = Color(0xFF9CA3AF), modifier = Modifier.weight(1f))
+                                Text("模型", fontSize = 10.sp, fontWeight = FontWeight.Medium, color = Color(0xFF9CA3AF), modifier = Modifier.width(90.dp), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Text("tokens", fontSize = 10.sp, fontWeight = FontWeight.Medium, color = Color(0xFF9CA3AF), modifier = Modifier.width(56.dp))
+                                Text("耗时", fontSize = 10.sp, fontWeight = FontWeight.Medium, color = Color(0xFF9CA3AF), modifier = Modifier.width(48.dp))
+                            }
+                            Spacer(Modifier.height(4.dp))
+                            sessions.sortedByDescending { it.totalTokens }.take(20).forEach { s ->
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(vertical = 7.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
                                     Text(
-                                        entry.preview,
-                                        fontSize = 9.5.sp,
-                                        color = Muted,
-                                        maxLines = 2,
+                                        s.title,
+                                        fontSize = 12.sp,
+                                        color = Ink,
+                                        maxLines = 1,
                                         overflow = TextOverflow.Ellipsis,
-                                        modifier = Modifier.padding(top = 2.dp)
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    Text(
+                                        s.model.ifBlank { "默认" },
+                                        fontSize = 10.sp,
+                                        color = Muted,
+                                        fontFamily = FontFamily.Monospace,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.width(90.dp)
+                                    )
+                                    Text(
+                                        formatCount(s.totalTokens),
+                                        fontSize = 10.sp,
+                                        color = Ink,
+                                        fontFamily = FontFamily.Monospace,
+                                        modifier = Modifier.width(56.dp)
+                                    )
+                                    Text(
+                                        formatDuration(s.totalDurationMs),
+                                        fontSize = 10.sp,
+                                        color = Ink,
+                                        fontFamily = FontFamily.Monospace,
+                                        modifier = Modifier.width(48.dp)
                                     )
                                 }
                             }
                         }
-                        Spacer(Modifier.height(7.dp))
-                    }
-                }
-            } else if (tab == 3) {
-                val totalTokens = sessions.sumOf { it.totalTokens }
-                val totalPrompt = sessions.sumOf { it.promptTokens }
-                val totalCompletion = sessions.sumOf { it.completionTokens }
-                val totalDuration = sessions.sumOf { it.totalDurationMs }
-                val avgCtx = if (sessions.isEmpty()) 0 else sessions.sumOf { it.contextChars } / sessions.size
-                val priceInValue = priceIn.toDoubleOrNull() ?: 0.0
-                val priceOutValue = priceOut.toDoubleOrNull() ?: 0.0
-                val estimated = totalPrompt / 1_000_000.0 * priceInValue +
-                    totalCompletion / 1_000_000.0 * priceOutValue
-
-                Text("总览", fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = Muted)
-                Surface(
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(16.dp),
-                    color = Color(0xFFFAFBFC),
-                    border = BorderStroke(1.dp, Line)
-                ) {
-                    Column(Modifier.padding(12.dp)) {
-                        UsageStatRow("会话数", sessions.size.toString())
-                        UsageStatRow("总 tokens", formatCount(totalTokens))
-                        UsageStatRow(
-                            "prompt / completion",
-                            "${formatCount(totalPrompt)} / ${formatCount(totalCompletion)}"
-                        )
-                        UsageStatRow("累计耗时", formatDuration(totalDuration))
-                        UsageStatRow("平均上下文", formatCount(avgCtx))
-                    }
-                }
-
-                Spacer(Modifier.height(14.dp))
-                Text("估算单价（每 1M tokens）", fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = Muted)
-                Spacer(Modifier.height(6.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    StudioField(
-                        "输入", priceIn, { priceIn = it.filter { c -> c.isDigit() || c == '.' } },
-                        "0", mono = true, modifier = Modifier.weight(1f)
-                    )
-                    StudioField(
-                        "输出", priceOut, { priceOut = it.filter { c -> c.isDigit() || c == '.' } },
-                        "0", mono = true, modifier = Modifier.weight(1f)
-                    )
-                }
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        "估算: ${String.format(Locale.US, "%.4f", estimated)}",
-                        fontSize = 11.sp, color = if (estimated > 0) Ink else Muted,
-                        modifier = Modifier.weight(1f)
-                    )
-                    TextButton(
-                        onClick = {
-                            UsageSettings.save(
-                                context,
-                                priceInValue,
-                                priceOutValue
-                            )
-                        },
-                        contentPadding = PaddingValues(0.dp)
-                    ) { Text("保存单价", fontSize = 10.5.sp, color = Accent) }
-                }
-
-                Spacer(Modifier.height(14.dp))
-                Text("按会话", fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = Muted)
-                Spacer(Modifier.height(6.dp))
-                sessions.sortedByDescending { it.totalTokens }.take(20).forEach { s ->
-                    Surface(
-                        modifier = Modifier.fillMaxWidth(),
-                        shape = RoundedCornerShape(12.dp),
-                        color = Color(0xFFFAFBFC),
-                        border = BorderStroke(1.dp, Line)
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Column(Modifier.weight(1f)) {
+                    } else {
+                        SettingsCard {
+                            Column(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalAlignment = Alignment.CenterHorizontally
+                            ) {
+                                BrandMark(size = 48.dp, corner = 14.dp, markSize = 30.dp)
+                                Spacer(Modifier.height(8.dp))
                                 Text(
-                                    s.title,
-                                    fontSize = 11.sp,
-                                    color = Ink,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
+                                    buildAnnotatedString {
+                                        withStyle(SpanStyle(fontWeight = FontWeight.Bold, color = Ink)) { append("Catfee") }
+                                        withStyle(SpanStyle(fontWeight = FontWeight.Bold, color = Accent)) { append("Agents") }
+                                    },
+                                    fontSize = 18.sp
                                 )
                                 Text(
-                                    "${s.model.ifBlank { "默认模型" }} · ${formatCount(s.totalTokens)} tok · " +
-                                        formatDuration(s.totalDurationMs),
-                                    fontSize = 9.sp,
+                                    "通用 Agent 工作台",
+                                    fontSize = 12.sp,
                                     color = Muted
                                 )
                             }
                         }
-                    }
-                    Spacer(Modifier.height(5.dp))
-                }
-            } else {
-                Text(
-                    "CatfeeAgents",
-                    fontSize = 22.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = Ink
-                )
-                Text(
-                    "通用 Agent 工作台",
-                    fontSize = 11.sp,
-                    color = Muted,
-                    modifier = Modifier.padding(top = 2.dp)
-                )
-                Spacer(Modifier.height(14.dp))
 
-                Surface(
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(16.dp),
-                    color = Color(0xFFFAFBFC),
-                    border = BorderStroke(1.dp, Line)
-                ) {
-                    Column(Modifier.padding(12.dp)) {
-                        Text("应用信息", fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = Muted)
-                        Spacer(Modifier.height(5.dp))
-                        AboutInfoRow("版本", aboutInfo.versionName)
-                        AboutInfoRow("Version Code", aboutInfo.versionCode)
-                        AboutInfoRow("Application ID", aboutInfo.applicationId)
-                    }
-                }
+                        SettingsCard("应用信息") {
+                            SettingsInfoRow("版本", aboutInfo.versionName, mono = true)
+                            SettingsInfoRow("Version Code", aboutInfo.versionCode, mono = true)
+                            SettingsInfoRow("Application ID", aboutInfo.applicationId, mono = true)
+                        }
 
-                Spacer(Modifier.height(14.dp))
-                Text("能力状态", fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = Muted)
-                Spacer(Modifier.height(6.dp))
-                Surface(
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(16.dp),
-                    color = Color(0xFFFAFBFC),
-                    border = BorderStroke(1.dp, Line)
-                ) {
-                    Column(Modifier.padding(horizontal = 12.dp, vertical = 7.dp)) {
-                        AboutCapabilityRow("对话与模型", "通过已配置的 LLM 接口进行对话和任务规划。", model.isNotBlank())
-                        AboutCapabilityRow("无障碍操作", "读取界面并执行 Agent 规划的设备操作。", UiObserverService.instance != null)
-                        AboutCapabilityRow("ROOT 能力", "在设备已授权时执行需要 ROOT 的系统操作。", rootGranted == true)
-                        AboutCapabilityRow("悬浮状态窗", "在其他应用上显示任务步骤和运行状态。", overlayEnabled && overlayGranted)
-                        AboutCapabilityRow("本地会话与记忆", "在设备本地保存会话、附件摘要和 App 记忆。", true)
-                    }
-                }
+                        SettingsCard("能力状态") {
+                            SettingsCapabilityRow("对话与模型", "已就绪", model.isNotBlank())
+                            SettingsCapabilityRow("无障碍操作", if (UiObserverService.instance != null) "已就绪" else "未开启", UiObserverService.instance != null)
+                            SettingsCapabilityRow("ROOT 能力", if (rootGranted == true) "已就绪" else "未开启", rootGranted == true)
+                            SettingsCapabilityRow("悬浮状态窗", if (overlayEnabled && overlayGranted) "已就绪" else "未开启", overlayEnabled && overlayGranted)
+                            SettingsCapabilityRow("本地会话与记忆", "已就绪", true)
+                        }
 
-                Spacer(Modifier.height(14.dp))
-                Text("隐私说明", fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = Muted)
-                Surface(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(top = 6.dp),
-                    shape = RoundedCornerShape(16.dp),
-                    color = Color(0xFFFAFBFC),
-                    border = BorderStroke(1.dp, Line)
-                ) {
-                    Text(
-                        "会话、附件解析结果和 App 记忆默认保存在本设备。仅当你配置并启用模型接口或远程日志时，相关请求/日志才会发送到对应服务；API Key 和日志凭证由你自行管理。ROOT、无障碍和悬浮窗能力均遵循系统授权状态。",
-                        fontSize = 10.5.sp,
-                        color = Muted,
-                        lineHeight = 16.sp,
-                        modifier = Modifier.padding(12.dp)
-                    )
+                        SettingsCard("隐私说明") {
+                            Text(
+                                "会话、附件与 App 记忆仅保存在本机。",
+                                fontSize = 12.sp,
+                                color = Muted,
+                                lineHeight = 18.sp
+                            )
+                            Spacer(Modifier.height(4.dp))
+                            Text(
+                                "只有配置了模型或控制台后，才会向对应服务发送请求。",
+                                fontSize = 12.sp,
+                                color = Muted,
+                                lineHeight = 18.sp
+                            )
+                            Spacer(Modifier.height(4.dp))
+                            Text(
+                                "Root、无障碍与悬浮窗遵循系统授权，可随时在系统中撤销。",
+                                fontSize = 12.sp,
+                                color = Muted,
+                                lineHeight = 18.sp
+                            )
+                        }
+                    }
                 }
             }
         }
     }
 }
+
+@Composable
+private fun SettingsCard(
+    title: String? = null,
+    content: @Composable ColumnScope.() -> Unit
+) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(16.dp),
+        color = Color.White,
+        border = BorderStroke(1.dp, Line)
+    ) {
+        Column(Modifier.padding(14.dp)) {
+            if (title != null) {
+                Text(
+                    title,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = Ink
+                )
+                Spacer(Modifier.height(10.dp))
+            }
+            content()
+        }
+    }
+}
+
+@Composable
+private fun CapabilityItem(label: String, ok: Boolean, modifier: Modifier = Modifier) {
+    Column(
+        modifier = modifier,
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
+        Box(
+            Modifier
+                .size(6.dp)
+                .background(if (ok) Success else Color(0xFF9CA3AF), CircleShape)
+        )
+        Text(
+            "$label\n${if (ok) "已就绪" else "未开启"}",
+            fontSize = 10.sp,
+            color = Muted,
+            textAlign = TextAlign.Center,
+            lineHeight = 13.sp
+        )
+    }
+}
+
+@Composable
+private fun SettingsPill(text: String, color: Color) {
+    Row(
+        modifier = Modifier
+            .height(22.dp)
+            .clip(RoundedCornerShape(50))
+            .background(color.copy(alpha = 0.10f))
+            .padding(horizontal = 8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(Modifier.size(6.dp).background(color, CircleShape))
+        Spacer(Modifier.width(4.dp))
+        Text(text, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = color)
+    }
+}
+
+@Composable
+private fun ConnectionNote(text: String, failed: Boolean) {
+    val color = if (failed) Danger else Success
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .background(color.copy(alpha = 0.10f))
+            .padding(10.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(Modifier.size(6.dp).background(color, CircleShape))
+        Spacer(Modifier.width(6.dp))
+        Text(text, fontSize = 12.sp, color = color, lineHeight = 17.sp)
+    }
+}
+
+@Composable
+private fun SettingsInfoRow(label: String, value: String, mono: Boolean = false) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(label, fontSize = 12.sp, color = Muted, modifier = Modifier.weight(1f))
+        Text(
+            value,
+            fontSize = 12.sp,
+            color = Ink,
+            fontFamily = if (mono) FontFamily.Monospace else FontFamily.Default,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+    }
+}
+
+@Composable
+private fun SettingsMetricTile(value: String, label: String, modifier: Modifier = Modifier) {
+    Column(
+        modifier = modifier
+            .height(57.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(Color(0xFFF7F8FA))
+            .padding(12.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
+        Text(
+            value,
+            fontSize = 24.sp,
+            fontWeight = FontWeight.Bold,
+            color = Ink,
+            fontFamily = FontFamily.Monospace,
+            maxLines = 1
+        )
+        Text(label, fontSize = 10.sp, color = Muted, maxLines = 1)
+    }
+}
+
+@Composable
+private fun SettingsCapabilityRow(name: String, status: String, ok: Boolean) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 3.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(
+            Modifier
+                .size(8.dp)
+                .background(if (ok) Success else Color(0xFF9CA3AF), CircleShape)
+        )
+        Spacer(Modifier.width(8.dp))
+        Text(name, fontSize = 13.sp, color = Ink, modifier = Modifier.weight(1f))
+        Text(
+            status,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = if (ok) Success else Muted
+        )
+    }
+}
+
+@Composable
+private fun BrandSwitch(checked: Boolean, onCheckedChange: (Boolean) -> Unit) {
+    val offset by animateDpAsState(
+        targetValue = if (checked) 20.dp else 2.dp,
+        animationSpec = tween(150),
+        label = "brandSwitch"
+    )
+    Box(
+        modifier = Modifier
+            .size(width = 44.dp, height = 26.dp)
+            .clip(RoundedCornerShape(13.dp))
+            .background(if (checked) Accent else Color(0xFFD1D5DB))
+            .clickable { onCheckedChange(!checked) }
+    ) {
+        Box(
+            Modifier
+                .offset(x = offset, y = 2.dp)
+                .size(22.dp)
+                .clip(CircleShape)
+                .background(Color.White)
+        )
+    }
+}
+
+@Composable
+private fun ActionButton(
+    text: String,
+    modifier: Modifier = Modifier,
+    primary: Boolean = true,
+    danger: Boolean = false,
+    enabled: Boolean = true,
+    onClick: () -> Unit
+) {
+    val shape = RoundedCornerShape(12.dp)
+    if (primary) {
+        Button(
+            onClick = onClick,
+            enabled = enabled,
+            modifier = modifier.height(42.dp),
+            shape = shape,
+            contentPadding = PaddingValues(horizontal = 12.dp),
+            colors = ButtonDefaults.buttonColors(
+                containerColor = Ink,
+                disabledContainerColor = Color(0xFFF1F3F5),
+                disabledContentColor = Color(0xFF9CA3AF)
+            )
+        ) {
+            Text(text, fontSize = 13.sp, fontWeight = FontWeight.Medium, maxLines = 1)
+        }
+    } else {
+        OutlinedButton(
+            onClick = onClick,
+            enabled = enabled,
+            modifier = modifier.height(42.dp),
+            shape = shape,
+            border = BorderStroke(1.dp, if (danger) Danger else Line),
+            contentPadding = PaddingValues(horizontal = 12.dp),
+            colors = ButtonDefaults.outlinedButtonColors(
+                contentColor = if (danger) Danger else Ink,
+                disabledContentColor = Color(0xFF9CA3AF)
+            )
+        ) {
+            Text(text, fontSize = 13.sp, fontWeight = FontWeight.Medium, maxLines = 1)
+        }
+    }
+}
+
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -4047,57 +4407,60 @@ private fun ModelSheet(
                 .fillMaxWidth()
                 .statusBarsPadding()
                 .navigationBarsPadding()
-                .padding(horizontal = 20.dp)
-                .padding(bottom = 28.dp)
+                .padding(horizontal = 18.dp)
+                .padding(bottom = 24.dp)
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
-                    Text("本会话模型", fontSize = 18.sp, fontWeight = FontWeight.SemiBold, color = Ink)
-                    Text("只影响当前会话；全局默认在 设置 → 模型 修改。", fontSize = 10.5.sp, color = Muted)
+                    Text("本会话模型", fontSize = 16.sp, fontWeight = FontWeight.Bold, color = Ink)
+                    Text("只影响当前会话；全局默认在 设置 → 模型 修改。", fontSize = 11.sp, color = Muted)
                 }
-                IconButton(onClick = onDismiss) {
-                    Icon(Icons.Rounded.Close, "关闭", tint = Muted)
+                Box(
+                    modifier = Modifier
+                        .size(32.dp)
+                        .clip(CircleShape)
+                        .background(Color(0xFFF1F3F5))
+                        .clickable(onClick = onDismiss),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(Icons.Rounded.Close, "关闭", tint = Ink, modifier = Modifier.size(16.dp))
                 }
             }
-            Spacer(Modifier.height(10.dp))
+            Spacer(Modifier.height(14.dp))
             if (models.isEmpty()) {
                 Text(
-                    "还没有拉取模型列表。可以在 设置 → 模型 点「拉取模型列表」后回到这里切换。",
-                    fontSize = 10.5.sp,
-                    color = Muted,
+                    "还没有拉取模型列表？可以在 设置 → 模型 点「拉取模型列表」后回到这里切换。",
+                    fontSize = 11.sp,
+                    color = Color(0xFF9CA3AF),
                     lineHeight = 16.sp
                 )
                 Spacer(Modifier.height(8.dp))
             }
             options.forEach { (value, label) ->
                 val selected = value == currentModel
-                Surface(
+                Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .clickable { onSelect(value) },
-                    shape = RoundedCornerShape(14.dp),
-                    color = if (selected) Accent.copy(alpha = 0.05f) else Color.White,
-                    border = BorderStroke(1.dp, if (selected) Accent.copy(alpha = 0.25f) else Line)
+                        .height(48.dp)
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(if (selected) Accent.copy(alpha = 0.08f) else Color.Transparent)
+                        .clickable { onSelect(value) }
+                        .padding(horizontal = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 11.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            label,
-                            fontSize = 12.sp,
-                            color = Ink,
-                            fontFamily = if (value.isBlank()) FontFamily.Default else FontFamily.Monospace,
-                            modifier = Modifier.weight(1f),
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                        if (selected) {
-                            Icon(Icons.Rounded.Check, null, tint = Accent, modifier = Modifier.size(16.dp))
-                        }
+                    Text(
+                        label,
+                        fontSize = 13.sp,
+                        color = if (selected) Accent else Ink,
+                        fontFamily = if (value.isBlank()) FontFamily.Default else FontFamily.Monospace,
+                        modifier = Modifier.weight(1f),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    if (selected) {
+                        Icon(Icons.Rounded.Check, null, tint = Accent, modifier = Modifier.size(16.dp))
                     }
                 }
-                Spacer(Modifier.height(6.dp))
             }
         }
     }
@@ -4150,29 +4513,25 @@ private fun ModeBadge(mode: DeviceMode) {
         DeviceMode.CHAT_ONLY -> "仅聊天模式" to false
     }
     val color = when (mode) {
-        DeviceMode.FULL -> Success
+        DeviceMode.FULL -> Accent
         DeviceMode.ACCESSIBILITY -> Warning
         DeviceMode.CHAT_ONLY -> Muted
     }
-    Surface(
-        shape = RoundedCornerShape(50),
-        color = color.copy(alpha = 0.10f),
-        border = BorderStroke(1.dp, color.copy(alpha = 0.25f))
+    Row(
+        modifier = Modifier
+            .height(24.dp)
+            .clip(RoundedCornerShape(50))
+            .background(color.copy(alpha = 0.10f))
+            .padding(horizontal = 8.dp),
+        verticalAlignment = Alignment.CenterVertically
     ) {
-        Row(
-            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Box(Modifier.size(5.dp).background(color, CircleShape))
-            Spacer(Modifier.width(5.dp))
-            Text(
-                label,
-                fontSize = 9.sp,
-                fontWeight = FontWeight.Medium,
-                color = if (active) color else Muted,
-                maxLines = 1
-            )
-        }
+        Text(
+            label,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = if (active) color else Muted,
+            maxLines = 1
+        )
     }
 }
 
@@ -4243,140 +4602,114 @@ private fun DecisionModeSection() {
         }
     }
 
-    Surface(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(16.dp),
-        color = Color(0xFFFAFBFC),
-        border = BorderStroke(1.dp, Line)
-    ) {
-        Column(Modifier.padding(14.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text(
-                        "DECISION 加速",
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = Ink
-                    )
-                    Text(
-                        "默认关闭。高置信度时用 decision 接口接管 observe / wait，跳过本轮主模型；" +
-                            "点击、输入和完成仍由主模型决定。",
-                        fontSize = 9.5.sp,
-                        color = Muted,
-                        lineHeight = 14.sp,
-                        modifier = Modifier.padding(top = 2.dp)
-                    )
-                }
-                Switch(
-                    checked = enabled,
-                    onCheckedChange = {
-                        enabled = it
-                        save()
-                    },
-                    colors = SwitchDefaults.colors(
-                        checkedThumbColor = Color.White,
-                        checkedTrackColor = Ink,
-                        uncheckedThumbColor = Color.White,
-                        uncheckedTrackColor = Color(0xFFD1D5DB),
-                        uncheckedBorderColor = Color.Transparent
-                    )
-                )
-            }
-
-            if (enabled) {
-                Spacer(Modifier.height(12.dp))
-                StudioField(
-                    "DECISION Base URL", baseUrl, { baseUrl = it },
-                    DecisionSettings.DEFAULT_BASE_URL, mono = true, minLines = 2
-                )
-                StudioField(
-                    "DECISION Key", apiKey, { apiKey = it },
-                    "sk-...", mono = true
-                )
-                StudioField(
-                    "DECISION 模型", model, { model = it },
-                    "decision-model-preview", mono = true
-                )
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    StudioField(
-                        "最小置信度", minConfidence, { minConfidence = it },
-                        "0.80", mono = true, modifier = Modifier.weight(1f)
-                    )
-                    StudioField(
-                        "最多连续快速步", maxFastSteps, { maxFastSteps = it },
-                        "3", mono = true, modifier = Modifier.weight(1f)
-                    )
-                }
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    OutlinedButton(
-                        onClick = {
-                            if (testing) return@OutlinedButton
-                            testing = true
-                            result = ""
-                            val cfg = config()
-                            scope.launch {
-                                try {
-                                    val state = JSONObject()
-                                        .put("goal", "测试 DECISION 接口连通性")
-                                        .put("step", 2)
-                                        .put("last_tool", "observe")
-                                        .put("observation", "当前页面有登录按钮和「稍后再说」弹窗")
-                                        .put("foreground_app", "com.example.app")
-                                    val outcome = DecisionClient.decide(cfg, state, 4_000)
-                                    result = if (outcome.ok) {
-                                        "连接成功：${outcome.action} " +
-                                            "${(outcome.confidence * 100).toInt()}% · " +
-                                            "${outcome.latencyMs}ms · ${outcome.inputTokens} tokens"
-                                    } else {
-                                        "连接失败：${outcome.error}"
-                                    }
-                                } finally {
-                                    testing = false
-                                }
-                            }
-                        },
-                        enabled = !testing,
-                        modifier = Modifier.weight(1f),
-                        shape = RoundedCornerShape(12.dp),
-                        border = BorderStroke(1.dp, Line),
-                        colors = ButtonDefaults.outlinedButtonColors(
-                            contentColor = Ink,
-                            disabledContentColor = Color(0xFF9CA3AF)
-                        )
-                    ) {
-                        Text(if (testing) "测试中…" else "测试连接", fontSize = 11.sp)
-                    }
-                    Button(
-                        onClick = { save() },
-                        modifier = Modifier.weight(1f),
-                        shape = RoundedCornerShape(12.dp),
-                        colors = ButtonDefaults.buttonColors(containerColor = Ink)
-                    ) {
-                        Text("保存 DECISION 配置", fontSize = 11.sp)
-                    }
-                }
-                if (result.isNotBlank()) {
-                    val ok = result.startsWith("连接成功") || result.startsWith("已保存")
-                    Text(
-                        result,
-                        fontSize = 10.5.sp,
-                        color = if (ok) Success else Danger,
-                        lineHeight = 15.sp,
-                        modifier = Modifier.padding(top = 8.dp)
-                    )
-                }
+    SettingsCard {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
                 Text(
-                    "Base URL 填到 /compatible-mode/v1 即可，接口会自动拼接 /systemone。" +
-                        "Key 仅保存在本机加密偏好中。",
-                    fontSize = 9.5.sp,
-                    color = Color(0xFF9CA3AF),
-                    lineHeight = 14.sp,
-                    modifier = Modifier.padding(top = 6.dp)
+                    "DECISION 加速",
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = Ink
+                )
+                Text(
+                    "默认关闭。高置信度时用 decision 接口接管 observe / wait，跳过本轮主模型；" +
+                        "点击、输入和完成仍由主模型决定。",
+                    fontSize = 11.sp,
+                    color = Muted,
+                    lineHeight = 16.sp,
+                    modifier = Modifier.padding(top = 2.dp)
                 )
             }
+            BrandSwitch(checked = enabled) {
+                enabled = it
+                save()
+            }
+        }
+
+        if (enabled) {
+            Spacer(Modifier.height(12.dp))
+            StudioField(
+                "Base URL", baseUrl, { baseUrl = it },
+                DecisionSettings.DEFAULT_BASE_URL, mono = true,
+                compact = true, minLines = 2
+            )
+            StudioField(
+                "API Key", apiKey, { apiKey = it },
+                "sk-...", mono = true, compact = true
+            )
+            StudioField(
+                "快速模型", model, { model = it },
+                "decision-model-preview", mono = true, compact = true
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                StudioField(
+                    "最小置信度", minConfidence, { minConfidence = it },
+                    "0.80", mono = true, compact = true,
+                    modifier = Modifier.weight(1f), bottomPadding = 0.dp
+                )
+                StudioField(
+                    "最多连续快速步", maxFastSteps, { maxFastSteps = it },
+                    "3", mono = true, compact = true,
+                    modifier = Modifier.weight(1f), bottomPadding = 0.dp
+                )
+            }
+            Spacer(Modifier.height(10.dp))
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                ActionButton(
+                    text = if (testing) "测试中…" else "测试连接",
+                    modifier = Modifier.weight(1f),
+                    primary = false,
+                    enabled = !testing,
+                    onClick = {
+                        if (testing) return@ActionButton
+                        testing = true
+                        result = ""
+                        val cfg = config()
+                        scope.launch {
+                            try {
+                                val state = JSONObject()
+                                    .put("goal", "测试 DECISION 接口连通性")
+                                    .put("step", 2)
+                                    .put("last_tool", "observe")
+                                    .put("observation", "当前页面有登录按钮和「稍后再说」弹窗")
+                                    .put("foreground_app", "com.example.app")
+                                val outcome = DecisionClient.decide(cfg, state, 4_000)
+                                result = if (outcome.ok) {
+                                    "连接成功：${outcome.action} " +
+                                        "${(outcome.confidence * 100).toInt()}% · " +
+                                        "${outcome.latencyMs}ms · ${outcome.inputTokens} tokens"
+                                } else {
+                                    "连接失败：${outcome.error}"
+                                }
+                            } finally {
+                                testing = false
+                            }
+                        }
+                    }
+                )
+                ActionButton(
+                    text = "保存 DECISION 配置",
+                    modifier = Modifier.weight(1f),
+                    primary = true,
+                    onClick = { save() }
+                )
+            }
+            if (result.isNotBlank()) {
+                val ok = result.startsWith("连接成功") || result.startsWith("已保存")
+                Spacer(Modifier.height(10.dp))
+                ConnectionNote(result, !ok)
+            }
+            Text(
+                "Base URL 填到 /compatible-mode/v1 即可，接口会自动拼接 /systemone。" +
+                    "Key 仅保存在本机加密偏好中。",
+                fontSize = 10.sp,
+                color = Color(0xFF9CA3AF),
+                lineHeight = 15.sp,
+                modifier = Modifier.padding(top = 8.dp)
+            )
         }
     }
 }
@@ -4390,17 +4723,17 @@ private fun SettingsTab(
 ) {
     Box(
         modifier = modifier
-            .height(36.dp)
-            .clip(RoundedCornerShape(50))
-            .background(if (selected) Ink else Color(0xFFF3F4F6))
+            .height(32.dp)
+            .clip(RoundedCornerShape(10.dp))
+            .background(if (selected) Ink else Color.Transparent)
             .clickable(onClick = onClick)
-            .padding(horizontal = 14.dp),
+            .padding(horizontal = 12.dp),
         contentAlignment = Alignment.Center
     ) {
         Text(
             label,
             fontSize = 12.sp,
-            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
+            fontWeight = if (selected) FontWeight.Medium else FontWeight.Normal,
             color = if (selected) Color.White else Muted
         )
     }
@@ -4415,70 +4748,46 @@ private fun ModelPicker(
     Surface(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(16.dp),
-        color = Color(0xFFFAFBFC),
+        color = Color.White,
         border = BorderStroke(1.dp, Line)
     ) {
-        Column {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 12.dp, vertical = 9.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text("${models.size} 个模型", fontSize = 10.sp, color = Muted)
-                Spacer(Modifier.weight(1f))
-                Text("点击选择", fontSize = 9.5.sp, color = Color(0xFF9CA3AF))
-            }
-            HorizontalDivider(color = Line.copy(alpha = 0.7f))
-            models.forEachIndexed { index, id ->
+        Column(Modifier.padding(14.dp)) {
+            Text(
+                "可用模型",
+                fontSize = 14.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = Ink
+            )
+            Spacer(Modifier.height(4.dp))
+            models.forEach { id ->
                 val isSelected = id == selected
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
+                        .height(44.dp)
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(if (isSelected) Accent.copy(alpha = 0.08f) else Color.Transparent)
                         .clickable { onSelect(id) }
-                        .padding(horizontal = 12.dp, vertical = 11.dp),
+                        .padding(horizontal = 12.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Box(
-                        modifier = Modifier
-                            .size(16.dp)
-                            .clip(CircleShape)
-                            .background(if (isSelected) Accent else Color.Transparent)
-                            .border(
-                                1.dp,
-                                if (isSelected) Accent else Color(0xFFD1D5DB),
-                                CircleShape
-                            ),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        if (isSelected) {
-                            Icon(
-                                Icons.Rounded.Check,
-                                contentDescription = null,
-                                tint = Color.White,
-                                modifier = Modifier.size(11.dp)
-                            )
-                        }
-                    }
-                    Spacer(Modifier.width(10.dp))
                     Text(
                         id,
-                        fontSize = 12.sp,
-                        color = Ink,
+                        fontSize = 13.sp,
+                        color = if (isSelected) Accent else Ink,
                         fontFamily = FontFamily.Monospace,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f)
                     )
                     if (isSelected) {
-                        Text("当前", fontSize = 9.sp, color = Accent)
+                        Icon(
+                            Icons.Rounded.Check,
+                            contentDescription = null,
+                            tint = Accent,
+                            modifier = Modifier.size(16.dp)
+                        )
                     }
-                }
-                if (index != models.lastIndex) {
-                    HorizontalDivider(
-                        modifier = Modifier.padding(start = 38.dp),
-                        color = Line.copy(alpha = 0.6f)
-                    )
                 }
             }
         }
@@ -4504,40 +4813,65 @@ private fun StudioField(
     placeholder: String = "",
     mono: Boolean = false,
     minLines: Int = 1,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    compact: Boolean = false,
+    bottomPadding: Dp = 10.dp
 ) {
+    val interaction = remember { MutableInteractionSource() }
+    val focused by interaction.collectIsFocusedAsState()
+    val shape = RoundedCornerShape(if (compact) 10.dp else 12.dp)
+    val fontFamily = if (mono) FontFamily.Monospace else FontFamily.Default
     Column(
         modifier = modifier
             .fillMaxWidth()
-            .padding(bottom = 10.dp)
+            .padding(bottom = bottomPadding)
     ) {
-        Text(label, fontSize = 12.sp, fontWeight = FontWeight.Medium, color = Muted)
-        Spacer(Modifier.height(6.dp))
-        OutlinedTextField(
+        if (label.isNotBlank()) {
+            Text(
+                label,
+                fontSize = if (compact) 10.sp else 11.sp,
+                color = if (compact) Color(0xFF9CA3AF) else Muted
+            )
+            Spacer(Modifier.height(6.dp))
+        }
+        BasicTextField(
             value = value,
             onValueChange = onValueChange,
-            placeholder = {
-                if (placeholder.isNotBlank()) {
-                    Text(placeholder, fontSize = 13.sp, color = Color(0xFF9CA3AF))
-                }
-            },
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(min = if (compact) 38.dp else 42.dp)
+                .clip(shape)
+                .background(Color(0xFFF7F8FA))
+                .border(1.dp, if (focused) Ink.copy(alpha = 0.35f) else Line, shape)
+                .padding(
+                    horizontal = 12.dp,
+                    vertical = if (compact) 9.dp else 11.dp
+                ),
+            textStyle = TextStyle(
+                fontSize = if (compact) 12.sp else 13.sp,
+                color = Ink,
+                fontFamily = fontFamily
+            ),
+            cursorBrush = SolidColor(Ink),
+            singleLine = minLines == 1,
             minLines = minLines,
             maxLines = if (minLines > 1) 4 else 1,
-            singleLine = minLines == 1,
-            textStyle = TextStyle(
-                fontSize = 13.sp,
-                color = Ink,
-                fontFamily = if (mono) FontFamily.Monospace else FontFamily.Default
-            ),
-            shape = RoundedCornerShape(14.dp),
-            colors = OutlinedTextFieldDefaults.colors(
-                focusedBorderColor = Color.Transparent,
-                unfocusedBorderColor = Color.Transparent,
-                focusedContainerColor = Color(0xFFF7F8FA),
-                unfocusedContainerColor = Color(0xFFF7F8FA),
-                cursorColor = Ink
-            ),
-            modifier = Modifier.fillMaxWidth()
+            interactionSource = interaction,
+            decorationBox = { inner ->
+                Box {
+                    if (value.isEmpty() && placeholder.isNotBlank()) {
+                        Text(
+                            placeholder,
+                            fontSize = if (compact) 12.sp else 13.sp,
+                            color = Color(0xFF9CA3AF),
+                            fontFamily = fontFamily,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    inner()
+                }
+            }
         )
     }
 }

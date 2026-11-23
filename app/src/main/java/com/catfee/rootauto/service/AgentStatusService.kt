@@ -412,7 +412,7 @@ class AgentStatusService : Service() {
             val savedPosition = DisplaySettings.overlayPosition(this)
             val density = resources.displayMetrics.density
             val overlayWidth = minOf(
-                (320 * density).toInt(),
+                (300 * density).toInt(),
                 resources.displayMetrics.widthPixels - (32 * density).toInt()
             )
             val lp = WindowManager.LayoutParams(
