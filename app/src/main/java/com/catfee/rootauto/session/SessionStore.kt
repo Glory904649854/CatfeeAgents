@@ -354,7 +354,7 @@ object SessionStore {
         val now = System.currentTimeMillis()
         return Session(
             id = UUID.randomUUID().toString().replace("-", "").take(16),
-            title = if (mode == "agent") "New agent task" else "New chat",
+            title = if (mode == "agent") "新任务" else "新会话",
             mode = mode,
             createdAt = now,
             updatedAt = now,

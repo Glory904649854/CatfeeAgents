@@ -849,7 +849,7 @@ private fun AgentConsole(activity: ComponentActivity) {
                     showMenu = true
                 }
             )
-            current?.takeIf { !it.isEmpty }?.let { SessionLine(it) }
+            current?.let { SessionLine(it) }
 
             // 每个会话使用独立的列表实例: 切换/删除会话时旧消息和动画层立即销毁,
             // 避免旧气泡残留在新会话的空状态下面。
@@ -1624,15 +1624,13 @@ private fun SessionLine(session: Session) {
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f)
         )
-        if (!session.isEmpty) {
-            Text(
-                "${formatCount(session.totalTokens)} tok · ${formatCount(session.contextChars)} ctx" +
-                    if (session.totalDurationMs > 0) " · ${formatDuration(session.totalDurationMs)}" else "",
-                fontSize = 10.sp,
-                fontFamily = FontFamily.Monospace,
-                color = Color(0xFF9CA3AF)
-            )
-        }
+        Text(
+            "${formatCount(session.totalTokens)} tok · ${formatCount(session.contextChars)} ctx · " +
+                if (session.totalDurationMs > 0) formatDuration(session.totalDurationMs) else "00:00",
+            fontSize = 10.sp,
+            fontFamily = FontFamily.Monospace,
+            color = Color(0xFF9CA3AF)
+        )
     }
 }
 
@@ -2277,13 +2275,19 @@ private fun Composer(
     val borderAmount by animateFloatAsState(if (focused) 1f else 0f, tween(180), label = "focus")
     Surface(modifier = Modifier.fillMaxWidth(), color = Bg) {
         Column(Modifier.padding(horizontal = 14.dp, vertical = 5.dp)) {
-            Surface(
+            Row(
                 modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(28.dp),
-                color = Color.White,
-                border = BorderStroke(1.dp, lerp(Color(0xFFECEEF2), Accent.copy(alpha = 0.42f), borderAmount))
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                Column(Modifier.padding(horizontal = 8.dp, vertical = 8.dp)) {
+                AttachmentButton(onPickAttachments)
+                Surface(
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(28.dp),
+                    color = Color.White,
+                    border = BorderStroke(1.dp, lerp(Color(0xFFECEEF2), Accent.copy(alpha = 0.42f), borderAmount))
+                ) {
+                    Column(Modifier.padding(horizontal = 10.dp, vertical = 8.dp)) {
                     if (quotedText.isNotBlank()) {
                         Surface(
                             modifier = Modifier
@@ -2332,45 +2336,41 @@ private fun Composer(
                             }
                         }
                     }
-                    // 多行输入时 + / 发送按钮贴顶, 不随文本高度一起居中
-                    Row(verticalAlignment = Alignment.Top) {
-                        AttachmentButton(onPickAttachments)
-                        Spacer(Modifier.width(2.dp))
-                        BasicTextField(
-                            value = task,
-                            onValueChange = onTaskChange,
-                            modifier = Modifier
-                                .weight(1f)
-                                .heightIn(min = 40.dp, max = 120.dp)
-                                .onFocusChanged { if (it.isFocused) onFocused() },
-                            textStyle = TextStyle(fontSize = 15.sp, lineHeight = 22.sp, color = Ink),
-                            cursorBrush = SolidColor(Accent),
-                            maxLines = 4,
-                            interactionSource = focusSource,
-                            decorationBox = { inner ->
-                                Box(Modifier.padding(vertical = 9.dp)) {
-                                    if (task.isEmpty()) {
-                                        Text(
-                                            "输入消息…",
-                                            fontSize = 15.sp,
-                                            color = Color(0xFF9AA0A6),
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis
-                                        )
-                                    }
-                                    inner()
+                    BasicTextField(
+                        value = task,
+                        onValueChange = onTaskChange,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(min = 36.dp, max = 120.dp)
+                            .onFocusChanged { if (it.isFocused) onFocused() },
+                        textStyle = TextStyle(fontSize = 15.sp, lineHeight = 22.sp, color = Ink),
+                        cursorBrush = SolidColor(Accent),
+                        maxLines = 4,
+                        interactionSource = focusSource,
+                        decorationBox = { inner ->
+                            Box(Modifier.padding(vertical = 7.dp)) {
+                                if (task.isEmpty()) {
+                                    Text(
+                                        "输入消息…",
+                                        fontSize = 15.sp,
+                                        color = Color(0xFF9AA0A6),
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
                                 }
+                                inner()
                             }
-                        )
-                        Spacer(Modifier.width(4.dp))
-                        if (running) {
-                            PauseResumeButton(paused, onPauseResume)
-                            Spacer(Modifier.width(4.dp))
-                            StopButton(onStop)
-                        } else {
-                            RunButton(canSend, onSend)
                         }
+                    )
                     }
+                }
+                if (running) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        PauseResumeButton(paused, onPauseResume)
+                        StopButton(onStop)
+                    }
+                } else {
+                    RunButton(canSend, onSend)
                 }
             }
             Row(
@@ -2451,7 +2451,7 @@ private fun RunButton(enabled: Boolean, onClick: () -> Unit) {
             .size(40.dp)
             .scale(scale)
             .clip(CircleShape)
-            .background(if (enabled) Accent else Color(0xFFF1F3F4))
+            .background(if (enabled) Accent else Accent.copy(alpha = 0.22f))
             .clickable(
                 enabled = enabled,
                 interactionSource = source,
@@ -2463,7 +2463,7 @@ private fun RunButton(enabled: Boolean, onClick: () -> Unit) {
         Icon(
             Icons.Rounded.Send,
             contentDescription = "发送",
-            tint = if (enabled) Color.White else Color(0xFFB6BAC0),
+            tint = if (enabled) Color.White else Color.White.copy(alpha = 0.65f),
             modifier = Modifier.size(18.dp)
         )
     }
