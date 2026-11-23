@@ -853,7 +853,7 @@ private fun AgentConsole(activity: ComponentActivity) {
 
     ModalNavigationDrawer(
         drawerState = drawerState,
-        gesturesEnabled = drawerState.isOpen,
+        gesturesEnabled = true,
         scrimColor = Color.Black.copy(alpha = 0.20f),
         drawerContent = {
             MenuDrawer(
@@ -889,12 +889,6 @@ private fun AgentConsole(activity: ComponentActivity) {
                     }
                 },
                 onExport = { exportSession(it) },
-                onSettings = {
-                    scope.launch {
-                        drawerState.close()
-                        showSettings = true
-                    }
-                },
                 onDismiss = { scope.launch { drawerState.close() } }
             )
         }
@@ -909,6 +903,7 @@ private fun AgentConsole(activity: ComponentActivity) {
         ) {
             Header(
                 running = running,
+                onSettings = { showSettings = true },
                 onMenu = {
                     SessionManager.flush(activity)
                     scope.launch {
@@ -1565,7 +1560,7 @@ private fun BrandMark(size: Dp = 32.dp, corner: Dp = 9.dp, markSize: Dp = 20.dp)
 }
 
 @Composable
-private fun Header(running: Boolean, onMenu: () -> Unit) {
+private fun Header(running: Boolean, onSettings: () -> Unit, onMenu: () -> Unit) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -1631,6 +1626,18 @@ private fun Header(running: Boolean, onMenu: () -> Unit) {
             )
         }
         Spacer(Modifier.width(8.dp))
+        Box(
+            modifier = Modifier
+                .size(36.dp)
+                .clip(CircleShape)
+                .background(Color.White)
+                .border(1.dp, Line, CircleShape)
+                .clickable(onClick = onSettings),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(Icons.Rounded.Settings, contentDescription = "设置", tint = Ink, modifier = Modifier.size(17.dp))
+        }
+        Spacer(Modifier.width(6.dp))
         Box(
             modifier = Modifier
                 .size(36.dp)
@@ -2866,7 +2873,6 @@ private fun MenuDrawer(
     onFavorite: (SessionSummary) -> Unit,
     onArchive: (SessionSummary) -> Unit,
     onExport: (SessionSummary) -> Unit,
-    onSettings: () -> Unit,
     onDismiss: () -> Unit
 ) {
     var query by rememberSaveable { mutableStateOf("") }
@@ -2919,18 +2925,7 @@ private fun MenuDrawer(
                     fontSize = 17.sp,
                     modifier = Modifier.weight(1f)
                 )
-                // 设置固定在顶部, 会话再长也不用滚到底部找
-                Box(
-                    modifier = Modifier
-                        .size(36.dp)
-                        .clip(CircleShape)
-                        .background(Color(0xFFF1F3F5))
-                        .clickable(onClick = onSettings),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(Icons.Rounded.Settings, "设置", tint = Ink, modifier = Modifier.size(17.dp))
-                }
-                Spacer(Modifier.width(6.dp))
+                // 设置入口保留在首页标题栏, 抽屉只负责会话切换。
                 Box(
                     modifier = Modifier
                         .size(36.dp)
